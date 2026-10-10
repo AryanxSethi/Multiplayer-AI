@@ -8,13 +8,18 @@ import json
 
 import pytest
 
-from desktop_app.cookbook import (CATALOG_VERSION, LIKELY, NOT_RECOMMENDED,
-                                  POSSIBLE, UNKNOWN, VERIFIED, CatalogError,
+from dataclasses import replace
+
+from desktop_app.cookbook import (CATALOG_VERSION, LIKELY, NOT_ENOUGH_PUBLISHED,
+                                  NOT_RECOMMENDED, NO_CATALOGUE,
+                                  NO_MODELS_FOR_TASK, NOTHING_FITS, POSSIBLE,
+                                  TASKS, UNKNOWN, VERIFIED, CatalogError,
                                   GpuAdapter, Model, Variant, _vram_from_registry,
-                                  classify, detect_hardware, estimate,
-                                  human_bytes, kv_cache_bytes, load_catalog,
-                                  ollama_commands, parse_catalog, parse_model,
-                                  pick_graphics_adapter, recommend, vendor_of)
+                                  classify, detect_hardware, empty_reason,
+                                  estimate, human_bytes, kv_cache_bytes,
+                                  load_catalog, ollama_commands, parse_catalog,
+                                  parse_model, pick_graphics_adapter, recommend,
+                                  vendor_of)
 
 
 def device(total_gb=32, available_gb=24, vram=None, disk_gb=100, cores=16):
@@ -831,3 +836,81 @@ def test_the_catalogue_file_is_bundled_where_the_build_already_looks():
         f"the catalogue is at {cookbook.CATALOG_PATH}, outside the bundled assets tree")
     assert cookbook.CATALOG_PATH.is_file()
     json.loads(cookbook.CATALOG_PATH.read_text(encoding="utf-8"))
+
+
+def test_an_empty_list_says_which_of_the_four_reasons_it_is():
+    """recommend returns [] for four unrelated things and one sentence is not enough.
+
+    Choosing *Image understanding* used to say "Nothing in the catalogue fits
+    this device" while all four models in the catalogue fit comfortably --
+    none of them is simply tagged ``vision``. A gap in a four-model catalogue
+    was being reported as a verdict on the reader's hardware, and came with
+    advice about freeing memory that had nothing to do with the problem.
+
+    Deciding which of the four it is, in the module that holds no Qt, is what
+    makes it testable at all.
+    """
+    catalog = load_catalog()
+    generous = device(total_gb=64, available_gb=60, vram=24 * 1024 ** 3)
+
+    # 1. Nothing loaded at all.
+    reason = empty_reason([], generous)
+    assert reason.kind == NO_CATALOGUE
+    assert "could not be loaded" in reason.detail
+    assert "fits this device" not in reason.heading, (
+        "an unreadable catalogue is not a statement about the hardware")
+
+    # 2. The filter matches nothing in the catalogue. This is the case that
+    #    used to blame the hardware, and it is not a gap the reader can fill.
+    reason = empty_reason(catalog, generous, task="vision")
+    assert reason.kind == NO_MODELS_FOR_TASK, (
+        f"a task nobody is tagged for was reported as {reason.kind}")
+    assert "fits this device" not in reason.heading
+    assert "not a limit on this device" in reason.detail, (
+        f"the gap is not named as a gap: {reason.detail!r}")
+    assert reason.can_widen is True, (
+        "the reader can widen the filter, and is not offered the chance")
+
+    # 3. Real models that really are too big. This is the only case that may
+    #    say the device is the limit, and it has to quantify it. 0.4GiB of
+    #    available memory, because 1GiB is enough for the smallest model and
+    #    would not be an empty list at all.
+    tiny = device(total_gb=2, available_gb=0.4, vram=None)
+    assert not recommend(catalog, tiny), (
+        "this fixture needs the list to be empty to be testing anything")
+    reason = empty_reason(catalog, tiny)
+    assert reason.kind == NOTHING_FITS, f"got {reason.kind}: {reason.heading!r}"
+    assert "fits this device" in reason.heading
+    assert human_bytes(tiny.budget()) in reason.detail, (
+        f"the reader is not told what they have to work with: {reason.detail!r}")
+    assert reason.can_widen is False, (
+        "nothing about the filter will make a model fit")
+
+
+def test_an_empty_list_never_blames_the_hardware_without_evidence():
+    """Only a measured comparison may say a device is the limit.
+
+    Every other reason is about the catalogue or about what the app cannot
+    see, and reporting those as a hardware verdict is the failure being
+    guarded against here.
+    """
+    catalog = load_catalog()
+    generous = device(total_gb=256, available_gb=250, vram=80 * 1024 ** 3)
+    blind = device(total_gb=0, available_gb=0, vram=None)
+
+    for task in list(TASKS) + [None]:
+        for hardware in (generous, blind):
+            reason = empty_reason(catalog, hardware, task=task)
+            assert reason.kind in (NO_CATALOGUE, NO_MODELS_FOR_TASK,
+                                   NOTHING_FITS, NOT_ENOUGH_PUBLISHED)
+            if reason.kind == NOTHING_FITS:
+                assert "fits this device" in reason.heading
+                assert human_bytes(hardware.budget()) in reason.detail
+            elif "fits this device" in reason.heading:
+                # Allowed only unfiltered, where it is the whole point, and
+                # never with a filter that narrowed the list.
+                assert task is None, (
+                    f"task {task!r} reported nothing fitting this device: "
+                    f"{reason.heading!r}")
+            assert reason.heading and reason.detail, (
+                f"{reason.kind} has an empty sentence")

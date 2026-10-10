@@ -872,6 +872,150 @@ def recommend(catalog, hardware, task=None, context=DEFAULT_CONTEXT, limit=None,
     return rows[:limit] if limit else rows
 
 
+# Why a list came back empty, when the four causes call for four different
+# sentences and only one of them is about the reader's hardware.
+NO_CATALOGUE = "no_catalogue"
+NO_MODELS_FOR_TASK = "no_models_for_task"
+NOTHING_FITS = "nothing_fits"
+NOT_ENOUGH_PUBLISHED = "not_enough_published"
+
+
+@dataclass(frozen=True)
+class EmptyList:
+    """Why there is nothing to show, in terms the page can act on.
+
+    ``can_widen`` is true when the reader can do something about it here and
+    now -- narrow the filter back off -- as opposed to a gap in the catalogue
+    or a device with nothing that fits, which no button on this page can fix.
+
+    Attributes:
+        kind: One of the four constants above.
+        heading: The sentence a person reads first.
+        detail: Why, and what to do about it.
+        task: The filter that produced this, or ``None`` for everything.
+        tagged: How many models in the catalogue carry the chosen task, which
+            is the number that separates "nothing is tagged" from "nothing fits".
+        considered: How many models were looked at at all.
+    """
+
+    kind: str = NO_CATALOGUE
+    heading: str = "No models are available to check."
+    detail: str = "The catalogue could not be loaded."
+    task: str | None = None
+    tagged: int = 0
+    considered: int = 0
+    can_widen: bool = False
+
+
+def empty_reason(catalog, hardware, task=None, context=DEFAULT_CONTEXT):
+    """Say why there is nothing to show, without guessing between the causes.
+
+    :func:`recommend` returns an empty list for four unrelated situations, and
+    every one of them used to be reported as "Nothing in the catalogue fits
+    this device". Choosing *Image understanding* produced exactly that line
+    while all four models in the catalogue fit comfortably -- none of them is
+    simply tagged ``vision``. A gap in a four-model catalogue was being
+    reported as a verdict on the reader's hardware, and the advice that came
+    with it ("try a smaller build, free some memory") had nothing to do with
+    the problem.
+
+    Working it out here, with no Qt, means the sentence is decided in one
+    place and can be tested without a window.
+    """
+    if not catalog:
+        return EmptyList(
+            kind=NO_CATALOGUE,
+            heading="No models are available to check.",
+            detail=("The catalogue could not be loaded, so there is nothing "
+                     "to size against this device. Restoring the app's own "
+                     "copy, or refreshing from the catalogue host, will put "
+                     "it back."))
+
+    titled = TASKS.get(task, task)
+    tagged = [model for model in catalog if not task or task in model.tasks]
+    if task and not tagged:
+        return EmptyList(
+            kind=NO_MODELS_FOR_TASK,
+            heading=f"The catalogue has nothing for {titled.lower()}.",
+            detail=(f"None of the {len(catalog)} models in it are listed as "
+                    f"being for {titled.lower()}. That is a gap in the "
+                    "catalogue, not a limit on this device -- the models it "
+                    "does hold may well fit."),
+            task=task, tagged=0, considered=len(catalog),
+            # Worth widening: the models the reader came for are not in here,
+            # but the ones that are may be exactly what their machine can hold.
+            can_widen=True)
+
+    considered = [model for model in tagged if not model.deprecated]
+    if not considered:
+        return EmptyList(
+            kind=NOT_ENOUGH_PUBLISHED,
+            heading=f"Every {titled.lower()} model here has been withdrawn.",
+            detail=("Nothing is left to recommend for this, and a withdrawn "
+                    "model is not one to download. Refresh to read whether a "
+                    "publisher has replaced it."),
+            task=task, tagged=len(tagged), considered=0)
+
+    budget = hardware.budget()
+    if not hardware.memory_total:
+        return EmptyList(
+            kind=NOT_ENOUGH_PUBLISHED,
+            heading="This device's memory could not be read.",
+            detail=("With no memory figure there is nothing to size a model "
+                    "against, so no model is being recommended either way. "
+                    "This is a gap in what the app can see, not a judgement "
+                    "about what your machine can run."),
+            task=task, tagged=len(tagged), considered=len(considered))
+
+    sizes = []
+    for model in considered:
+        # The smallest build that can be costed at all, not the one that would
+        # be recommended. best_variant returns None precisely when nothing
+        # fits, so asking it here would answer "nothing fits" by reporting that
+        # nothing fits -- and the device would be blamed for the catalogue
+        # having been measured the same way as itself.
+        for variant in sorted(model.variants, key=lambda item: item.size or 0):
+            figures = estimate(model, variant, hardware, context)
+            if figures:
+                sizes.append(figures["total"])
+                break
+
+    if not sizes:
+        return EmptyList(
+            kind=NOT_ENOUGH_PUBLISHED,
+            heading="Not enough is published to size these.",
+            detail=("Nothing here has both a downloadable build and a "
+                    "published shape, so no memory figure can be worked out. "
+                    "That is missing information, not a verdict on the "
+                    "device."),
+            task=task, tagged=len(tagged), considered=len(considered))
+
+    smallest = min(sizes)
+    if smallest > budget:
+        return EmptyList(
+            kind=NOTHING_FITS,
+            heading="Nothing in the catalogue fits this device."
+                    if not task else
+                    f"None of the {titled.lower()} models fit this device.",
+            detail=(f"The smallest needs about {human_bytes(smallest)} and this "
+                    f"device has {human_bytes(budget)} of system memory to "
+                    "give. Try a smaller build, free some memory, or add a "
+                    "graphics card with more of its own."),
+            task=task, tagged=len(tagged), considered=len(considered))
+
+    # Every model was ruled out without being measured: it either fit and was
+    # rated down for another reason, or could not be sized. Neither is the
+    # hardware being too small, so neither may be reported as though it were.
+    return EmptyList(
+        kind=NOT_ENOUGH_PUBLISHED,
+        heading=f"Nothing here is recommended for {titled.lower()}."
+                if task else "Nothing here is recommended for this device.",
+        detail=("These models were considered and none was put forward. A "
+                "refresh may bring a newer build that fits better."),
+        task=task, tagged=len(tagged), considered=len(considered),
+        can_widen=bool(task))
+
+
 def ollama_commands(model, variant):
     """Commands that fetch and run one artifact, built from real identifiers.
 

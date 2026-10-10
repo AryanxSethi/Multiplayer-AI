@@ -16,10 +16,11 @@ pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page te
 pytest.importorskip("psutil", reason="psutil backs hardware detection")
 
 from PySide6.QtCore import QEvent, Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLabel, QScrollArea  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
-from desktop_app.cookbook import human_bytes, load_catalog, pick_graphics_adapter  # noqa: E402
+from desktop_app.cookbook import (human_bytes, load_catalog,  # noqa: E402
+                                 pick_graphics_adapter, recommend)
 from desktop_app.storage import Storage  # noqa: E402
 from desktop_app.theme import DARK, LIGHT, MIKU, stylesheet  # noqa: E402
 from tests.test_desktop_runtime import MemoryVault  # noqa: E402
@@ -867,6 +868,110 @@ def test_a_saved_mirror_is_shown_on_the_page(window) -> None:
         "the page does not show the mirror it is about to use")
     assert panel.mirror_box.isVisible(), (
         "the mirror row is hidden while a mirror is set")
+
+
+def test_a_filter_with_no_models_says_it_is_the_catalogue_not_the_hardware(window) -> None:
+    """Choosing Image understanding must not tell somebody their PC is too small.
+
+    It did. All four models in the catalogue fit this machine comfortably; none
+    of them is simply tagged ``vision``. The page reported that as "Nothing in
+    the catalogue fits this device" and suggested freeing memory, which is a
+    confident statement about somebody's hardware standing in for a gap in a
+    four-model catalogue.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    index = panel.task_picker.findData("vision")
+    assert index >= 0, "there is no image filter to test"
+    # The premise, checked rather than assumed: these models do fit this
+    # device, and they are simply not tagged for the filter.
+    assert recommend(panel.catalog, panel.hardware), (
+        "the catalogue fits nothing here, so the gap is not being exercised")
+
+    panel.task_picker.setCurrentIndex(index)
+    settle()
+    said = text_of(panel)
+
+    assert "fits this device" not in said, (
+        f"a catalogue gap was reported as a hardware limit: {said[-260:]!r}")
+    assert "gap in the catalogue" in said, (
+        f"the real cause is not named: {said[-260:]!r}")
+    assert "none of the" in said.lower(), (
+        f"it does not say that nothing is tagged for this: {said[-260:]!r}")
+    # And the advice has to match the cause: no memory-freed nonsense here.
+    for irrelevant in ("free some memory", "smaller build"):
+        assert irrelevant not in said.lower(), (
+            f"{irrelevant!r} is advice for a hardware limit, not a catalogue gap")
+
+
+def test_an_empty_filter_offers_a_way_back_to_the_models_that_are_there(window) -> None:
+    """A gap the reader cannot fill is still worth widening away from.
+
+    The models they came for are not in the catalogue, but the ones that are
+    may be exactly what their machine can hold -- so there has to be a button
+    that takes the filter off, not just an explanation.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    panel.task_picker.setCurrentIndex(panel.task_picker.findData("vision"))
+    settle()
+
+    buttons = [button.text() for button in panel.findChildren(QPushButton)
+               if button.isVisible()]
+    assert any("every model" in text.lower() for text in buttons), (
+        f"nothing here can undo the filter: {buttons}")
+
+    for button in panel.findChildren(QPushButton):
+        if button.isVisible() and "every model" in button.text().lower():
+            button.click()
+            break
+    settle()
+
+    assert panel.task_picker.currentData() is None, (
+        f"the filter is still {panel.task_picker.currentText()!r}")
+    cards = cards_on_page(panel)
+    assert len(cards) >= 4, (
+        f"widening the filter left {len(cards)} models, so it does not recover "
+        "the list it was hiding")
+
+
+def test_a_device_that_really_is_too_small_is_told_so_with_the_figures(window) -> None:
+    """When the hardware genuinely is the limit, the page says so -- and shows why.
+
+    The opposite error to the one above: having stopped blaming the machine for
+    a catalogue gap, it would be just as wrong to stop telling somebody whose
+    machine really is too small. The figure is what makes it checkable.
+    """
+    from desktop_app.cookbook import Hardware
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    starved = Hardware(platform="Linux 6.1", architecture="x86_64", cpu_cores=4,
+                       memory_total=2 * 1024 ** 3, memory_available=int(0.4 * 1024 ** 3),
+                       disk_free=50 * 1024 ** 3, vram=None, unified_memory=False,
+                       sources={})
+    panel.hardware = starved
+    # Re-rendered explicitly: the filter is already on Everything, so setting
+    # it to Everything raises no change and would leave the previous -- and
+    # entirely healthy -- list on screen.
+    panel.render_models()
+    settle()
+
+    said = text_of(panel)
+    assert "fits this device" in said, (
+        f"a device with 0.4GiB free was not told the truth: {said[-260:]!r}")
+    assert human_bytes(starved.budget()) in said, (
+        f"the reader is not shown what they have to work with: {said[-260:]!r}")
+    # This one is worth widening out of, so the button must not be offered as
+    # though it were the fix for a catalogue gap.
+    buttons = [button.text() for button in panel.findChildren(QPushButton)
+               if button.isVisible()]
+    assert not any("every model" in text.lower() for text in buttons), (
+        f"widening the filter is offered for a device limit: {buttons}")
 
 
 def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(window) -> None:

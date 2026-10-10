@@ -22,8 +22,9 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
 
-from .cookbook import (EXPLANATIONS, PREVIOUS_NAME, CatalogError, TASKS,
-                       describe_changes, detect_hardware, human_bytes,
+from .cookbook import (EXPLANATIONS, NOT_ENOUGH_PUBLISHED, NO_CATALOGUE,
+                       PREVIOUS_NAME, CatalogError, TASKS, describe_changes,
+                       detect_hardware, empty_reason, human_bytes,
                        kv_cache_bytes, load_cache, load_catalog,
                        ollama_commands, parse_model, recommend,
                        rollback_catalog, save_catalog)
@@ -480,19 +481,45 @@ class CookbookPanel(QWidget):
         return card
 
     def _empty_card(self):
-        # Nothing at all to show. Which sentence is true depends on why, and
-        # "nothing fits this device" over a catalogue that has withdrawn
-        # everything would be a confident falsehood about somebody's
-        # hardware.
+        """Draw the one card that says there is nothing, saying which nothing.
+
+        ``recommend`` returns an empty list for four unrelated reasons and the
+        page used to report all of them as "Nothing in the catalogue fits this
+        device". Choosing *Image understanding* produced exactly that line
+        while all four models in the catalogue fit comfortably -- none of them
+        is simply tagged ``vision``. A gap in a four-model catalogue was being
+        reported as a verdict on the reader's hardware, with advice about
+        freeing memory that had nothing to do with the problem.
+
+        So the reason is worked out where there are no widgets, and drawn as
+        itself. A filter that hid the list offers its way back, because that is
+        the one case where the reader can do something about it right now.
+        """
+        reason = empty_reason(self.catalog, self.hardware,
+                              task=self.task_picker.currentData())
         card, column = self._card()
-        column.addWidget(label(
-            "Nothing in the catalogue fits this device." if self.catalog
-            else "No models are available to check.", "heading"))
-        column.addWidget(label(
-            "Try a smaller build, free some memory, or refresh the "
-            "catalogue if a newer one is out." if self.catalog
-            else "The catalogue could not be loaded.", "muted", True))
+        column.addWidget(label(reason.heading, "heading", True))
+        detail = label(reason.detail, "muted", True)
+        detail.setWordWrap(True)
+        column.addWidget(detail)
+
+        if reason.can_widen:
+            column.addSpacing(4)
+            column.addWidget(action("Show every model", self.show_everything,
+                                    name="ghost"))
+        elif reason.kind in (NO_CATALOGUE, NOT_ENOUGH_PUBLISHED):
+            column.addSpacing(4)
+            column.addWidget(action(
+                f"Refresh from {self.host_name()}", self.do_refresh,
+                name="ghost"))
         self.results.addWidget(card)
+
+    def show_everything(self):
+        """Put the filter back to Everything, which is where models are."""
+        index = self.task_picker.findData(None)
+        if index >= 0:
+            self.task_picker.setCurrentIndex(index)
+        self.render_models()
 
     def _model_card(self, row):
         model, variant, verdict = row["model"], row["variant"], row["verdict"]
