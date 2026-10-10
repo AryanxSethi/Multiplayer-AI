@@ -2063,7 +2063,110 @@ def test_a_card_message_follows_a_theme_change(window) -> None:
     assert color(DARK, "error") not in line.message.styleSheet()
 
 
-def test_the_invite_card_is_on_the_workspaces_page(window) -> None:
+def test_a_member_is_offered_a_way_out_of_the_workspace_it_is_in(window, monkeypatch) -> None:
+    """A device joined to someone else's workspace could not leave it.
+
+    Leaving worked, and was tested, and was reachable only through Workspace
+    settings: a danger button in a dialog whose wording led with the loss of
+    saved messages. So on the page that shows which workspace you are in, the
+    only visible route out was one an invitation recipient had no reason to go
+    looking for. It belongs beside the invitation, and only when there is
+    somewhere to leave, since a device that owns its workspace has nothing to
+    leave.
+    """
+    window.ready = True
+    window.navigate(win.WORKSPACES_PAGE)
+    window.render_workspace_page()
+    assert window.workspace_leave_button.isHidden(), (
+        "leaving is offered on a workspace this device owns, where there is nothing to leave")
+
+    window.remote = True
+    window.render_workspace_page()
+    assert not window.workspace_leave_button.isHidden(), (
+        "a member of someone else's workspace has no way off this page")
+    assert window.workspace_leave_button.text() == "Leave workspace"
+    assert window.workspace_leave_button.toolTip(), "the leave button has no tooltip"
+    assert window.workspace_leave_button.toolTip() != window.workspace_leave_button.text()
+    assert window.workspace_leave_button.isEnabled(), "leaving cannot be started while the runtime is up"
+
+    asked = []
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: asked.append(args[2])
+                        or int(win.QMessageBox.StandardButton.Yes))
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, kwargs))
+
+    window.workspace_leave_button.click()
+
+    assert asked, "leaving happened without asking, which cannot be undone"
+    assert [name for name, _ in sent] == ["delete_workspace"], (
+        f"leaving did not reach the runtime: {sent!r}")
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.remote = False
+    window.render_workspace_page()
+    assert window.workspace_leave_button.isHidden(), (
+        "the button is still there after leaving")
+
+
+def test_leaving_asks_before_it_acts_and_says_when_the_host_refuses(window, monkeypatch) -> None:
+    """Both halves of a destructive answer, which is what the button is for.
+
+    Answering no must do nothing at all, and a host that will not release the
+    device must not leave the button dead on a page with no line saying why.
+    That second half is the one that loses people: the control stops working,
+    nothing says the host refused, and it reads as though leaving is simply
+    unavailable.
+    """
+    window.ready = True
+    window.remote = True
+    window.navigate(win.WORKSPACES_PAGE)
+    window.render_workspace_page()
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, kwargs))
+
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Cancel))
+    window.leave_workspace()
+    assert not sent, f"answering no still left the workspace: {sent!r}"
+
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Yes))
+    window.leave_workspace()
+    assert [name for name, _ in sent] == ["delete_workspace"]
+    assert not window.workspace_leave_button.isEnabled(), (
+        "the button stayed live while the request was in flight, so it could be pressed twice")
+
+    sent[0][1]["failure"]("The host could not remove this membership.")
+    assert window.workspace_leave_button.isEnabled(), (
+        "the button stayed dead after the host refused, with nothing saying why")
+
+
+def test_the_join_card_explains_itself_while_another_workspace_is_joined(window) -> None:
+    """One invitation at a time, and the page says so instead of going quiet.
+
+    The button simply stopped working when a second join was refused. A
+    disabled control with no reason is the same failure this file's other tests
+    describe: the user cannot tell a decision from a fault, and the obvious
+    next move is to conclude the app is broken. The card names the workspace to
+    be left and points at the control that does it.
+    """
+    window.ready = True
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.navigate(win.WORKSPACES_PAGE)
+    window.set_card_message(window.workspace_join_line, "")
+
+    assert window.workspace_join_button.isEnabled(), (
+        "joining is refused before any workspace has been joined")
+
+    joined = {"id": "workspace-abc", "name": "Alex's studio", "kind": "remote", "url": "wss://studio.example/connect"}
+    window.workspace_list = [{"id": "local", "name": "My workspace", "kind": "local"}, joined]
+    window.render_workspace_page()
+
+    assert not window.workspace_join_button.isEnabled(), (
+        "a second workspace can be joined while one is already joined")
+    line = window.card_lines["workspace:join"].message.text()
+    assert "Alex's studio" in line, f"the line does not say which workspace to leave: {line!r}"
+    assert "Leave" in line, f"the line does not say how to leave: {line!r}"
     """Inviting a device belongs on the page, beside what it is for."""
     window.ready = True
     window.navigate(win.WORKSPACES_PAGE)

@@ -3227,7 +3227,24 @@ class MainWindow(QMainWindow):
         column.addWidget(self.workspace_members_label)
         column.addSpacing(10)
         self.workspace_invite_button = action("Invite a device", self.invite_device)
-        column.addWidget(self.workspace_invite_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.workspace_invite_button.setToolTip(
+            "Create an invitation another device can use to join this workspace")
+        # Leaving lives here, on the page, rather than only behind Workspace
+        # settings. It was there and worked, but a member looking at this card
+        # had no way out and no sign that one existed: the only way to find it
+        # was a danger button in a dialog whose wording led with the loss of
+        # saved history. Next to the invitation it says what it does, and it is
+        # shown only when there is somewhere to leave to.
+        self.workspace_leave_button = action("Leave workspace", self.leave_workspace, name="danger")
+        self.workspace_leave_button.setToolTip(
+            "Stop being a member of this workspace and remove it from this device")
+        self.workspace_leave_button.hide()
+        current_actions = QHBoxLayout()
+        current_actions.setSpacing(10)
+        current_actions.addWidget(self.workspace_invite_button)
+        current_actions.addWidget(self.workspace_leave_button)
+        current_actions.addStretch()
+        column.addLayout(current_actions)
         layout.addWidget(current)
 
         # The invitation generator, on the page rather than in a dialog.
@@ -3415,6 +3432,8 @@ class MainWindow(QMainWindow):
             summary += " · joined from another device"
         self.workspace_members_label.setText(summary)
         self.workspace_invite_button.setEnabled(self.ready and not self.remote)
+        self.workspace_leave_button.setVisible(self.remote)
+        self.workspace_leave_button.setEnabled(self.ready)
         self.workspace_invite_create_button.setEnabled(
             self.ready and bool(self.workspace_invite_name.text().strip())
             and not self.workspace_busy["invite"])
@@ -3429,8 +3448,20 @@ class MainWindow(QMainWindow):
         # 30 seconds. The poll used to re-enable this within three, so a join
         # could be submitted twice and the second attempt's failure could land
         # on top of the first attempt's success.
+        #
+        # One shared workspace at a time, so this is refused while this device
+        # is a member of another one. The line says which and why rather than
+        # leaving a greyed button to be puzzled at: a control that is off with
+        # no reason reads as broken, and this one is off for a decision the
+        # reader can go and reverse.
+        joined = next((entry["name"] for entry in self.workspace_list
+                    if entry.get("kind") == "remote"), None)
         self.workspace_join_button.setEnabled(
-            self.ready and not self.workspace_busy["join"])
+            self.ready and not self.workspace_busy["join"] and not joined)
+        if joined:
+            self.set_card_message(
+                self.workspace_join_line,
+                f"You are in '{joined}'. Leave it from the card above before joining another.")
         # The relay's port is not known when this card is built, so the
         # address it generated first carried port 0 and the invitation would
         # have advertised it. Harmless to repeat here: a typed address is
@@ -3675,6 +3706,46 @@ class MainWindow(QMainWindow):
     def add_workspace(self):
         """The rail's plus goes to the page, where both routes are offered."""
         self.navigate(WORKSPACES_PAGE)
+
+    def leave_workspace(self):
+        """Leave a workspace this device joined, from the page that shows it.
+
+        The same ``delete_workspace`` the Workspace dialog uses, asked with
+        different words. That wording is the whole difference and it matters:
+        the dialog leads with the loss of saved history, which is true, and
+        reads to somebody trying to get out of a workspace they were added to
+        as though the cost of leaving were the messages. The messages do go,
+        so this says so, but after saying what is about to happen to the
+        membership rather than before.
+
+        The host is told first and this device's copy goes only once it has
+        agreed, so the row does not come back on the next poll.
+        """
+        if not self.ready or not self.remote:
+            return
+        title = self.workspace_label.text() or "this workspace"
+        message = (f"Leave '{title}'? The host will remove this device, so you will no "
+                   f"longer be a member and will not see its conversations.\n\n"
+                   f"Saved messages for this workspace are also deleted from this "
+                   f"device. If the host is offline, only this device forgets it.")
+        if not self.answered_yes(QMessageBox.question(
+                self, "Leave workspace", message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)):
+            return
+        self.workspace_leave_button.setEnabled(False)
+
+        def failed(reason):
+            # Put the button back rather than leaving a control that cannot be
+            # pressed and no line saying why. The host refusing is the likely
+            # case: it may be gone, or it may never have granted this device.
+            self.workspace_leave_button.setEnabled(True)
+            self.notice(reason, error=True)
+
+        def done(result):
+            self.notice(f"You have left '{title}'.")
+
+        self.command("delete_workspace", success=done, failure=failed)
 
     def manage_workspace(self):
         from .workspace_dialog import WorkspaceDialog

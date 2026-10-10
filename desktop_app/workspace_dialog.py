@@ -88,7 +88,7 @@ class WorkspaceDialog(QDialog):
         self.window.command("remove_member", identity, success=lambda result: self.refresh(), failure=self.error.setText)
 
     def delete(self):
-        message = ("Leave this workspace and delete its saved history on this device? If the host is offline, the invitation will only be forgotten on this device." if self.window.remote else
+        message = ("Leave this workspace? The host will remove this device, and the conversations saved for it here are deleted from this device. If the host is offline, the invitation is only forgotten here." if self.window.remote else
                    "Delete this workspace and its saved conversations on this device? All members will be disconnected.")
         if QMessageBox.question(self, "Leave workspace" if self.window.remote else "Delete workspace", message,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:

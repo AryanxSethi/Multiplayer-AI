@@ -328,6 +328,93 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(remote_id, {entry["id"] for entry in self.guest.catalog["workspaces"]})
         self.assertIn("guest", self.host.credentials)
 
+    async def test_the_leave_endpoint_answers_every_way_it_can_be_called(self):
+        """Every branch of leaving, including the two that say no.
+
+        The desktop already covers the successful leave from its own side, but
+        it decides that by the local catalogue, so it never sees what the relay
+        answered. Nothing here asserted the relay's half: the owner's refusal
+        is the branch that stops a host deleting itself, and an operator-managed
+        relay is a deployment this app explicitly supports, so both are worth
+        pinning to the status a caller can actually branch on.
+        """
+        import httpx
+        invitation = await self.host.invite("guest", self.host.active_url)
+        await self.guest_join(invitation)
+        headers = {"Authorization": "Bearer " + invitation["token"]}
+        base = f"http://127.0.0.1:{self.host.engine.port}"
+        async with httpx.AsyncClient(timeout=10) as client:
+            # 200, and the host really drops the member.
+            response = await client.post(base + "/workspace/leave", headers=headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"status": "left"})
+            self.assertNotIn("guest", self.host.credentials)
+
+            # 401 with no credentials at all.
+            response = await client.post(base + "/workspace/leave")
+            self.assertEqual(response.status_code, 401)
+
+            # 403 for the owner. The owner holds the same token shape, so this
+            # is the only thing standing between a host and removing itself.
+            owner_headers = {"Authorization": "Bearer " + self.host.engine.active_token}
+            response = await client.post(base + "/workspace/leave", headers=owner_headers)
+            self.assertEqual(response.status_code, 403)
+            self.assertIn("owner", response.json()["error"].lower())
+
+            # 501 when the relay's operator manages membership itself.
+            self.host.app.state.relay.member_remover = None
+            again = await self.host.invite("second", self.host.active_url)
+            second_headers = {"Authorization": "Bearer " + again["token"]}
+            response = await client.post(base + "/workspace/leave", headers=second_headers)
+            self.assertEqual(response.status_code, 501)
+
+    async def test_a_second_workspace_is_refused_until_the_first_is_left(self):
+        """One invitation at a time, and leaving is what releases the next.
+
+        Two hosts would each be told this device's token is valid while neither
+        had approved the other's members, so the second is refused with the
+        name of the one to leave. Rejoining the workspace already joined is
+        exempt, and that exemption is load-bearing rather than a nicety: the
+        poll re-issues the same join to recover a dropped socket, and refusing
+        it would strand the device in a workspace it could never re-enter.
+        """
+        first = await self.host.invite("guest", self.host.active_url)
+        await self.guest_join(first)
+        joined = [entry for entry in self.guest.catalog["workspaces"] if entry["kind"] == "remote"]
+        self.assertEqual([entry["url"] for entry in joined], [first["url"]])
+
+        # The same invitation again, which is what reconnection does.
+        await self.guest.join(first["url"], first["token"])
+        self.assertEqual([entry["url"] for entry in self.guest.catalog["workspaces"]
+                          if entry["kind"] == "remote"], [first["url"]])
+
+        # A different host, refused, and refusing leaves the first intact.
+        other = DesktopRuntime(Storage(Path(self.directory.name) / "other", MemoryVault()),
+                               lambda event, data: None)
+        await other.start()
+        try:
+            second = await other.invite("guest", other.active_url)
+            with self.assertRaisesRegex(ValueError, "Leave that workspace"):
+                await self.guest.join(second["url"], second["token"])
+        finally:
+            await other.close()
+        self.assertTrue(self.guest.remote)
+        self.assertEqual([entry["url"] for entry in self.guest.catalog["workspaces"]
+                          if entry["kind"] == "remote"], [first["url"]])
+
+        # And after leaving, the next invitation is accepted.
+        await self.guest.delete_workspace()
+        other2 = DesktopRuntime(Storage(Path(self.directory.name) / "other2", MemoryVault()),
+                                lambda event, data: None)
+        await other2.start()
+        try:
+            third = await other2.invite("guest", other2.active_url)
+            await self.guest.join(third["url"], third["token"])
+        finally:
+            await other2.close()
+        self.assertEqual([entry["url"] for entry in self.guest.catalog["workspaces"]
+                          if entry["kind"] == "remote"], [third["url"]])
+
     async def test_legacy_remote_connection_and_provider_migrate_into_the_workspace_catalog(self):
         """Verify legacy connections and both model and search keys migrate into scoped storage."""
         invitation = await self.host.invite("legacy-guest", self.host.active_url)
