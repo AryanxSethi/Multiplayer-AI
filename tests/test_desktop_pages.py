@@ -4147,7 +4147,7 @@ def test_pages_and_titles_stay_in_step() -> None:
 
 
 def test_window_builds_every_page(window) -> None:
-    """All six pages are constructed, including the two new ones."""
+    """Every page declared in PAGES is one of the pages actually built."""
     assert len(window.nav_buttons) == len(win.PAGES)
     assert window.stack.count() == len(win.PAGES)
 

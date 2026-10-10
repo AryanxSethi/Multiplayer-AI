@@ -69,6 +69,7 @@ PAGES = (
     ("Conversations", "conversations"),
     ("Providers", "providers"),
     ("Resources", "resources"),
+    ("Cookbook", "cookbook"),
     ("Settings", "settings"),
 )
 PAGE_TITLES = tuple(f"#  {key}" for _, key in PAGES)
@@ -88,6 +89,7 @@ PAGE_HELP = {
     "conversations": "Shared conversations and the messages in them",
     "providers": "Where models come from: local, hosted, or your own endpoint",
     "resources": "Disk, memory and what this device is using",
+    "cookbook": "Which AI models this device's memory can hold, and how to run them",
     "settings": "Appearance, privacy and resetting this device's identity",
 }
 RESOURCES_PAGE = PAGE_INDEX["resources"]
@@ -100,6 +102,7 @@ AGENTS_PAGE = PAGE_INDEX["agents"]
 # focused sat on a page that was not showing.
 CONVERSATIONS_PAGE = PAGE_INDEX["conversations"]
 OVERVIEW_PAGE = PAGE_INDEX["overview"]
+COOKBOOK_PAGE = PAGE_INDEX["cookbook"]
 # The mark beside a message, and the width a grouped message is indented by
 # when it follows its own speaker's earlier message.
 SPEAKER_AVATAR = 34
@@ -324,7 +327,14 @@ class MainWindow(QMainWindow):
             button.setCheckable(True)
             button.setToolTip(PAGE_HELP[key])
             self.nav_buttons.append(button)
-            side.addWidget(button)
+            # The Cookbook's button is built here and appended above, so the
+            # nav list stays one-per-page and navigate() can check it, but it is
+            # not laid out in the rail. It is put in the top bar instead, next
+            # to the two actions somebody is most likely to take first, and it
+            # behaves identically: same icon, same help text, same selected
+            # state, same Ctrl+N.
+            if key != "cookbook":
+                side.addWidget(button)
         side.addStretch(1)
         self.connection_status = label("●  Starting your network…", "online", True)
         self.connection_status.setToolTip(
@@ -372,17 +382,15 @@ class MainWindow(QMainWindow):
             "Create an invitation that another device can use to join this workspace")
         self.add_button.setToolTip(
             "Connect a model agent to this workspace")
-        # The Cookbook is a window of its own rather than a rail entry: it is
-        # somewhere to go and look something up, not somewhere the work
-        # happens. Painted by navigation_icon like every other mark here, so it
-        # carries the same stroke as its neighbours instead of a glyph that
-        # came out of whatever font resolved.
-        self.cookbook_button = action("", self.open_cookbook, name="ghost")
-        self.cookbook_button.setIcon(navigation_icon("cookbook", color(self.theme, "text")))
-        self.cookbook_button.setToolTip(
-            "Cookbook: which AI models this device's memory can hold, and how "
-            "to run the ones that fit. Opens a separate window.")
-        self.cookbook_button.setAccessibleName("Open the Cookbook")
+        # The Cookbook's navigation button, moved here from the rail. It is the
+        # same object the rail loop built, so it checks and unchecks with the
+        # rest of them; only its position differs. Restyled because it is a
+        # 34px square beside two text buttons rather than a full-width row.
+        self.cookbook_button = self.nav_buttons[COOKBOOK_PAGE]
+        self.cookbook_button.setObjectName("ghost")
+        self.cookbook_button.setText("")
+        self.cookbook_button.setFixedSize(40, 34)
+        self.cookbook_button.setAccessibleName("Cookbook")
         self.invite_button.setEnabled(False)
         self.add_button.setEnabled(False)
         top_layout.addWidget(self.cookbook_button)
@@ -419,6 +427,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.chat_page())
         self.stack.addWidget(self.providers_page())
         self.stack.addWidget(self.resources_page())
+        self.stack.addWidget(self.cookbook_page())
         self.stack.addWidget(self.settings_page())
         body_layout.addWidget(self.stack, 1)
         shell.addWidget(body, 1)
@@ -1015,6 +1024,20 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return page
 
+    def cookbook_page(self):
+        """Which models this device's memory can hold.
+
+        The panel owns its own scroll area, because it is long enough to need
+        one and short enough that measuring it first would only delay the
+        first paint. Built once and then left alone: every page here is built
+        at start-up and re-read on demand, and a catalogue does not change
+        under the user.
+        """
+        from .cookbook_panel import CookbookPanel
+        panel = CookbookPanel(self, self.scroll_page)
+        self.cookbook_panel = panel
+        return panel
+
     def settings_page(self):
         """Appearance, motion, and where preferences live."""
         page, layout = self.scroll_page()
@@ -1310,10 +1333,6 @@ class MainWindow(QMainWindow):
             self.welcome_art.set_theme(name)
         for button, (_, key) in zip(self.nav_buttons, PAGES):
             button.setIcon(navigation_icon(key, color(name, "text")))
-        if hasattr(self, "cookbook_button"):
-            self.cookbook_button.setIcon(navigation_icon("cookbook", color(name, "text")))
-        if getattr(self, "_cookbook", None) is not None:
-            self._cookbook.set_theme(name)
         for provider, logo in self.provider_logos.items():
             logo.setPixmap(provider_pixmap(provider, name))
         if hasattr(self, "theme_picker"):
@@ -3724,22 +3743,14 @@ class MainWindow(QMainWindow):
         self.navigate(WORKSPACES_PAGE)
 
     def open_cookbook(self):
-        """Open the Cookbook, or raise the one already open.
+        """Go to the Cookbook page, the same as pressing its button.
 
-        Held on the window so a second press does not open a second window
-        with a second copy of the same list, and so the theme can be pushed
-        into it rather than the window having to poll for it.
+        Kept as a name of its own because it reads better at the two places
+        that call it, and because the top-bar button is wired to navigate
+        directly -- this is here for anything that reaches it as an action
+        rather than as navigation.
         """
-        dialog = getattr(self, "_cookbook", None)
-        if dialog is None:
-            from .cookbook_dialog import CookbookDialog
-            dialog = self._cookbook = CookbookDialog(self, self.theme)
-            dialog.finished.connect(lambda *_: setattr(self, "_cookbook", None))
-        dialog.set_theme(self.theme)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
-        return dialog
+        self.navigate(COOKBOOK_PAGE)
 
     def leave_workspace(self):
         """Leave a workspace this device joined, from the page that shows it.
@@ -3787,8 +3798,22 @@ class MainWindow(QMainWindow):
             WorkspaceDialog(self).exec()
 
     def invite_device(self):
-        if self.ready and not self.remote:
-            InviteDialog(self).exec()
+        """Go to the page's own invitation card, ready to fill in.
+
+        Mirrors add_agent(), which has done this for the model form since its
+        dialog went: navigate, then put the cursor in the first field. Opening
+        InviteDialog here was the last route to a window for a form that has a
+        home, and it meant the card on the Workspaces page -- the one carrying
+        the explanation of what an invitation is -- was not where the
+        invitation was made.
+        """
+        if not self.ready:
+            self.notice("Your network is still starting. Please wait a moment.")
+            return
+        if self.remote:
+            return
+        self.navigate(WORKSPACES_PAGE)
+        self.workspace_invite_name.setFocus()
 
     def invite_conversation(self):
         if not self.ready or self.remote or not self.selected:

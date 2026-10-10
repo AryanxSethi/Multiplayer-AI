@@ -547,6 +547,11 @@ QPushButton#workspace { background: @@workspace_btn_bg@@; border: 1px solid @@wo
     QPushButton#workspace:hover, QPushButton#workspace:checked { background: @@accent@@; border-radius: 16px; color: @@on_accent@@; }
 QPushButton#ghost { background: transparent; color: @@text_nav@@; padding: 7px 10px; border: 1px solid @@ghost_border@@; }
 QPushButton#ghost:hover { background: @@surface_hover@@; }
+/* The selected state a nav button gets, for the one navigation control that
+   lives in the top bar rather than the rail. Without it the Cookbook could be
+   the page you were on with nothing on screen saying so, which for a
+   checkable button is the whole point of making it checkable. */
+QPushButton#ghost:checked { background: @@nav_checked_bg@@; color: @@text_strong@@; }
 QPushButton#danger { background: @@danger_bg@@; color: @@error@@; }
 QLineEdit, QPlainTextEdit, QComboBox { background: @@input_bg@@; color: @@text@@; border: 1px solid @@border_strong@@; border-radius: 7px; padding: 10px; selection-background-color: @@accent@@; selection-color: @@on_accent@@; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid @@accent@@; }

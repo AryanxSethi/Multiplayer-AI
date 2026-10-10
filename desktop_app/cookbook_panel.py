@@ -1,11 +1,10 @@
 """Which models this machine can run, and what to do about the ones it can't.
 
-A dialog rather than a page in the stack. The navigation list is declarative
-and two tests hold it to the stack's length, so adding an entry there is a
-change to every page's index and a wider diff than this feature is worth. A
-window of its own is also the honest shape: the Cookbook is somewhere to go
-and look something up, not somewhere the rest of the work happens, and nothing
-else in the app should stop working while it is open.
+A page in the navigation stack rather than a window, and reached from the top
+bar rather than the rail. Both are about the same thing: it is a destination
+like any other, it scrolls and resizes with the rest of the app, and opening a
+second window for it put a form somewhere the rest of the interface could not
+reach.
 
 Everything it shows is decided by ``desktop_app.cookbook``, which holds no Qt.
 This module draws conclusions and does no arithmetic, so there is one place to
@@ -13,64 +12,59 @@ be wrong about a recommendation and it is not here.
 
 Nothing leaves the machine until Refresh is pressed. The Resources page says
 this device's readings are sent nowhere, and a Cookbook that quietly called
-Hugging Face on open would make that untrue. The only request this window
-makes is the one a person asked for by pressing the button, and the button
-says what it sends before it is pressed.
+Hugging Face on open would make that untrue. The only request this page makes
+is the one a person asked for by pressing the button, and the button says what
+it sends before it is pressed.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
-from .cookbook import (CatalogError, TASKS, classify, detect_hardware,
-                       human_bytes, load_catalog, ollama_commands, parse_model,
-                       recommend)
-from .theme import DARK, LIGHT, color, contrast_ratio
+from .cookbook import (CatalogError, TASKS, detect_hardware, human_bytes,
+                       kv_cache_bytes, load_catalog, ollama_commands,
+                       parse_model, recommend)
 from .widgets import Select, action, label
 
-WIDTH = 860
-
-# The page is tall enough for a recommendation and its reason, a few more
-# beneath it, and the button row, without scrolling on a laptop. The scroll
-# area takes over on anything shorter rather than clipping.
-HEIGHT = 760
-
+# The name of the badge beside each model, and the label style it wears.
+#
+# "errorMessage" is the Qt objectName, not the theme token: there is no
+# ``QLabel#error`` rule, so a badge given "error" matched nothing and came out
+# in the default text colour. A model this device should not run then looked
+# the same as one it should, which is the one thing a badge exists to prevent.
+# It went unnoticed in a dialog and would not in a page, where the surrounding
+# stylesheet is in reach.
 TONE = {
     "likely to run": "online",
     "verified compatible": "online",
     "possible with compromises": "muted",
-    "not recommended": "error",
+    "not recommended": "errorMessage",
     "unknown": "muted",
 }
 
 
-class CookbookDialog(QDialog):
+class CookbookPanel(QWidget):
     """A list of models sized against the machine they are being read on."""
 
-    def __init__(self, window, theme_name=DARK):
-        super().__init__(window)
+    def __init__(self, window, scroll_page):
+        super().__init__()
         self.window = window
-        self._theme = theme_name
         self._busy = False
-        self.setWindowTitle("Cookbook")
-        self.setModal(False)
-        self.setMinimumSize(WIDTH // 2, HEIGHT // 2)
-        self.resize(WIDTH, HEIGHT)
         self.setAccessibleName("Cookbook: models this device can run")
 
+        page, layout = scroll_page()
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(28, 24, 28, 20)
-        outer.setSpacing(14)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(page)
+
         outer.addWidget(label("WHICH MODELS FIT THIS MACHINE", "eyebrow"))
         outer.addWidget(label("Cookbook", "title"))
         outer.addWidget(label(
             "Sized against this device's memory. Nothing is sent anywhere "
             "unless you press Refresh.", "muted", True))
 
-        self.hardware = detect_hardware(self.window.storage.directory
-                                        if hasattr(self.window, "storage") else None)
+        self.hardware = detect_hardware(
+            window.storage.directory if hasattr(window, "storage") else None)
         card, column = self._card()
         column.addWidget(label("This device", "heading"))
         self.hardware_label = label(self.hardware.describe(), "muted", True)
@@ -99,8 +93,8 @@ class CookbookDialog(QDialog):
             "Narrow the list to one kind of work. Nothing is filtered by "
             "popularity or benchmark score, only by what fits.")
         # Everything first, and selected. Defaulting to a particular kind of
-        # work hid most of the catalogue the moment the window opened, which
-        # is the wrong first impression: someone who came to see what their
+        # work hid most of the catalogue the moment the page opened, which is
+        # the wrong first impression: someone who came to see what their
         # machine can hold is not asking about code yet.
         self.task_picker.addItem("Everything", None)
         for task, title in TASKS.items():
@@ -113,7 +107,7 @@ class CookbookDialog(QDialog):
         self.results.setSpacing(12)
         self.body = QWidget()
         self.body.setLayout(self.results)
-        outer.addWidget(self.body, 1)
+        outer.addWidget(self.body)
 
         self.refresh = action("Refresh from Hugging Face", self.do_refresh, name="ghost")
         self.refresh.setToolTip(
@@ -123,10 +117,9 @@ class CookbookDialog(QDialog):
         footer = QHBoxLayout()
         footer.addWidget(self.refresh)
         footer.addStretch()
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
-        footer.addWidget(buttons)
+        # A Close box on a page is a lie: there is nothing to close. It was
+        # there because this was a dialog, and it was the clearest sign the
+        # widget had stopped being one. Leaving the page is the rail's job.
         outer.addLayout(footer)
 
         self.load()
@@ -134,10 +127,6 @@ class CookbookDialog(QDialog):
     def _card(self):
         from .window import frame
         return frame("card")
-
-    def set_theme(self, name):
-        self._theme = name
-        self.render_models()
 
     def load(self):
         """Read the catalogue that ships with the app. Never touches the network."""
@@ -195,7 +184,7 @@ class CookbookDialog(QDialog):
         reason.setWordWrap(True)
         column.addWidget(reason)
 
-        longer = self._longer_context_warning(model, variant)
+        longer = self._longer_context_warning(model)
         if longer:
             warning = label(longer, "muted", True)
             warning.setWordWrap(True)
@@ -221,16 +210,15 @@ class CookbookDialog(QDialog):
         column.addWidget(disclaimer)
         return card
 
-    def _longer_context_warning(self, model, variant):
+    def _longer_context_warning(self, model):
         """Say what a longer conversation costs, when it would not fit.
 
         The verdict is for a 4k conversation. The model's own limit is often
-        far higher, and using it is not free: the cache grows with every
-        token, and at the full limit this model's is 1.75GiB. Stating that
-        here is the difference between a reader choosing a context length and
-        discovering one for themselves.
+        far higher, and using it is not free: the cache grows with every token,
+        and at the full limit this model's is 1.75GiB. Stating that here is the
+        difference between a reader choosing a context length and discovering
+        one for themselves.
         """
-        from .cookbook import kv_cache_bytes
         if not model.context or model.context <= 4096:
             return None
         full = kv_cache_bytes(model, model.context)
@@ -250,7 +238,7 @@ class CookbookDialog(QDialog):
 
         Deliberately not wired to a timer, an open, or a hover. The page makes
         no request on its own, so the Resources page's promise that nothing is
-        sent anywhere stays true of this window too.
+        sent anywhere stays true of this page too.
         """
         if self._busy:
             return
@@ -287,10 +275,3 @@ class CookbookDialog(QDialog):
 
         self.window.command("cookbook_refresh", model, artifacts,
                             success=done, failure=failed)
-
-
-def open_cookbook(window):
-    """Open the window, and keep it in step with the theme while it is up."""
-    dialog = CookbookDialog(window, window.theme)
-    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
-    return dialog
