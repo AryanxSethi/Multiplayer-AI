@@ -96,9 +96,10 @@ class CookbookPanel(QWidget):
         unknown = [name for name, origin in self.hardware.sources.items()
                    if origin not in ("detected", "manual")]
         self.unknown_label = label(
-            ("Not detected here: " + ", ".join(sorted(unknown)) + ". Graphics "
-             "memory needs a library this app does not have, so a machine with "
-             "a card is judged on its system memory instead.") if unknown else "",
+            ("Not detected here: " + ", ".join(sorted(unknown)) + ". Where an "
+             "adapter shares system memory instead of having its own, models "
+             "are sized against RAM, which is what the card would use anyway.")
+            if unknown else self.hardware.graphics_note(),
             "muted", True)
         self.unknown_label.setWordWrap(True)
         self.unknown_label.setVisible(bool(unknown))

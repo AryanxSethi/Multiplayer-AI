@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -145,6 +147,7 @@ class Hardware:
     vram: int | None = None
     unified_memory: bool = False
     sources: dict = field(default_factory=dict)
+    gpus: tuple = ()
 
     def budget(self):
         """Memory a model may claim, in bytes.
@@ -169,10 +172,32 @@ class Hardware:
         elif self.unified_memory:
             parts.append("unified memory")
         else:
-            parts.append("graphics memory not detected")
+            parts.append("no dedicated graphics memory")
         if self.cpu_cores:
             parts.append(f"{self.cpu_cores} cores")
         return " · ".join(parts)
+
+    def graphics_note(self):
+        """Which card the figure came from, and how it was read.
+
+        A number on its own cannot be checked, and a 4GiB figure that arrived
+        from somewhere unstated is indistinguishable from one that was invented.
+        Naming the adapter and the source is what makes the recommendation below
+        it falsifiable by whoever ends up disagreeing with it.
+        """
+        adapter = pick_graphics_adapter(self.gpus)
+        if adapter is not None:
+            return f"Graphics: {adapter.name} — {human_bytes(adapter.vram)} " \
+                   f"dedicated, {adapter.source}."
+        if self.unified_memory:
+            return "Graphics: Apple Silicon shares one memory pool with the CPU."
+        if self.gpus:
+            names = sorted({card.name for card in self.gpus if card.name})
+            verb = "shares" if len(names) == 1 else "share"
+            return (f"Graphics: {', '.join(names)} {verb} system memory rather "
+                    "than having their own, so models are sized against RAM.")
+        return ("Graphics: no adapter reported dedicated memory, so models are "
+                "sized against RAM.")
 
 
 @dataclass(frozen=True)
@@ -344,18 +369,254 @@ def bits_from_label(label):
     return float(digits)
 
 
+@dataclass(frozen=True)
+class GpuAdapter:
+    """One graphics adapter the system reported, and how much memory it has.
+
+    A machine usually has more than one: an integrated chip with no memory of
+    its own alongside a discrete card that has some. Only the second kind can
+    be given a figure, so ``vram`` is ``None`` for the first rather than 0 --
+    "shares system memory" and "has no memory" are different claims, and only
+    one of them is why a model was judged against RAM.
+
+    Attributes:
+        name: Whatever the platform called the adapter.
+        vendor: ``nvidia``, ``amd``, ``intel``, ``apple`` or ``unknown``.
+        vram: Dedicated memory in bytes, or ``None`` when it shares the system's.
+        integrated: True when the adapter has no memory of its own.
+        source: How the adapter was found, shown next to the figure.
+    """
+
+    name: str = ""
+    vendor: str = "unknown"
+    vram: int | None = None
+    integrated: bool = False
+    source: str = ""
+
+    def describe(self):
+        """One line saying what it is and how sure we are of the number."""
+        memory = (f"{human_bytes(self.vram)} dedicated"
+                  if self.vram else "shares system memory")
+        return f"{self.name} ({memory}, {self.source})" if self.name else memory
+
+
+VENDORS = (
+    ("nvidia", ("nvidia", "geforce", "quadro", "tesla", "rtx", "gtx")),
+    ("amd", ("amd", "radeon", "advanced micro devices")),
+    ("intel", ("intel", "arc", "iris", "uhd", "hd graphics")),
+    ("apple", ("apple",)),
+)
+
+
+def vendor_of(name):
+    """Which manufacturer an adapter is, read from its name.
+
+    Deliberately not a lookup table of exact model strings: those go out of
+    date weekly, and a new card reporting as "unknown" costs nothing that a
+    mis-named card would not.
+    """
+    lowered = (name or "").lower()
+    for vendor, markers in VENDORS:
+        if any(marker in lowered for marker in markers):
+            return vendor
+    return "unknown"
+
+
+def _vram_from_registry(value):
+    """Read ``HardwareInformation.qwMemorySize`` into bytes.
+
+    The value is a REG_BINARY QWORD, so it arrives big-endian. Some drivers
+    write it as a plain integer instead, and Windows reports the buffer as
+    8-byte little-endian, so the sign and magnitude are both undone by reading
+    the first eight bytes little-endian either way -- which is correct for the
+    integer case and correct for the byte case because those drivers write the
+    QWORD out little-endian too.
+
+    ``AdapterRAM`` is deliberately not used. It is a 32-bit field, so every card
+    at or above 4GiB reports exactly 4GiB, which is precisely the class of card
+    where being wrong matters.
+    """
+    if isinstance(value, (bytes, bytearray)):
+        if len(value) < 8:
+            return None
+        return int.from_bytes(bytes(value)[:8], "little", signed=True)
+    if isinstance(value, int) and value > 0:
+        return int(value)
+    return None
+
+
+def _read_windows_adapters():
+    """Every display adapter Windows has a record of.
+
+    One key per adapter under the display class, each naming the driver and
+    carrying its dedicated memory as a QWORD. This is the standard library's
+    registry module, so it is in-process and needs no elevation -- and unlike
+    WMI's ``AdapterRAM`` it is 64-bit, so an 8GiB or 24GiB card reports what it
+    actually has.
+    """
+    import winreg
+
+    class_key = (r"SYSTEM\CurrentControlSet\Control\Class"
+                 r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
+    found = []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, class_key)
+    except OSError:
+        return found
+    index = 0
+    while index < 64:
+        try:
+            key = winreg.OpenKey(root, "%04d" % index)
+        except OSError:
+            index += 1
+            continue
+        try:
+            values = {}
+            for field in ("DriverDesc", "HardwareInformation.qwMemorySize",
+                          "HardwareInformation.AdapterString"):
+                try:
+                    values[field] = winreg.QueryValueEx(key, field)[0]
+                except OSError:
+                    continue
+        finally:
+            key.Close()
+        index += 1
+        name = values.get("DriverDesc") or values.get(
+            "HardwareInformation.AdapterString")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        vram = _vram_from_registry(values.get("HardwareInformation.qwMemorySize"))
+        found.append(GpuAdapter(
+            name=name, vendor=vendor_of(name), vram=vram, integrated=vram is None,
+            source="read from the Windows display adapter registry"))
+    return found
+
+
+def _read_nvidia_adapters():
+    """Every NVIDIA adapter ``nvidia-smi`` will admit to.
+
+    NVIDIA's own tool is authoritative and cross-platform, which the registry
+    is not, so it is asked first. Bounded at three seconds: it is a local
+    driver query, and a machine where it hangs must not hang the Cookbook.
+    """
+    tool = shutil.which("nvidia-smi")
+    if not tool:
+        return []
+    arguments = [tool, "--query-gpu=name,memory.total",
+                 "--format=csv,noheader,nounits"]
+    # Suppressing the console window is done here rather than with a vendor
+    # flag: nvidia-smi rejects the /n that nvcc and friends accept, and a
+    # black rectangle flashing over the UI on every Cookbook open is worse
+    # than the question this avoids.
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        finished = subprocess.run(
+            arguments, capture_output=True, text=True, timeout=3, check=False,
+            creationflags=flags)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if finished.returncode != 0:
+        return []
+    found = []
+    for line in finished.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2 or not parts[0]:
+            continue
+        digits = "".join(ch for ch in parts[1] if ch.isdigit())
+        if not digits:
+            continue
+        found.append(GpuAdapter(
+            name=parts[0], vendor="nvidia", vram=int(digits) * 1024 ** 2,
+            integrated=False, source="read with nvidia-smi"))
+    return found
+
+
+def _read_linux_adapters():
+    """Every adapter the kernel exposes under DRM.
+
+    ``mem_info_vram_total`` is the driver-reported dedicated pool; AMD and Intel
+    both publish it, and the Intel iGPU publishes zero there, which is the
+    truthful answer rather than a failure to read.
+    """
+    import glob
+
+    found = []
+    for path in sorted(glob.glob("/sys/class/drm/card*/device/mem_info_vram_total")):
+        try:
+            total = int(Path(path).read_text().strip())
+        except (OSError, ValueError):
+            continue
+        if total <= 0:
+            continue
+        card = Path(path).parts[-4]
+        name = card
+        for label_path in (Path(path).parent / "label",):
+            try:
+                name = label_path.read_text().strip() or name
+            except OSError:
+                pass
+        found.append(GpuAdapter(
+            name=name, vendor=vendor_of(name), vram=total, integrated=False,
+            source="read from the Linux DRM driver"))
+    return found
+
+
+def detect_gpus():
+    """This device's graphics adapters, best available source first.
+
+    ``nvidia-smi`` is asked before the registry because when both can answer
+    they agree, and the vendor's own tool is the one that stays right across
+    driver updates. Whatever it finds is unioned with the platform's own list
+    rather than replacing it, so a machine with an AMD card alongside an NVIDIA
+    one is described by both instead of by whichever was faster.
+    """
+    system = platform.system()
+    groups = []
+    if system == "Windows":
+        groups = (_read_nvidia_adapters(), _read_windows_adapters())
+    elif system == "Linux":
+        groups = (_read_nvidia_adapters(), _read_linux_adapters())
+    # Merged rather than concatenated: on a machine with an NVIDIA card both
+    # sources answer for the same device, and listing it twice reads as two
+    # cards. The earlier group wins, so the vendor's own tool is the one that
+    # gets attributed.
+    merged = []
+    for group in groups:
+        for adapter in group:
+            if any(seen.name == adapter.name and seen.vram == adapter.vram
+                   for seen in merged):
+                continue
+            merged.append(adapter)
+    return merged
+
+
+def pick_graphics_adapter(adapters):
+    """The adapter a model's weights would actually load onto.
+
+    The discrete card with the most memory wins, because that is the one with
+    room to put them. An integrated chip is never the answer: it has no pool of
+    its own, so recommending against it would claim a limit that does not exist.
+    """
+    with_memory = [a for a in adapters if a.vram]
+    if not with_memory:
+        return None
+    return max(with_memory, key=lambda adapter: adapter.vram)
+
+
 def detect_hardware(disk_path=None):
     """Read this device once and describe what it can offer.
 
-    No new dependency and no subprocess. CPU model name, dedicated graphics
-    memory and Apple Silicon unified-memory sizing are all unreadable without
-    something this app deliberately does not have, so they are reported as
-    unknown rather than guessed: a wrong VRAM figure produces confident,
-    wrong recommendations, which is worse than an honest blank.
+    No new dependency. Dedicated graphics memory is read from the operating
+    system rather than guessed at, across every major vendor: ``nvidia-smi``
+    where it exists, the Windows display-adapter registry on Windows, and the
+    DRM driver interface on Linux. A machine whose only adapter is integrated
+    gets no figure at all, and is judged on system memory -- which is the
+    honest answer, because integrated memory *is* system memory.
 
-    Each measurement is recorded in ``sources`` so the interface can show
-    which figures were read and which were not, rather than presenting a row
-    of numbers that look equally solid.
+    Each measurement is recorded in ``sources`` so the interface can show which
+    figures were read and which were not, rather than presenting a row of
+    numbers that look equally solid.
     """
     sources = {}
     hardware = {
@@ -401,8 +662,27 @@ def detect_hardware(disk_path=None):
 
     unified = platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64")
     hardware["unified_memory"] = unified
-    hardware["vram"] = None
-    sources["vram"] = "not detected without a graphics library"
+
+    adapters = detect_gpus()
+    graphics = pick_graphics_adapter(adapters)
+    if unified:
+        # Apple Silicon reports no separate pool because there is not one. A
+        # figure here would be an invention, and the previous code called this
+        # a detection failure, which told a Mac owner their hardware was
+        # unreadable when it had in fact been understood correctly.
+        hardware["vram"] = None
+        sources["vram"] = "Apple Silicon shares one memory pool with the CPU"
+    elif graphics is not None:
+        hardware["vram"] = int(graphics.vram)
+        sources["vram"] = "detected"
+    elif adapters:
+        hardware["vram"] = None
+        sources["vram"] = ("integrated graphics share system memory rather "
+                           "than having their own")
+    else:
+        hardware["vram"] = None
+        sources["vram"] = "no graphics adapter reported dedicated memory"
+    hardware["gpus"] = adapters
     return Hardware(sources=sources, **hardware)
 
 
@@ -479,6 +759,13 @@ def classify(model, variant, hardware, context=DEFAULT_CONTEXT):
     total = figures["total"]
     budget = hardware.budget()
 
+    # ``budget`` is system memory and is always described as such. ``accelerator``
+    # is the fast pool the weights prefer, which is the card's own memory when
+    # there is one. They are different pools and the wording used to swap them:
+    # with graphics memory always None the two happened to be the same number,
+    # so a machine with a 4GiB card was told it had "6.7 GB of graphics memory
+    # to give". Naming the pool the figure actually came from is the whole point
+    # of attributing it.
     if hardware.vram:
         accelerator = hardware.vram
         place = "graphics memory"
@@ -489,7 +776,7 @@ def classify(model, variant, hardware, context=DEFAULT_CONTEXT):
     if total > budget:
         return {"result": NOT_RECOMMENDED,
                 "reason": (f"It needs about {human_bytes(total)} and this device has "
-                           f"{human_bytes(budget)} of {place} to give.")}
+                           f"{human_bytes(budget)} of system memory to give.")}
 
     if variant and variant.size and hardware.disk_free and variant.size > hardware.disk_free:
         return {"result": NOT_RECOMMENDED,
@@ -511,12 +798,13 @@ def classify(model, variant, hardware, context=DEFAULT_CONTEXT):
     if accelerator > budget:
         return {"result": LIKELY,
                 "reason": (f"It needs about {human_bytes(total)} and fits in this device's "
-                           f"{human_bytes(budget)} of {place}, with {human_bytes(headroom)} "
-                           f"to spare.")}
+                           f"{human_bytes(budget)} of system memory, with "
+                           f"{human_bytes(headroom)} to spare.")}
 
     return {"result": LIKELY,
-            "reason": (f"It needs about {human_bytes(total)} against {human_bytes(budget)} of "
-                       f"{place}, with {human_bytes(headroom)} to spare.")}
+            "reason": (f"It needs about {human_bytes(total)} against "
+                       f"{human_bytes(budget)} of system memory, with "
+                       f"{human_bytes(headroom)} to spare.")}
 
 
 def best_variant(model, hardware, context=DEFAULT_CONTEXT):

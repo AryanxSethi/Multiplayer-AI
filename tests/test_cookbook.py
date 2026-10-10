@@ -10,10 +10,11 @@ import pytest
 
 from desktop_app.cookbook import (CATALOG_VERSION, LIKELY, NOT_RECOMMENDED,
                                   POSSIBLE, UNKNOWN, VERIFIED, CatalogError,
-                                  Model, Variant, classify, detect_hardware,
-                                  estimate, human_bytes, kv_cache_bytes,
-                                  load_catalog, ollama_commands, parse_catalog,
-                                  parse_model, recommend)
+                                  GpuAdapter, Model, Variant, _vram_from_registry,
+                                  classify, detect_hardware, estimate,
+                                  human_bytes, kv_cache_bytes, load_catalog,
+                                  ollama_commands, parse_catalog, parse_model,
+                                  pick_graphics_adapter, recommend, vendor_of)
 
 
 def device(total_gb=32, available_gb=24, vram=None, disk_gb=100, cores=16):
@@ -464,17 +465,304 @@ def test_the_catalogue_spans_more_than_one_hardware_tier():
 def test_detection_reports_what_it_read_and_what_it_did_not():
     """A number with no provenance is a guess wearing a number's clothes.
 
-    Graphics memory cannot be read without a graphics library this app
-    deliberately does not have, so it stays None and says so. Treating that as
-    zero would hide a capable machine; filling it would invent a limit.
+    This has to hold on both kinds of machine. One with a discrete card should
+    now be given a real figure and attributed to a named adapter; one without
+    one must still end up with ``None`` and a stated reason, because treating
+    that as zero would hide a capable machine and filling it would invent a
+    limit.
+
+    The test asserts the rule rather than the outcome, so it is not a test of
+    whichever graphics card the developer happens to own.
     """
     hardware = detect_hardware()
-    assert hardware.vram is None, (
-        "a VRAM figure was invented; it must stay unknown without a graphics library")
     assert hardware.memory_total > 0, "total memory should be readable"
-    assert "not detected" in hardware.sources["vram"]
     assert hardware.sources["memory_total"] == "detected"
-    assert "graphics memory not detected" in hardware.describe()
+
+    if hardware.vram is not None:
+        assert hardware.vram > 0, "a VRAM figure of zero is an absence, not a reading"
+        assert hardware.sources["vram"] == "detected"
+        assert "graphics memory" in hardware.describe()
+        # And it is attributable: a figure with no named source is the thing
+        # this whole check exists to prevent.
+        assert hardware.gpus, "a VRAM figure arrived with no adapter behind it"
+        adapter = pick_graphics_adapter(hardware.gpus)
+        assert adapter is not None and adapter.vram == hardware.vram
+        assert adapter.source and adapter.name, (
+            f"the adapter behind {hardware.vram} is unattributed: {adapter!r}")
+    else:
+        assert hardware.sources["vram"] in (
+            "integrated graphics share system memory rather than having their own",
+            "no graphics adapter reported dedicated memory",
+            "Apple Silicon shares one memory pool with the CPU"), (
+            f"an unreadable VRAM figure must say why, not blame a missing "
+            f"library: {hardware.sources['vram']!r}")
+        assert "no dedicated graphics memory" in hardware.describe()
+
+
+def test_an_integrated_adapter_is_not_reported_as_a_card_with_no_memory():
+    """Sharing RAM is not the same as having none, and the code must tell them apart.
+
+    An integrated chip reports no dedicated pool because it does not have one.
+    Filling that gap with a zero, or listing it as the answer to "which card
+    would this model load onto", would claim a limit the hardware does not
+    impose -- and would then judge every model against an invented ceiling.
+    """
+    integrated = GpuAdapter(name="Intel(R) UHD Graphics", vendor="intel",
+                            vram=None, integrated=True, source="test")
+    discrete = GpuAdapter(name="NVIDIA GeForce RTX 3050 Ti", vendor="nvidia",
+                          vram=4 * 1024 ** 3, source="test")
+    assert pick_graphics_adapter([integrated]) is None, (
+        "an integrated adapter was chosen as though it had memory of its own")
+    assert pick_graphics_adapter([integrated, discrete]) is discrete, (
+        "the discrete card was passed over for one that has no memory of its own")
+    assert pick_graphics_adapter([]) is None
+
+
+def test_the_discrete_card_with_the_most_memory_is_the_one_that_gets_used():
+    """Two cards, and only one of them has room for a model's weights."""
+    small = GpuAdapter(name="AMD Radeon RX 7600", vendor="amd",
+                       vram=8 * 1024 ** 3, source="test")
+    large = GpuAdapter(name="NVIDIA GeForce RTX 4090", vendor="nvidia",
+                       vram=24 * 1024 ** 3, source="test")
+    assert pick_graphics_adapter([small, large]) is large
+    assert pick_graphics_adapter([large, small]) is large
+
+
+def test_every_major_manufacturer_is_recognised_from_its_card_name():
+    """AMD and Intel matter as much as NVIDIA here.
+
+    The Cookbook sizes models against graphics memory, so a machine with an
+    AMD card is exactly the machine this used to get wrong. Reading the vendor
+    off the name is what lets the interface say which card it judged against,
+    and getting it wrong would be a silent misattribution.
+    """
+    assert vendor_of("NVIDIA GeForce RTX 3050 Ti Laptop GPU") == "nvidia"
+    assert vendor_of("AMD Radeon RX 7900 XTX") == "amd"
+    assert vendor_of("Intel(R) Arc A770 Graphics") == "intel"
+    assert vendor_of("Intel(R) UHD Graphics") == "intel"
+    assert vendor_of("Apple M2 Pro") == "apple"
+    # And an unrecognised card is unknown rather than being forced into a
+    # vendor it does not belong to.
+    assert vendor_of("Some Future Accelerator") == "unknown"
+    assert vendor_of("") == "unknown"
+
+
+def test_the_registry_reads_a_real_card_bigger_than_adapterram_can_express():
+    """A 32-bit field cannot hold a modern card, and this is why that matters.
+
+    ``Win32_VideoController.AdapterRAM`` is a DWORD, so every card at or above
+    4GiB reports exactly 4GiB -- which is the class of card where being wrong
+    changes the recommendation. The registry carries the same number as a
+    64-bit QWORD, and it is written little-endian whichever way it is typed.
+    """
+    eight_gib = (8 * 1024 ** 3).to_bytes(8, "little")
+    assert _vram_from_registry(eight_gib) == 8 * 1024 ** 3
+    assert _vram_from_registry(4 * 1024 ** 3) == 4 * 1024 ** 3
+    # A missing or malformed value is an absence, not a zero.
+    assert _vram_from_registry(None) is None
+    assert _vram_from_registry(b"") is None
+    assert _vram_from_registry(0) is None
+
+
+def test_nvidia_smi_output_is_parsed_and_a_miss_is_survivable(monkeypatch):
+    """The vendor's own tool answers for every card it made, and may be absent.
+
+    Parsed here rather than against the real machine, so the test says nothing
+    about whether a GPU is present and nothing about which one.
+    """
+    from desktop_app import cookbook
+
+    class Result:
+        returncode = 0
+        stdout = ("NVIDIA GeForce RTX 3050 Ti Laptop GPU, 4096\n"
+                  "Tesla T4, 15360\n")
+        stderr = ""
+
+    monkeypatch.setattr(cookbook.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(cookbook.subprocess, "run", lambda *a, **k: Result())
+    found = cookbook._read_nvidia_adapters()
+    assert [adapter.vram for adapter in found] == [4096 * 1024 ** 2, 15360 * 1024 ** 2]
+    assert all(adapter.vendor == "nvidia" for adapter in found)
+    assert all(adapter.source for adapter in found), (
+        "a figure with no stated source is exactly what the panel exists to avoid")
+
+    # Not installed: no adapters, and no exception.
+    monkeypatch.setattr(cookbook.shutil, "which", lambda name: None)
+    assert cookbook._read_nvidia_adapters() == []
+
+    # Present but failing: a machine mid-driver-update must not raise.
+    class Failed:
+        returncode = 9
+        stdout = ""
+        stderr = "NVIDIA driver is not loaded"
+
+    monkeypatch.setattr(cookbook.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(cookbook.subprocess, "run", lambda *a, **k: Failed())
+    assert cookbook._read_nvidia_adapters() == []
+
+    # Unparseable output is ignored rather than becoming a made-up figure.
+    class Garbage:
+        returncode = 0
+        stdout = "NVIDIA GeForce RTX 3050 Ti, N/A\n"
+        stderr = ""
+
+    monkeypatch.setattr(cookbook.subprocess, "run", lambda *a, **k: Garbage())
+    assert cookbook._read_nvidia_adapters() == []
+
+
+def test_the_two_sources_are_merged_into_one_card_not_two(monkeypatch):
+    """A machine with an NVIDIA card answers to both sources at once.
+
+    Listing it twice reads as two cards and would make a hybrid laptop sound
+    like it had two of the same one. The vendor's own tool is kept, because it
+    is the one that survives a driver update.
+    """
+    from desktop_app import cookbook
+
+    from_nvidia = GpuAdapter(name="NVIDIA GeForce RTX 3050 Ti", vendor="nvidia",
+                             vram=4 * 1024 ** 3, source="read with nvidia-smi")
+    from_registry = GpuAdapter(name="NVIDIA GeForce RTX 3050 Ti", vendor="nvidia",
+                               vram=4 * 1024 ** 3,
+                               source="read from the Windows display adapter registry")
+    integrated = GpuAdapter(name="Intel(R) UHD Graphics", vendor="intel",
+                            vram=None, integrated=True, source="registry")
+    monkeypatch.setattr(cookbook.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(cookbook, "_read_nvidia_adapters", lambda: [from_nvidia])
+    monkeypatch.setattr(cookbook, "_read_windows_adapters",
+                        lambda: [from_registry, integrated])
+
+    merged = cookbook.detect_gpus()
+    assert len(merged) == 2, f"the same card was listed twice: {merged}"
+    assert merged[0].source == "read with nvidia-smi", (
+        "the vendor's own reading should win over the platform's")
+    assert merged[1].integrated is True
+
+
+def test_a_verdict_never_calls_system_memory_the_graphics_card(monkeypatch):
+    """Two different pools, and the sentence has to name the one it measured.
+
+    ``budget()`` is system memory. ``vram`` is the card. While graphics memory
+    was never detected the two numbers happened to be equal, so the wording
+    could not be wrong -- and a machine with a 4GiB card was told it had "6.7GB
+    of graphics memory to give". Detecting VRAM is what made the ambiguity
+    reachable, so this asserts the two are never described as each other.
+    """
+    from desktop_app import cookbook
+
+    monkeypatch.setattr(cookbook.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(cookbook.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(cookbook.psutil, "virtual_memory", lambda: type(
+        "M", (), {"total": 16 * 1024 ** 3, "available": 8 * 1024 ** 3})())
+    monkeypatch.setattr(cookbook, "_read_nvidia_adapters", lambda: [GpuAdapter(
+        name="NVIDIA GeForce RTX 3050 Ti", vendor="nvidia",
+        vram=4 * 1024 ** 3, source="test")])
+    monkeypatch.setattr(cookbook, "_read_windows_adapters", lambda: [])
+
+    hardware = cookbook.detect_hardware()
+    assert hardware.vram == 4 * 1024 ** 3
+    budget = hardware.budget()
+    assert budget != hardware.vram, (
+        "this fixture needs the two pools to differ, or the test proves nothing")
+
+    # A model that overruns the system budget must not be told the card's size.
+    model = Model(repo="a/b", name="Too Big", parameters=40_000_000_000,
+                  context=4096, layers=32, kv_heads=8, head_dim=128,
+                  tasks=("general",))
+    variant = Variant(name="m-Q4_K_M.gguf", quantization="Q4_K_M",
+                      size=24_000_000_000)
+    verdict = classify(model, variant, hardware)
+    assert verdict["result"] == NOT_RECOMMENDED
+    assert "graphics memory" not in verdict["reason"].lower(), (
+        f"the system memory budget was described as the graphics card: "
+        f"{verdict['reason']!r}")
+    assert human_bytes(budget) in verdict["reason"]
+
+    # And a model that only overruns the card says so, naming the card.
+    small = Model(repo="a/b", name="Fits System, Not Card", parameters=8_000_000_000,
+                  context=4096, layers=32, kv_heads=8, head_dim=128,
+                  tasks=("general",))
+    small_variant = Variant(name="m-Q4_K_M.gguf", quantization="Q4_K_M",
+                            size=5_000_000_000)
+    spill = classify(small, small_variant, hardware)
+    assert spill["result"] == POSSIBLE, spill["reason"]
+    assert human_bytes(hardware.vram) in spill["reason"], (
+        f"the spill sentence did not name the card's memory: {spill['reason']!r}")
+
+    # Every verdict a model on this machine can reach, checked at once. A
+    # single missed branch would leave a card owner being told their 4GiB card
+    # has 6.9GB, which is the sentence this test exists to prevent.
+    tiny = Model(repo="a/b", name="Comfortable", parameters=1_000_000_000,
+                 context=4096, layers=32, kv_heads=8, head_dim=128,
+                 tasks=("general",))
+    tiny_variant = Variant(name="m-Q4_K_M.gguf", quantization="Q4_K_M",
+                           size=700_000_000)
+    generous = Model(repo="a/b", name="Huge Card", parameters=1_000_000_000,
+                     context=4096, layers=32, kv_heads=8, head_dim=128,
+                     tasks=("general",))
+    seen = set()
+    for candidate, artifact in ((model, variant), (small, small_variant),
+                                (tiny, tiny_variant), (tiny, Variant(
+                                    name="x.gguf", size=99 * 1024 ** 3))):
+        verdict = classify(candidate, artifact, hardware)
+        reason = verdict["reason"]
+        seen.add(verdict["result"])
+        if verdict["result"] == POSSIBLE and "spill" in reason:
+            continue  # the spill branch is the one that names the card
+        assert "graphics memory" not in reason.lower(), (
+            f"a verdict called system memory the graphics card: {reason!r}")
+        assert human_bytes(budget) in reason or "disk" in reason.lower(), (
+            f"a verdict quoted a figure that is neither the budget nor the "
+            f"card: {reason!r}")
+    assert {NOT_RECOMMENDED, POSSIBLE, LIKELY} <= seen, (
+        f"this fixture no longer reaches every branch, so it no longer proves "
+        f"much: {seen}")
+
+
+def test_detection_never_reports_a_card_it_did_not_find(monkeypatch):
+    """A machine with nothing but an integrated chip gets no figure, and a reason.
+
+    This is the case the previous code got wrong by blaming a missing library
+    for every machine regardless of what it held.
+    """
+    from desktop_app import cookbook
+
+    monkeypatch.setattr(cookbook.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(cookbook, "_read_nvidia_adapters", lambda: [])
+    monkeypatch.setattr(cookbook, "_read_windows_adapters", lambda: [
+        GpuAdapter(name="Intel(R) UHD Graphics 620", vendor="intel", vram=None,
+                   integrated=True, source="registry")])
+    monkeypatch.setattr(cookbook.platform, "machine", lambda: "x86_64")
+
+    hardware = cookbook.detect_hardware()
+    assert hardware.vram is None, (
+        "an integrated chip was credited with memory it does not have")
+    assert hardware.sources["vram"] == (
+        "integrated graphics share system memory rather than having their own")
+    assert "shares system memory" in hardware.graphics_note()
+    assert "no dedicated graphics memory" in hardware.describe()
+
+
+def test_apple_silicon_is_understood_rather_than_reported_as_a_failure(monkeypatch):
+    """Unified memory is a correct reading, not an unreadable one.
+
+    Saying a Mac's graphics memory went unread tells its owner their hardware
+    was not understood when in fact there is nothing separate to read.
+    """
+    from desktop_app import cookbook
+
+    monkeypatch.setattr(cookbook.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cookbook.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(cookbook, "_read_nvidia_adapters", lambda: [])
+    monkeypatch.setattr(cookbook, "_read_windows_adapters", lambda: [])
+    monkeypatch.setattr(cookbook, "_read_linux_adapters", lambda: [])
+
+    hardware = cookbook.detect_hardware()
+    assert hardware.vram is None, (
+        "a separate VRAM figure was invented for a machine that has one pool")
+    assert hardware.unified_memory is True
+    assert "Apple Silicon" in hardware.sources["vram"]
+    assert "unified memory" in hardware.describe()
+    assert "one memory pool" in hardware.graphics_note()
 
 
 def test_detection_takes_a_path_object_like_the_resources_page_does():

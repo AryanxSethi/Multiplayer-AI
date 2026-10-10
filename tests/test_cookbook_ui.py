@@ -18,7 +18,7 @@ pytest.importorskip("psutil", reason="psutil backs hardware detection")
 from PySide6.QtWidgets import QApplication, QLabel, QScrollArea  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
-from desktop_app.cookbook import load_catalog  # noqa: E402
+from desktop_app.cookbook import human_bytes, load_catalog, pick_graphics_adapter  # noqa: E402
 from desktop_app.storage import Storage  # noqa: E402
 from desktop_app.theme import DARK, LIGHT, MIKU, stylesheet  # noqa: E402
 from tests.test_desktop_runtime import MemoryVault  # noqa: E402
@@ -271,13 +271,23 @@ def test_the_cookbook_explains_the_device_it_is_judging_models_against(window) -
     QApplication.processEvents()
     said = text_of(panel)
     assert "memory" in said.lower(), f"the device is not described: {said[:200]!r}"
-    # Detection could not read graphics memory, and saying so is the difference
-    # between an honest blank and a machine quietly judged as though it had no
-    # card at all.
-    assert panel.hardware.vram is None, (
-        "this test needs graphics memory to be unreadable here")
-    assert "not detected" in said.lower(), (
-        f"nothing says graphics memory went unread: {said[:300]!r}")
+
+    # Graphics memory is read from the operating system now, so this has to
+    # cover both outcomes. On a machine with a card the page must name it, or
+    # the figure it judged against is a number nobody can check. On a machine
+    # without one it must say why -- and the reason it gives must be true of
+    # that machine rather than a blanket complaint about a missing library.
+    note = panel.hardware.graphics_note()
+    assert "Graphics:" in note, f"the page does not say what it judged against: {note!r}"
+    if panel.hardware.vram is None:
+        assert panel.unknown_label.text(), (
+            "no graphics memory was detected and the page says nothing about it")
+        assert panel.unknown_label.isVisible()
+    else:
+        picked = pick_graphics_adapter(panel.hardware.gpus)
+        assert picked is not None and picked.name in note, (
+            f"a {human_bytes(panel.hardware.vram)} figure is being judged "
+            f"against but the page names no card: {note!r}")
 
 
 def test_every_recommendation_says_why_and_what_it_would_take(window) -> None:
