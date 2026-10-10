@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "updated": "2026-10-10",
+  "note": "Every number here was read from the Hugging Face Hub on the date shown. Parameter counts come from each model's safetensors index, layer geometry and context length from its config.json, and every variant size from the file tree of the repository that holds it. Nothing is estimated and nothing is marked verified, because nothing in this catalogue has been run on the reader's hardware.",
+  "models": [
+    {
+      "repo": "Qwen/Qwen2.5-0.5B-Instruct",
+      "artifact_repo": "bartowski/Qwen2.5-0.5B-Instruct-GGUF",
+      "name": "Qwen2.5 0.5B",
+      "publisher": "Qwen",
+      "source": "Hugging Face",
+      "parameters": 494032768,
+      "context": 32768,
+      "layers": 24,
+      "kv_heads": 2,
+      "head_dim": 64,
+      "license": "apache-2.0",
+      "languages": ["en", "zh"],
+      "vision": false,
+      "tasks": ["general", "writing", "reasoning"],
+      "last_verified": "2026-10-10",
+      "variants": [
+        {"name": "Qwen2.5-0.5B-Instruct-Q2_K.gguf", "quantization": "Q2_K", "size": 338607520},
+        {"name": "Qwen2.5-0.5B-Instruct-Q3_K_S.gguf", "quantization": "Q3_K_S", "size": 338263456},
+        {"name": "Qwen2.5-0.5B-Instruct-Q4_0.gguf", "quantization": "Q4_0", "size": 352972352},
+        {"name": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf", "quantization": "Q4_K_M", "size": 397808192},
+        {"name": "Qwen2.5-0.5B-Instruct-Q5_K_M.gguf", "quantization": "Q5_K_M", "size": 420086336},
+        {"name": "Qwen2.5-0.5B-Instruct-Q6_K.gguf", "quantization": "Q6_K", "size": 505736768},
+        {"name": "Qwen2.5-0.5B-Instruct-Q8_0.gguf", "quantization": "Q8_0", "size": 531068480},
+        {"name": "Qwen2.5-0.5B-Instruct-f16.gguf", "quantization": "f16", "size": 994156864}
+      ]
+    },
+    {
+      "repo": "Qwen/Qwen2.5-Coder-7B-Instruct",
+      "artifact_repo": "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF",
+      "name": "Qwen2.5 Coder 7B",
+      "publisher": "Qwen",
+      "source": "Hugging Face",
+      "parameters": 7615616512,
+      "context": 32768,
+      "layers": 28,
+      "kv_heads": 4,
+      "head_dim": 128,
+      "license": "apache-2.0",
+      "languages": ["en"],
+      "vision": false,
+      "tasks": ["coding", "debugging", "reasoning"],
+      "last_verified": "2026-10-10",
+      "variants": [
+        {"name": "Qwen2.5-Coder-7B-Instruct-Q2_K.gguf", "quantization": "Q2_K", "size": 3015940896},
+        {"name": "Qwen2.5-Coder-7B-Instruct-Q3_K_S.gguf", "quantization": "Q3_K_S", "size": 3492369184},
+        {"name": "Qwen2.5-Coder-7B-Instruct-Q4_0.gguf", "quantization": "Q4_0", "size": 4444121888},
+        {"name": "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf", "quantization": "Q4_K_M", "size": 4683074336},
+        {"name": "Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf", "quantization": "Q5_K_M", "size": 5444832032},
+        {"name": "Qwen2.5-Coder-7B-Instruct-Q6_K.gguf", "quantization": "Q6_K", "size": 6254199584},
+        {"name": "Qwen2.5-Coder-7B-Instruct-Q8_0.gguf", "quantization": "Q8_0", "size": 8098525984},
+        {"name": "Qwen2.5-Coder-7B-Instruct-f16.gguf", "quantization": "f16", "size": 15237853696}
+      ]
+    }
+  ]
+}
