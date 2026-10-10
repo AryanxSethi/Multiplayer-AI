@@ -96,6 +96,61 @@ def test_the_cookbook_is_a_page_in_the_navigation_stack(window) -> None:
         "stay at one width regardless of the panel")
 
 
+def test_the_cookbook_scrolls_its_cards_rather_than_clipping_them(window) -> None:
+    """The scroll area has to contain the cards, not merely sit on the page.
+
+    This is the check that was missing, and its absence is why the page shipped
+    unreadable. The panel built a scroll area, put it on screen, and then added
+    every card to the panel's own layout beside it -- so the scroll area was
+    empty, measured its content as nothing, kept its scrollbar range at zero,
+    and never drew a scrollbar. The page simply grew past the bottom of the
+    window with the rest of it unreachable.
+
+    A test asserting "a QScrollArea exists and is resizable" passes perfectly
+    well against an empty one, which is exactly what the old assertion did. So
+    these assert the content instead: that the cards live inside the scroll
+    area, and that the content is genuinely taller than the viewport, which is
+    the only condition under which a scrollbar means anything.
+    """
+    window.resize(1200, 900)
+    window.show()
+    panel = panel_of(window)
+    QApplication.processEvents()
+
+    scroll = panel.findChild(QScrollArea)
+    assert scroll is not None, "the Cookbook page has no scroll area at all"
+
+    content = scroll.widget()
+    assert content is not None and content is not panel, (
+        "the scroll area has no content widget of its own, so nothing can be "
+        "scrolled inside it")
+
+    # Every label on the page has to be inside the scroll content. Comparing the
+    # two sets is what distinguishes "the cards are in there" from "the cards
+    # are next to it", which looks identical until the page is too tall.
+    inside = {id(label) for label in content.findChildren(QLabel)}
+    on_page = {id(label) for label in panel.findChildren(QLabel)}
+    assert on_page, "the Cookbook page rendered no text at all"
+    stray = on_page - inside
+    assert not stray, (
+        f"{len(stray)} of {len(on_page)} labels sit outside the scroll area, so "
+        "they are clipped once the page is taller than the window")
+
+    # And the content must actually overflow, or there is nothing to scroll to.
+    assert content.height() > scroll.viewport().height(), (
+        f"the content is {content.height()}px tall inside a "
+        f"{scroll.viewport().height()}px viewport, so the scroll area is not "
+        "under any pressure and this page cannot be exercising the bug")
+    assert scroll.verticalScrollBar().maximum() > 0, (
+        "the content overflows but the scrollbar range is still zero, so the "
+        "rest of the page is unreachable")
+
+    # Nothing should overflow sideways either: a horizontal scrollbar on a page
+    # that reflows means some label refused to wrap.
+    assert scroll.horizontalScrollBar().maximum() == 0, (
+        "the page scrolls sideways, so at least one label is not wrapping")
+
+
 def test_the_cookbook_is_reached_from_the_top_bar_and_not_the_rail(window) -> None:
     """Its navigation control is beside Invite and Connect, not down the side.
 

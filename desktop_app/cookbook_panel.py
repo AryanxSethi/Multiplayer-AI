@@ -62,10 +62,27 @@ class CookbookPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(page)
+        page.setAccessibleName("Cookbook contents")
 
-        outer.addWidget(label("WHICH MODELS FIT THIS MACHINE", "eyebrow"))
-        outer.addWidget(label("Cookbook", "title"))
-        outer.addWidget(label(
+        # Everything below goes into ``layout`` -- the scroll area's own content
+        # layout -- and not into ``outer``. ``outer`` holds the scroll area and
+        # nothing else.
+        #
+        # Adding the cards beside the scroll area instead of inside it leaves
+        # the scroll area empty, and an empty scroll area is one that measures
+        # its content as nothing: its scrollbar range stays at zero so it never
+        # draws, and the page grows taller than the window with everything past
+        # the bottom edge clipped and no way to reach it. That is the whole
+        # reason this page was unreadable, and it hid behind a test that only
+        # checked a scroll area existed.
+        #
+        # ``layout`` is also where the shared 30/27 margins and 22px spacing come
+        # from, so the page matches every other one in the stack instead of the
+        # 0 margins and default spacing it was using.
+
+        layout.addWidget(label("WHICH MODELS FIT THIS MACHINE", "eyebrow"))
+        layout.addWidget(label("Cookbook", "title"))
+        layout.addWidget(label(
             "Sized against this device's memory. Nothing is sent anywhere "
             "unless you press Refresh.", "muted", True))
 
@@ -86,11 +103,11 @@ class CookbookPanel(QWidget):
         self.unknown_label.setWordWrap(True)
         self.unknown_label.setVisible(bool(unknown))
         column.addWidget(self.unknown_label)
-        outer.addWidget(card)
+        layout.addWidget(card)
 
         self.catalog_note = label("", "muted", True)
         self.catalog_note.setWordWrap(True)
-        outer.addWidget(self.catalog_note)
+        layout.addWidget(self.catalog_note)
 
         filters = QHBoxLayout()
         filters.addWidget(label("Looking for", "muted"))
@@ -107,13 +124,13 @@ class CookbookPanel(QWidget):
             self.task_picker.addItem(title, task)
         self.task_picker.currentIndexChanged.connect(self.render_models)
         filters.addWidget(self.task_picker, 1)
-        outer.addLayout(filters)
+        layout.addLayout(filters)
 
         self.results = QVBoxLayout()
         self.results.setSpacing(12)
         self.body = QWidget()
         self.body.setLayout(self.results)
-        outer.addWidget(self.body)
+        layout.addWidget(self.body)
 
         self.refresh = action(f"Refresh from {self.host_name()}", self.do_refresh, name="ghost")
         self.refresh.setToolTip(
@@ -132,7 +149,7 @@ class CookbookPanel(QWidget):
         # there because this was a dialog, and it was the clearest sign the
         # widget had stopped being what it claimed. Leaving the page is the
         # rail's job.
-        outer.addLayout(footer)
+        layout.addLayout(footer)
 
         self.load()
 
