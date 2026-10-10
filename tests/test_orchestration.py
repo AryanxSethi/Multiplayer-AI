@@ -456,6 +456,49 @@ class RoutingProfileTests(unittest.TestCase):
             with self.subTest(request=request):
                 self.assertFalse(is_greeting(request))
 
+    def test_a_greeting_carrying_an_image_is_planned_rather_than_answered_directly(self):
+        """The image guard, which decides whether delegation is skipped at all.
+
+        ``is_greeting`` returns False for anything holding an image, because a
+        picture is work to be done rather than a greeting to be acknowledged.
+        Sending it straight to one model would skip planning and give the
+        vision model a message the user never asked it to handle alone, so the
+        branch is pinned here rather than left to the rest of the suite.
+        """
+        picture = [{"type": "image", "name": "hello.png", "mime_type": "image/png",
+                    "data": base64.b64encode(b"\x89PNG\r\n\x1a\ntest").decode()}]
+        for request in ([{"type": "text", "text": "hello"}] + picture,
+                        [{"type": "text", "text": "What is in this image?"}] + picture,
+                        picture):
+            with self.subTest(request=request):
+                self.assertFalse(is_greeting(request))
+
+    def test_the_length_ceiling_is_a_boundary_and_not_a_rough_guess(self):
+        """240 characters is where a greeting stops being one.
+
+        ``is_greeting`` refuses anything longer outright rather than matching a
+        prefix of it. A short padded greeting is therefore still a greeting,
+        and the first character past the ceiling is not. Tested on both sides
+        because an off-by-one here would either truncate a long request or
+        push planning onto short ones, and neither shows up as an exception.
+        """
+        at_ceiling = "hi".ljust(240, " ")
+        over_ceiling = "hi".ljust(241, " ")
+        self.assertTrue(is_greeting(at_ceiling), "a padded greeting at the ceiling stopped being one")
+        self.assertFalse(is_greeting(over_ceiling), "a message past the ceiling was still taken for a greeting")
+
+    def test_compatibility_normalization_folds_the_forms_that_only_differ_in_shape(self):
+        """NFKC folds fullwidth and compatibility characters before matching.
+
+        A greeting typed with a fullwidth Latin letter, or with compatibility
+        forms such as ``\ufb00`` for "ff", is the same greeting. Without the
+        normalization step those go down the planning path, which costs a
+        model round trip for the user's hello and changes which model answers.
+        """
+        for request in ("ｈｅｌｌｏ", "ＨＥＬＬＯ！", "how＇s it going"):
+            with self.subTest(request=request):
+                self.assertTrue(is_greeting(request), f"{request!r} was not recognized as a greeting")
+
     def test_existing_profiles_are_opted_out_and_preferences_need_a_purpose_and_tasks(self):
         self.assertEqual(routing_profile({}), {"purpose": "", "tasks": [], "delegation_enabled": False})
         for profile in ({"delegation_enabled": True}, {"delegation_enabled": True, "purpose": "Code"},

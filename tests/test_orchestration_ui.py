@@ -1,6 +1,7 @@
 """Connect a model, define its purpose, choose a coordinator, and send through the native UI."""
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -20,7 +21,7 @@ from starlette.routing import Route
 
 from desktop_app.storage import Storage
 from desktop_app.model_purpose import ModelPurpose
-from desktop_app.theme import DARK, LIGHT, MIKU, color, stylesheet
+from desktop_app.theme import DARK, LIGHT, MIKU, THEME_NAMES, color, stylesheet
 from desktop_app.widgets import TickCheckBox
 from desktop_app.window import CONVERSATIONS_PAGE, MainWindow
 from network_a2a.orchestration import GENERAL_TARGET
@@ -76,6 +77,124 @@ class OrchestrationUITests(unittest.TestCase):
                     self.assertFalse(checkbox.isChecked())
         finally:
             form.close()
+
+    def test_the_enabled_box_draws_its_tick_too_and_fades_when_disabled(self):
+        """The delegation switch is the box a user is most likely to need to read.
+
+        It is the same widget as the task boxes, but it is the one that turns
+        the whole automatic behaviour on, and it sits on its own row where the
+        eye lands last. So its tick is painted and checked like the others, and
+        a disabled one is dimmed rather than left at full strength pretending
+        to be available.
+        """
+        form = ModelPurpose()
+        try:
+            enabled = form.enabled
+            self.assertIsInstance(enabled, TickCheckBox)
+            for theme in (DARK, LIGHT):
+                with self.subTest(theme=theme):
+                    form.setStyleSheet(stylesheet(theme))
+                    form.show()
+                    enabled.setChecked(False)
+                    self.app.processEvents()
+                    enabled.setChecked(True)
+                    self.app.processEvents()
+                    option = QStyleOptionButton()
+                    enabled.initStyleOption(option)
+                    rect = enabled.style().subElementRect(
+                        QStyle.SubElement.SE_CheckBoxIndicator, option, enabled)
+                    image = enabled.grab().toImage().copy(rect)
+                    tick = color(theme, "success")
+                    painted = sum(image.pixelColor(x, y).name() == tick
+                                  for x in range(image.width()) for y in range(image.height()))
+                    self.assertGreater(painted, 10,
+                                       "the delegation switch shows no tick when it is on")
+
+                    # Disabled at the same opacity the paint applies, so the
+                    # two can be compared rather than merely both looked at.
+                    enabled.setEnabled(False)
+                    self.app.processEvents()
+                    faded = enabled.grab().toImage().copy(rect)
+                    dimmed = sum(faded.pixelColor(x, y).name() == tick
+                                 for x in range(faded.width()) for y in range(faded.height()))
+                    self.assertLess(dimmed, painted, (
+                        "a disabled switch is painted at full strength, so it "
+                        "reads as though it could still be turned on"))
+                    enabled.setEnabled(True)
+        finally:
+            form.close()
+
+    def test_the_tick_takes_its_colour_from_the_property_not_the_palette(self):
+        """A tick coloured once at construction goes wrong on a theme change.
+
+        The colour is read from the palette the widget was built with, which
+        is the default one, and so is invisible on a dark sheet where the
+        default highlighted text is light on light. It is exposed as a Qt
+        property so the stylesheet can set it per theme, and that is the only
+        thing keeping the ticks visible.
+        """
+        box = TickCheckBox("a box")
+        try:
+            box.set_tick_color(color(LIGHT, "success"))
+            self.assertEqual(box.tickColor.name(), color(LIGHT, "success"),
+                             "set_tick_color did not take")
+            box.setStyleSheet("TickCheckBox { qproperty-tickColor: %s; }" % color(DARK, "success"))
+            box.style().polish(box)
+            self.assertEqual(box.tickColor.name(), color(DARK, "success"),
+                             "the stylesheet could not set the tick colour, so a "
+                             "theme change leaves the ticks the old colour")
+        finally:
+            box.deleteLater()
+
+    def test_every_theme_sheet_sets_the_tick_colour_it_declares(self):
+        """Each theme has to name a tick colour, and it has to be a real one.
+
+        The tick is drawn by hand on top of the native indicator, so nothing
+        in the sheet reaches it except this property. A theme that omits the
+        rule leaves every tick on that theme at whatever colour the widget was
+        built with, which is the default palette's and is not guaranteed to
+        contrast with the sheet it is painted on. Checking the sheets against
+        each other would not catch it, because a missing rule is equally
+        missing from all three.
+        """
+        for theme in THEME_NAMES:
+            with self.subTest(theme=theme):
+                sheet = stylesheet(theme)
+                self.assertIn("qproperty-tickColor", sheet,
+                              f"the {theme} sheet never sets the tick colour")
+                declared = re.findall(r"qproperty-tickColor:\s*(#[0-9a-zA-Z]+)", sheet)
+                self.assertTrue(declared,
+                                f"the {theme} sheet never sets the tick colour")
+                for value in declared:
+                    self.assertRegex(value, r"^#[0-9a-fA-F]{6}$", (
+                        f"the {theme} sheet declares the tick colour as {value!r}, "
+                        "which is not a colour"))
+
+    def test_an_unchecked_box_is_left_to_the_style(self):
+        """No tick is drawn when there is nothing to tick.
+
+        The paint overrides the native indicator to add a visible tick, and
+        drawing one regardless would put a mark on every empty box in the
+        form, including the ones that are off. The native box has to show
+        through untouched, so an empty indicator keeps no painted pixels of
+        the tick colour.
+        """
+        box = TickCheckBox("a box")
+        try:
+            box.set_tick_color(color(DARK, "success"))
+            box.show()
+            box.setChecked(False)
+            self.app.processEvents()
+            option = QStyleOptionButton()
+            box.initStyleOption(option)
+            rect = box.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, box)
+            image = box.grab().toImage().copy(rect)
+            tick = color(DARK, "success")
+            painted = sum(image.pixelColor(x, y).name() == tick
+                          for x in range(image.width()) for y in range(image.height()))
+            self.assertEqual(painted, 0, "an unchecked box is painted as though it were on")
+        finally:
+            box.close()
 
     def test_editing_legacy_general_permissions_preserves_them_and_new_import_resets(self):
         form = ModelPurpose()
