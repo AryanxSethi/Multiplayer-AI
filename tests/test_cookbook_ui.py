@@ -175,13 +175,39 @@ def test_opening_the_cookbook_asks_the_network_for_nothing(window) -> None:
     that fetched its catalogue on open would make that untrue while the page
     still said it. The check is on the command channel, which is the only way
     out of the UI to the network.
+
+    The cache changes what "on open" means rather than removing it: a saved
+    catalogue is read from disk, which is not a request, and re-reading the
+    same numbers from a server on every launch would be a request nobody
+    needed to make.
     """
     sent = []
     window.command = lambda name, *args, **kwargs: sent.append(name)
 
     window.navigate(win.COOKBOOK_PAGE)
+    panel = panel_of(window)
     QApplication.processEvents()
     assert sent == [], f"opening the Cookbook asked the network for {sent!r}"
+    assert panel.catalog, "opening the page produced no catalogue at all"
+
+
+def test_nothing_refreshes_on_its_own(window) -> None:
+    """No timer, no launch check, no hover.
+
+    A catalogue that updates itself is a phone-home with a schedule, and it
+    would make the Resources page's promise untrue in the one place somebody
+    was relying on it. The only trigger is the button, so this asserts there
+    is no timer attached to the page at all rather than that one has not fired.
+    """
+    from PySide6.QtCore import QTimer
+    panel = panel_of(window)
+    for child in panel.findChildren(QTimer):
+        assert not child.isActive(), (
+            "something on the Cookbook page is running on a timer, so it will "
+            "make a request without anybody asking")
+    assert not hasattr(panel, "catalog_timer"), (
+        "the page has a catalogue timer; a scheduled refresh contradicts the "
+        "promise the Resources page makes")
 
 
 def test_the_cookbook_explains_the_device_it_is_judging_models_against(window) -> None:
@@ -274,14 +300,14 @@ def test_refreshing_asks_once_and_reports_a_failure_without_losing_the_list(wind
     panel.do_refresh()
     assert len(pending) == 1, "a second request started while the first was running"
 
-    pending[0]["failure"]("Hugging Face could not be reached.")
+    pending[0]["failure"]("huggingface.co could not be reached.")
     QApplication.processEvents()
 
     said = text_of(panel).lower()
     assert "could not be read" in said, "a failed refresh said nothing"
     assert "qwen2.5" in said, "a failed refresh emptied the list it had already loaded"
     assert panel.refresh.isEnabled(), "the button stayed dead after a failure"
-    assert panel.refresh.text() == "Refresh from Hugging Face", (
+    assert panel.refresh.text().startswith("Refresh from"), (
         f"the button is still mid-attempt: {panel.refresh.text()!r}")
 
 
@@ -316,8 +342,15 @@ def test_a_refreshed_model_goes_through_the_same_validation_as_a_bundled_one(win
             f"{[model.repo for model in panel.catalog]}")
 
 
-def test_a_good_refresh_replaces_the_model_and_says_it_is_not_saved(window) -> None:
-    """The happy path, and the promise that nothing was written to disk."""
+def test_a_good_refresh_replaces_the_model_and_saves_it_for_next_time(window) -> None:
+    """The happy path, and that a refresh survives a restart.
+
+    It used to be held in memory and the page said so. That was true and it was
+    also the wrong behaviour: the numbers are the same on every launch, so
+    re-reading them on every launch is a request nobody needed to make, and a
+    user who refreshed once would find it forgotten the next morning.
+    """
+    from desktop_app.cookbook import load_cache
     panel = panel_of(window)
     QApplication.processEvents()
     pending = []
@@ -335,8 +368,39 @@ def test_a_good_refresh_replaces_the_model_and_says_it_is_not_saved(window) -> N
 
     said = text_of(panel)
     assert "Brand New Model" in said, f"the refreshed model is not shown: {said[:300]!r}"
-    assert "not saved" in said.lower(), (
-        "it does not say the refresh was not written to disk")
+
+    saved = load_cache(panel.directory)
+    assert saved is not None, "the refresh was not saved, so the next launch forgets it"
+    assert "someone/Brand-New-Model" in {model.repo for model in saved}
+
+
+def test_the_restore_button_only_works_once_there_is_something_behind_it(window) -> None:
+    """It is enabled by the existence of the file it would restore.
+
+    A rollback to nothing is not a rollback, and a button that always works and
+    sometimes does nothing is worse than one that says so.
+    """
+    from desktop_app.cookbook import PREVIOUS_NAME, save_catalog
+    panel = panel_of(window)
+    QApplication.processEvents()
+    assert not panel.restore.isEnabled(), (
+        "restoring is offered before anything has been replaced")
+
+    from tests.test_cookbook_cache import a_model
+    save_catalog([a_model("a/b")], panel.directory)
+    save_catalog([a_model("c/d")], panel.directory)
+    assert (panel.directory / PREVIOUS_NAME).is_file()
+
+    panel.refresh_controls()
+    assert panel.restore.isEnabled(), (
+        "the earlier catalogue is on disk but restoring is not offered")
+
+    panel.do_restore()
+    QApplication.processEvents()
+    assert "Restored" in text_of(panel), (
+        f"restoring said nothing: {text_of(panel)[:200]!r}")
+    assert "a/b" in text_of(panel), (
+        "restoring did not put the earlier models back on screen")
 
 
 def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(window) -> None:

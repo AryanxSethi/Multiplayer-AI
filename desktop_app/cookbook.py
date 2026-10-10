@@ -251,6 +251,13 @@ class Model:
         source: Where this record came from.
         verified: Whether real hardware testing backs it. Always False here.
         last_verified: When it was last checked against its publisher.
+        deprecated: Whether the publisher has withdrawn it. A withdrawn model
+            is kept and still listed, with the reason, rather than deleted: a
+            model that disappears from a catalogue is indistinguishable from
+            one that was never in it, and somebody holding it needs to know
+            which happened.
+        deprecated_reason: What the publisher said, quoted rather than
+            summarised.
     """
 
     repo: str
@@ -270,6 +277,8 @@ class Model:
     source: str = "seed catalogue"
     verified: bool = False
     last_verified: str = ""
+    deprecated: bool = False
+    deprecated_reason: str = ""
 
     @property
     def display(self):
@@ -541,7 +550,8 @@ def best_variant(model, hardware, context=DEFAULT_CONTEXT):
     return None
 
 
-def recommend(catalog, hardware, task=None, context=DEFAULT_CONTEXT, limit=None):
+def recommend(catalog, hardware, task=None, context=DEFAULT_CONTEXT, limit=None,
+              include_deprecated=False):
     """Models worth this device's attention, best first.
 
     Ranked on fit and then on capability, never on parameter count alone: a
@@ -550,9 +560,17 @@ def recommend(catalog, hardware, task=None, context=DEFAULT_CONTEXT, limit=None)
     score. A model that fits with room to spare outranks one that barely fits,
     and a model that cannot run is left out entirely rather than shown as
     something to consider.
+
+    A withdrawn model is left out of the recommendations by default. It is not
+    deleted from the catalogue, because somebody may already have it and needs
+    to be told it was withdrawn, but recommending a download of it would be
+    sending them to something the publisher has asked people to stop using.
+    ``include_deprecated`` is how a caller asks for the full list anyway.
     """
     scored = []
     for model in catalog:
+        if model.deprecated and not include_deprecated:
+            continue
         if task and task not in model.tasks:
             continue
         variant = best_variant(model, hardware, context)
@@ -636,6 +654,10 @@ def parse_model(record, index):
     if unknown:
         raise CatalogError(f"{where} claims tasks this build does not know: {unknown!r}")
 
+    deprecated = record.get("deprecated", False)
+    if not isinstance(deprecated, bool):
+        raise CatalogError(f"{where} has deprecated as {type(deprecated).__name__}, not true or false")
+
     variants = []
     for position, item in enumerate(record.get("variants") or ()):
         if not isinstance(item, dict):
@@ -665,7 +687,9 @@ def parse_model(record, index):
         languages=tuple(record.get("languages") or ()), vision=bool(record.get("vision", False)),
         variants=tuple(variants), tasks=tuple(tasks),
         source=str(record.get("source") or "seed catalogue"), verified=verified,
-        last_verified=str(record.get("last_verified") or ""))
+        last_verified=str(record.get("last_verified") or ""),
+        deprecated=deprecated,
+        deprecated_reason=str(record.get("deprecated_reason") or ""))
 
 
 def parse_catalog(payload):
@@ -710,6 +734,190 @@ def load_catalog(path=None):
         raise CatalogError(f"The catalogue could not be read: {error}") from error
     except json.JSONDecodeError as error:
         raise CatalogError(f"The catalogue is not valid JSON: {error}") from error
+
+
+# -- the on-disk cache ------------------------------------------------------
+#
+# The catalogue that ships with the app is one file and cannot be rolled back,
+# so a refresh is kept beside it rather than over it. Two files, not one: the
+# live cache and the one it replaced. A single cache file would make a bad
+# refresh unrecoverable, which defeats the point of validating before saving.
+CACHE_NAME = "cookbook-cache.json"
+PREVIOUS_NAME = "cookbook-cache.previous.json"
+
+
+def cache_paths(directory):
+    """Where the cache and its predecessor live, under a data directory."""
+    base = Path(directory)
+    return base / CACHE_NAME, base / PREVIOUS_NAME
+
+
+def save_catalog(models, directory, updated=None):
+    """Validate a catalogue and write it as the cache, keeping the old one.
+
+    Validation happens first and in full, so a catalogue that cannot be read
+    back is never written at all. The previous cache is moved aside rather than
+    copied, because a copy that fails half way leaves two good files and a
+    rollback target nobody can tell from the live one.
+
+    The write is durable and atomic. It returns whether the directory was
+    flushed, which is not the same as whether the contents landed: those are
+    both visible to every reader once the rename happens, and only a power cut
+    loses them. Raising here would be worse than the situation it describes.
+
+    Args:
+        models: The parsed catalogue to store.
+        directory: Where the cache lives. The storage directory, not the
+            bundled assets, which are shipped and read-only.
+        updated: When the contents were read, for the changelog.
+
+    Returns:
+        Whether the previous cache was kept, so a caller can say whether a
+        rollback is possible from here.
+    """
+    from .storage import write_json_durably
+
+    live, previous = cache_paths(directory)
+    serialised = json.dumps({
+        "version": CATALOG_VERSION,
+        "updated": updated or "",
+        "models": [model_record(model) for model in models],
+    }, indent=2, ensure_ascii=False)
+
+    # Parsed from the text that will be on disk, not from the objects in hand.
+    # Serialising and reading back is the only way to be sure what was written
+    # is what would be accepted, and a cache that cannot be loaded is a cache
+    # that will be silently discarded on the next launch.
+    parse_catalog(json.loads(serialised))
+
+    kept = False
+    if live.is_file():
+        try:
+            live.replace(previous)
+            kept = True
+        except OSError:
+            # The previous copy could not be moved aside, so the live one is
+            # about to be overwritten with nothing to go back to. The write
+            # goes ahead anyway and the caller is told it did, because a
+            # catalogue one revision old beats no catalogue at all.
+            kept = False
+    write_json_durably(live, serialised)
+    return kept
+
+
+def model_record(model):
+    """One parsed model back into the record shape ``parse_model`` accepts.
+
+    Round-tripping through this rather than keeping the original dicts is what
+    makes a cache self-describing: it can be read, checked and reasoned about
+    without the network module, and a field this build does not understand is
+    dropped rather than silently carried.
+    """
+    return {
+        "repo": model.repo,
+        "artifact_repo": model.artifact_repo,
+        "name": model.name,
+        "publisher": model.publisher,
+        "source": model.source,
+        "parameters": model.parameters,
+        "context": model.context,
+        "layers": model.layers,
+        "kv_heads": model.kv_heads,
+        "head_dim": model.head_dim,
+        "license": model.license,
+        "languages": list(model.languages),
+        "vision": model.vision,
+        "tasks": list(model.tasks),
+        "verified": model.verified,
+        "last_verified": model.last_verified,
+        "deprecated": model.deprecated,
+        "deprecated_reason": model.deprecated_reason,
+        "variants": [{"name": variant.name, "quantization": variant.quantization,
+                      "bits_per_weight": variant.bits_per_weight,
+                      "size": variant.size, "source": variant.quant_source}
+                     for variant in model.variants],
+    }
+
+
+def load_cache(directory):
+    """The cached catalogue if there is a usable one, or ``None``.
+
+    Returns ``None`` for every reason it might be unusable -- absent, corrupt,
+    a version this build does not read -- so a caller has one thing to check
+    and always has the bundled catalogue to fall back on. A cache that cannot
+    be loaded is not an error to raise over: the whole point of shipping one is
+    that the feature works with no cache at all.
+    """
+    live, _ = cache_paths(directory)
+    if not live.is_file():
+        return None
+    try:
+        return parse_catalog(json.loads(live.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, CatalogError):
+        return None
+
+
+def rollback_catalog(directory):
+    """Put the previous cache back, or ``None`` when there is not one.
+
+    Only the previous file is consulted. Rolling back to it would consume it,
+    which would leave a rollback target that had already been rolled back to,
+    and a second attempt with nothing behind it. The answer is the live cache,
+    which is the thing the user is trying to get away from.
+    """
+    live, previous = cache_paths(directory)
+    if not previous.is_file():
+        return None
+    restored = _load_one(previous)
+    if restored is None:
+        return None
+    from .storage import write_json_durably
+
+    write_json_durably(live, json.dumps({
+        "version": CATALOG_VERSION,
+        "updated": "",
+        "models": [model_record(model) for model in restored]}, indent=2, ensure_ascii=False))
+    return restored
+
+
+def _load_one(path):
+    """The catalogue at one exact path, or ``None``."""
+    try:
+        return parse_catalog(json.loads(Path(path).read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, CatalogError):
+        return None
+
+
+def describe_changes(previous, current):
+    """What a refresh actually did, as a sentence.
+
+    Reports additions, updates and removals by repository rather than saying
+    how many records were read, because "read 4 models" tells a reader nothing
+    about whether anything changed and a refresh that silently removed three is
+    the one worth knowing about. Compares what a recommendation depends on --
+    the size, the variants, the licence, the tasks -- rather than the whole
+    record, so a re-read that changed nothing reads as no change.
+    """
+    def fingerprint(model):
+        return (model.parameters, model.context, model.layers, model.kv_heads,
+                model.head_dim, model.license, tuple(model.tasks),
+                tuple((variant.size, variant.quantization) for variant in model.variants))
+
+    before = {model.repo: fingerprint(model) for model in (previous or ())}
+    after = {model.repo: fingerprint(model) for model in (current or ())}
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    updated = sorted(repo for repo in set(before) & set(after) if before[repo] != after[repo])
+    if not (added or removed or updated):
+        return "Nothing has changed since the last check."
+    parts = []
+    if added:
+        parts.append(f"added {', '.join(added)}")
+    if updated:
+        parts.append(f"updated {', '.join(updated)}")
+    if removed:
+        parts.append(f"no longer listed: {', '.join(removed)}")
+    return " ".join(part.capitalize() for part in parts) + "."
 
 
 def catalog_from_payload(payload, fetched_at):
