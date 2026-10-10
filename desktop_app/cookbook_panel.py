@@ -430,60 +430,127 @@ class CookbookPanel(QWidget):
         no request on its own, so the Resources page's promise that nothing is
         sent anywhere stays true of this page too.
 
-        A successful refresh is saved, so it survives a restart, and the
-        catalogue it replaces is kept so it can be put back. A record that
-        fails the same validation the bundled one goes through is refused
-        before anything is written, so a response cannot smuggle a field past
-        the checks by arriving over the network instead of from disk.
+        One press re-reads the whole catalogue, not one model from it. It used
+        to refresh ``catalog[0]``, which meant the list could not update as a
+        list: the other models kept figures as old as the install, and the one
+        that moved was whichever happened to be first. The requests run one at
+        a time rather than together, because a burst of four from one button
+        press is not something the person pressing it agreed to.
+
+        Each record goes through the same validation the bundled catalogue
+        goes through, so a response cannot smuggle a field past the checks by
+        arriving over the network instead of from disk. One model being
+        refused or unreachable does not stop the rest, and the note says which
+        ones those were rather than reporting the press as a single success or
+        a single failure.
+
+        The result is saved once at the end, so the catalogue on disk is
+        never a half-finished mixture of old and new records, and the one it
+        replaces is kept so it can be put back.
         """
         if self._busy:
             return
+        targets = list(self.catalog)
+        if not targets:
+            self.catalog_note.setText(
+                "There is nothing to refresh: no models have been loaded.")
+            return
+
+        before = list(self.catalog)
+        updated = {}
+        refused = {}
         self._busy = True
         self.refresh.setEnabled(False)
-        label = f"Asking {self.host_name()}."
-        self.refresh.setText(label)
-        first = self.catalog[0] if self.catalog else None
-        model = first.repo if first else "Qwen/Qwen2.5-0.5B-Instruct"
-        artifacts = first.artifact_repo if first else "bartowski/Qwen2.5-0.5B-Instruct-GGUF"
-        before = list(self.catalog)
+        self._refresh_step(0, len(targets), updated, refused, before)
 
-        def done(result):
-            self._busy = False
-            self.refresh.setEnabled(True)
-            self.refresh.setText(f"Refresh from {self.host_name()}")
+    def _refresh_step(self, index, total, updated, refused, before):
+        """Re-read one model, then either finish or ask for the next.
+
+        Sequential rather than concurrent, so the host sees one request at a
+        time from a button press, and so the progress on the button means
+        something: "2 of 4" is a fact about work already done.
+        """
+        if index >= total:
+            self._finish_refresh(total, updated, refused, before)
+            return
+
+        model = self.catalog[index] if index < len(self.catalog) else None
+        repo = model.repo if model else "Qwen/Qwen2.5-0.5B-Instruct"
+        artifacts = (model.artifact_repo if model
+                     else "bartowski/Qwen2.5-0.5B-Instruct-GGUF")
+
+        def landed(result):
             try:
                 record = parse_model(result, 0)
             except CatalogError as error:
-                self.catalog_note.setText(f"{self.host_name()} sent something unusable: {error}")
-                return
-            updated = [record] + [m for m in self.catalog if m.repo != record.repo]
-            note = describe_changes(before, updated)
-            saved = ""
-            if self.directory:
-                try:
-                    kept = save_catalog(updated, self.directory, record.last_verified)
-                    saved = " The previous one is kept and can be restored." if kept else ""
-                except (OSError, CatalogError) as error:
-                    # Shown, not raised: the models are already correct on
-                    # screen and losing them because they could not be written
-                    # down would be a worse outcome than a catalogue that has
-                    # to be read again next launch.
-                    saved = f" It could not be saved: {error}"
-            self.catalog = updated
+                refused[repo] = (f"{self.host_name()} sent something unusable: "
+                                 f"{error}")
+            else:
+                updated[record.repo] = record
+            self._refresh_step(index + 1, total, updated, refused, before)
+
+        def missed(reason):
+            refused[repo] = reason
+            self._refresh_step(index + 1, total, updated, refused, before)
+
+        self.refresh.setText(f"Refreshing {index + 1} of {total} from "
+                             f"{self.host_name()}.")
+        self.window.command("cookbook_refresh", repo, artifacts, self.base,
+                            success=landed, failure=missed)
+
+    def _finish_refresh(self, total, updated, refused, before):
+        """Merge what came back, say what did not, and save it once."""
+        self._busy = False
+        self.refresh.setEnabled(True)
+        self.refresh.setText(f"Refresh from {self.host_name()}")
+
+        if not updated:
+            first = next(iter(refused.values()), "the request was refused")
             self.catalog_note.setText(
-                f"Read {record.display} from {self.host_name()} at "
-                f"{record.last_verified}. {note}{saved}")
+                f"{self.host_name()} could not be read: {first}")
             self.refresh_controls()
-            self.render_models()
+            return
 
-        def failed(reason):
-            self._busy = False
-            self.refresh.setEnabled(True)
-            self.refresh.setText(f"Refresh from {self.host_name()}")
-            self.catalog_note.setText(f"{self.host_name()} could not be read: {reason}")
+        merged = [updated.get(model.repo, model) for model in before]
+        # Anything that arrived that is not already in the catalogue is a
+        # response naming a model this app did not ask about, which is not a
+        # refresh result and is not merged in.
+        note = describe_changes(before, merged)
+        read = ", ".join(sorted(record.display for record in updated.values()))
+        saved = ""
+        if self.directory:
+            newest = max((record.last_verified for record in updated.values()),
+                         default="")
+            try:
+                kept = save_catalog(merged, self.directory, newest)
+                saved = " The previous one is kept and can be restored." if kept else ""
+            except (OSError, CatalogError) as error:
+                # Shown, not raised: the models are already correct on
+                # screen and losing them because they could not be written
+                # down would be a worse outcome than a catalogue that has
+                # to be read again next launch.
+                saved = f" It could not be saved: {error}"
 
-        self.window.command("cookbook_refresh", model, artifacts, self.base,
-                            success=done, failure=failed)
+        self.catalog = merged
+        self.catalog_note.setText(self._refresh_note(total, updated, refused,
+                                                     read, note, saved))
+        self.refresh_controls()
+        self.render_models()
+
+    def _refresh_note(self, total, updated, refused, read, note, saved):
+        """One sentence saying what this press actually achieved.
+
+        A partial refresh that reported plain success would be the wrong claim
+        in the one case where it matters most -- when the host answered for
+        some models and not others, and the reader would otherwise assume the
+        whole list is current.
+        """
+        if not refused:
+            return (f"Read {read} from {self.host_name()}. {note}{saved}")
+        problems = "; ".join(f"{repo}: {reason}" for repo, reason
+                             in sorted(refused.items()))
+        return (f"Read {read} from {self.host_name()}, but {len(refused)} of "
+                f"{total} could not be: {problems}. {note}{saved}")
 
     def do_restore(self):
         """Put back the catalogue from before the last refresh."""

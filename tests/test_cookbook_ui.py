@@ -395,30 +395,71 @@ def test_the_refresh_button_says_what_it_sends_before_it_is_pressed(window) -> N
         f"it does not say what is sent: {tip!r}")
 
 
-def test_refreshing_asks_once_and_reports_a_failure_without_losing_the_list(window) -> None:
-    """One press is one request, and a refusal leaves what was already there."""
+def test_one_press_asks_once_per_model_and_says_so_when_none_answer(window) -> None:
+    """One press, one request per model, and a refusal that loses nothing.
+
+    The requests run in sequence rather than all at once: a burst of four from
+    a single button press is not something the person pressing it agreed to,
+    and the progress on the button only means something if it is counting work
+    already done.
+    """
     panel = panel_of(window)
     settle()
     pending = []
     window.command = lambda name, *args, **kwargs: pending.append(kwargs)
 
     panel.do_refresh()
-    assert len(pending) == 1, f"one press asked {len(pending)} times"
+    assert len(pending) == 1, f"one press asked {len(pending)} times at once"
     assert not panel.refresh.isEnabled(), (
         "the button stayed live while the request was in flight")
+    assert "1 of" in panel.refresh.text(), (
+        f"the button does not show progress: {panel.refresh.text()!r}")
 
     panel.do_refresh()
-    assert len(pending) == 1, "a second request started while the first was running"
+    assert len(pending) == 1, "a second press started another pass while one was running"
 
-    pending[0]["failure"]("huggingface.co could not be reached.")
+    # Answer every request with a refusal, in order.
+    guard = 0
+    while pending and guard < 20:
+        pending.pop(0)["failure"]("huggingface.co could not be reached.")
+        guard += 1
     settle()
 
+    assert guard < 20, "the refresh looped instead of finishing"
     said = text_of(panel).lower()
     assert "could not be read" in said, "a failed refresh said nothing"
     assert "qwen2.5" in said, "a failed refresh emptied the list it had already loaded"
     assert panel.refresh.isEnabled(), "the button stayed dead after a failure"
     assert panel.refresh.text().startswith("Refresh from"), (
         f"the button is still mid-attempt: {panel.refresh.text()!r}")
+    assert not panel._busy, "the page is still marked busy after a failed refresh"
+
+
+def test_every_model_is_re_read_not_just_the_first(window) -> None:
+    """A refresh has to update the list, not one entry in it.
+
+    It used to refresh ``catalog[0]``, so the other three kept figures as old
+    as the install and the one that moved was whichever happened to sort
+    first. That is not a refresh of a catalogue.
+    """
+    panel = panel_of(window)
+    settle()
+    pending = []
+    window.command = lambda name, *args, **kwargs: pending.append(kwargs)
+    asked = []
+
+    panel.do_refresh()
+    guard = 0
+    while pending and guard < 40:
+        request = pending.pop(0)
+        asked.append(request)
+        request["failure"]("no")
+        guard += 1
+    settle()
+
+    assert guard < 40, "the refresh looped instead of finishing"
+    assert len(asked) == len(panel.catalog), (
+        f"one press asked {len(asked)} times for {len(panel.catalog)} models")
 
 
 def test_a_refreshed_model_goes_through_the_same_validation_as_a_bundled_one(window) -> None:
@@ -443,16 +484,26 @@ def test_a_refreshed_model_goes_through_the_same_validation_as_a_bundled_one(win
         pending = []
         window.command = lambda name, *args, **kwargs: pending.append(kwargs)
         panel.do_refresh()
-        pending[0]["success"](dict(record, last_verified="now"))
+        # The bad record answers the first request; the rest fail, so the
+        # refresh finishes without any of them changing the catalogue.
+        guard = 0
+        while pending and guard < 40:
+            request = pending.pop(0)
+            if not guard:
+                request["success"](dict(record, last_verified="now"))
+            else:
+                request["failure"]("no")
+            guard += 1
         settle()
+
         assert "unusable" in text_of(panel).lower(), (
             f"{record!r} was accepted: {text_of(panel)[:200]!r}")
         assert [model.repo for model in panel.catalog] == before, (
-            f"a refused record still changed the list: "
+            "a refused record still changed the list: "
             f"{[model.repo for model in panel.catalog]}")
 
 
-def test_a_good_refresh_replaces_the_model_and_saves_it_for_next_time(window) -> None:
+def test_a_good_refresh_replaces_every_model_and_saves_it_for_next_time(window) -> None:
     """The happy path, and that a refresh survives a restart.
 
     It used to be held in memory and the page said so. That was true and it was
@@ -464,24 +515,124 @@ def test_a_good_refresh_replaces_the_model_and_saves_it_for_next_time(window) ->
     panel = panel_of(window)
     settle()
     pending = []
-    window.command = lambda name, *args, **kwargs: pending.append(kwargs)
+    # The repo asked for is captured as well as the callbacks, because a real
+    # host answers with the model that was requested. Replying with a different
+    # one is a different case entirely, and has its own test below.
+    window.command = lambda name, *args, **kwargs: pending.append(
+        (args, kwargs))
     panel.do_refresh()
-    pending[0]["success"]({
-        "repo": "someone/Brand-New-Model", "artifact_repo": "bartowski/Brand-New-Model-GGUF",
-        "name": "Brand New Model", "publisher": "someone", "parameters": 700000000,
-        "context": 8192, "layers": 16, "kv_heads": 4, "head_dim": 64,
-        "license": "apache-2.0", "languages": ("en",), "vision": False,
-        "tasks": ("general",), "verified": False,
-        "variants": [{"name": "m-Q4_K_M.gguf", "quantization": "Q4_K_M", "size": 500_000_000}],
-        "last_verified": "2026-10-10 12:00 UTC"})
+
+    def answer(request, index):
+        repo = request[0][0]
+        request[1]["success"]({
+            "repo": repo, "artifact_repo": "bartowski/Brand-New-Model-GGUF",
+            "name": f"Brand New Model {index}", "publisher": "someone",
+            "parameters": 700000000, "context": 8192, "layers": 16,
+            "kv_heads": 4, "head_dim": 64, "license": "apache-2.0",
+            "languages": ("en",), "vision": False, "tasks": ("general",),
+            "verified": False,
+            "variants": [{"name": "m-Q4_K_M.gguf", "quantization": "Q4_K_M",
+                          "size": 500_000_000}],
+            "last_verified": "2026-10-10 12:00 UTC"})
+
+    guard = 0
+    index = 0
+    while pending and guard < 40:
+        answer(pending.pop(0), index)
+        index += 1
+        guard += 1
     settle()
 
     said = text_of(panel)
-    assert "Brand New Model" in said, f"the refreshed model is not shown: {said[:300]!r}"
+    assert index == len(panel.catalog), (
+        f"the press answered {index} requests for {len(panel.catalog)} models")
+    assert "Brand New Model" in said, f"the refreshed models are not shown: {said[:300]!r}"
 
     saved = load_cache(panel.directory)
     assert saved is not None, "the refresh was not saved, so the next launch forgets it"
-    assert "someone/Brand-New-Model" in {model.repo for model in saved}
+    assert saved, "the saved catalogue is empty"
+    assert len(saved) == len(panel.catalog), (
+        f"the saved catalogue has {len(saved)} models, not {len(panel.catalog)}")
+    assert all(model.last_verified == "2026-10-10 12:00 UTC" for model in saved), (
+        "the saved catalogue kept the old figures, so nothing was refreshed")
+
+
+def test_a_partial_refresh_says_which_models_it_missed(window) -> None:
+    """Half a refresh must not be reported as a whole one.
+
+    This is the case that matters: the host answered for some models and not
+    others, and a reader who is told plainly that it worked will believe a
+    stale list is current.
+    """
+    panel = panel_of(window)
+    settle()
+    pending = []
+    window.command = lambda name, *args, **kwargs: pending.append(kwargs)
+    panel.do_refresh()
+
+    good = {"repo": "someone/Fresh", "artifact_repo": "bartowski/Fresh-GGUF",
+            "name": "Fresh", "publisher": "someone", "parameters": 700000000,
+            "context": 8192, "layers": 16, "kv_heads": 4, "head_dim": 64,
+            "license": "apache-2.0", "languages": ("en",), "vision": False,
+            "tasks": ("general",), "verified": False,
+            "variants": [{"name": "m-Q4_K_M.gguf", "quantization": "Q4_K_M",
+                          "size": 500_000_000}],
+            "last_verified": "2026-10-10 12:00 UTC"}
+
+    guard = 0
+    while pending and guard < 40:
+        request = pending.pop(0)
+        if guard == 0:
+            request["success"](dict(good))
+        else:
+            request["failure"]("timed out")
+        guard += 1
+    settle()
+
+    note = panel.catalog_note.text()
+    assert "Fresh" in text_of(panel), "the model that did answer is not shown"
+    assert "could not be" in note.lower(), (
+        f"a partial refresh reported itself as a whole one: {note!r}")
+    assert "timed out" in note, f"the note does not say what went wrong: {note!r}"
+    assert panel.refresh.isEnabled(), "the button stayed dead after a partial refresh"
+
+
+def test_a_refresh_that_returns_an_unknown_model_does_not_add_it(window) -> None:
+    """The response decides what is refreshed, not what is adopted.
+
+    A host answering with a model nobody asked about is not a refresh result.
+    Merging it in would let a mirror replace the catalogue with whatever it
+    likes, which is the one thing the opt-in request was not agreeing to.
+    """
+    panel = panel_of(window)
+    settle()
+    before = [model.repo for model in panel.catalog]
+    pending = []
+    window.command = lambda name, *args, **kwargs: pending.append(kwargs)
+    panel.do_refresh()
+
+    guard = 0
+    while pending and guard < 40:
+        request = pending.pop(0)
+        if not guard:
+            request["success"]({
+                "repo": "someone/Completely-Different", "artifact_repo": "x/y",
+                "name": "Different", "publisher": "someone", "parameters": 700000000,
+                "context": 8192, "layers": 16, "kv_heads": 4, "head_dim": 64,
+                "license": "apache-2.0", "languages": ("en",), "vision": False,
+                "tasks": ("general",), "verified": False,
+                "variants": [{"name": "m-Q4_K_M.gguf", "quantization": "Q4_K_M",
+                              "size": 500_000_000}],
+                "last_verified": "2026-10-10 12:00 UTC"})
+        else:
+            request["failure"]("no")
+        guard += 1
+    settle()
+
+    repos = [model.repo for model in panel.catalog]
+    assert "someone/Completely-Different" not in repos, (
+        "a model that was never asked about was adopted from the response")
+    assert repos == before, f"the catalogue changed to {repos}"
 
 
 def test_the_restore_button_only_works_once_there_is_something_behind_it(window) -> None:
