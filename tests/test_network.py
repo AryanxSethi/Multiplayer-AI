@@ -23,6 +23,27 @@ from network_a2a.server import create_app
 
 TOKENS = {name: name * 40 for name in ("a", "b", "c", "d")}
 
+# How long a subprocess agent is given to come up.
+#
+# A deadline, not a count of attempts. These loops sleep between polls, so a
+# fixed number of iterations is however long the sleeps happen to take plus
+# however long the round trips happen to take -- it is not a time budget, and
+# on a loaded machine it was not one. A CLI agent is a fresh interpreter that
+# imports starlette, uvicorn, websockets and pydantic before it connects at
+# all, so on a slow or busy box it can need several seconds to appear; the old
+# 150 attempts gave it about three and then the test carried on regardless and
+# failed on the response instead, as a 503 from an agent that had not arrived.
+#
+# The time here is generous on purpose. It is only ever spent when something
+# is genuinely wrong, and a slow failure is a far better outcome than a wrong
+# one.
+SUBPROCESS_STARTUP_SECONDS = 30.0
+
+# And how long the teardown waits for a peer to actually go offline before it
+# stops caring. Short, because this runs after every single test and a peer
+# that is still online in one test is a stale peer in the next.
+TEARDOWN_SETTLE_SECONDS = 5.0
+
 
 class NetworkTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
@@ -71,12 +92,47 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
         await asyncio.gather(*self.runners, return_exceptions=True)
         # Wait for server-side cleanup before reusing identities.
+        #
+        # Bounded by a deadline rather than a number of attempts, for the same
+        # reason the startup waits below are. This one used to fall out of the
+        # loop silently, which is worse here than anywhere else: the comment
+        # says it exists so identities are not reused, and a peer still shown
+        # online when this gives up is carried straight into the next test.
+        deadline = time.monotonic() + TEARDOWN_SETTLE_SECONDS
         async with httpx.AsyncClient() as http:
-            for _ in range(50):
+            while True:
                 result = await http.get(self.http_url + "/agents", headers=self.headers("a"))
                 if not any(agent["online"] for agent in result.json()["agents"]):
-                    break
+                    return
+                if time.monotonic() >= deadline:
+                    return
                 await asyncio.sleep(.02)
+
+    async def wait_for_subprocess_agent(self, process, agent, what, budget=None):
+        """Block until a spawned CLI agent shows up online, or fail saying why.
+
+        Returns once the agent is visible on the relay. Raises when the process
+        dies, which is a different fault from one that never arrives and needs
+        a different sentence: a process that exited has usually printed
+        something about why, and a process that is merely slow has not.
+
+        ``budget`` overrides the wait so the tests for this method do not have
+        to spend the real one to prove it gives up.
+        """
+        budget = SUBPROCESS_STARTUP_SECONDS if budget is None else budget
+        deadline = time.monotonic() + budget
+        async with httpx.AsyncClient() as http:
+            while time.monotonic() < deadline:
+                listing = await http.get(self.http_url + "/agents", headers=self.headers("a"))
+                if any(entry["id"] == agent and entry["online"] for entry in listing.json()["agents"]):
+                    return
+                if process.poll() is not None:
+                    self.fail(f"{what} exited before connecting")
+                await asyncio.sleep(.05)
+        self.fail(f"{what} never came online within {budget:.0f}s. "
+                  "It is a subprocess that has to import the whole network stack "
+                  "before it connects, so this is either a very slow start or "
+                  "one that cannot reach the relay.")
 
     def headers(self, agent):
         return {"Authorization": "Bearer " + TOKENS[agent]}
@@ -194,13 +250,67 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         old_peer = self.app.state.relay.peers["b"]
         close = asyncio.run_coroutine_threadsafe(old_peer.socket.close(code=1012), self.loop)
         await asyncio.wrap_future(close)
-        for _ in range(200):
-            if self.app.state.relay.peers.get("b") is not old_peer and "b" in self.app.state.relay.peers and b.ready.is_set():
+        # Deadlined for the same reason the subprocess waits below are. This
+        # one already reported a timeout, so it was never the silent case; the
+        # iteration count just meant the time it actually allowed was whatever
+        # the polls happened to cost.
+        deadline = time.monotonic() + SUBPROCESS_STARTUP_SECONDS
+        while time.monotonic() < deadline:
+            if (self.app.state.relay.peers.get("b") is not old_peer
+                    and "b" in self.app.state.relay.peers and b.ready.is_set()):
                 break
-            await asyncio.sleep(.02)
+            await asyncio.sleep(.05)
         else:
-            self.fail("Client did not reconnect")
+            self.fail(f"Client did not reconnect within {SUBPROCESS_STARTUP_SECONDS:.0f}s")
         self.assertEqual((await a.request("b", "after reconnect"))["payload"], "after reconnect")
+
+    async def test_a_wait_that_never_succeeds_reports_the_wait_and_not_the_response(self):
+        """The failure has to name what went wrong, or it cannot be acted on.
+
+        Every subprocess wait below used to fall out of its loop when it ran
+        out of attempts and carry on to the request, which then failed on the
+        response -- a 503 from an agent that had not arrived. The report named
+        the request instead of the wait, so the only clue was a status code
+        with nothing to connect it to.
+
+        So a wait that cannot succeed is asserted to fail here, on its own
+        terms. A process that is alive but never registers has to produce the
+        sentence about never coming online, not an exit message, because the
+        two faults need different things: one needs a longer budget and the
+        other needs whatever the process printed.
+        """
+        class Forever:
+            def poll(self):
+                return None
+
+        # A tenth of a second, because this is testing that the wait gives up
+        # and says so, not how long it is willing to wait.
+        with self.assertRaisesRegex(AssertionError, "never came online within"):
+            await self.wait_for_subprocess_agent(Forever(), "nobody", "A test agent", budget=0.1)
+
+        class Died:
+            def poll(self):
+                return 1
+
+        with self.assertRaisesRegex(AssertionError, "exited before connecting"):
+            await self.wait_for_subprocess_agent(Died(), "nobody", "A test agent", budget=0.1)
+
+    async def test_a_process_that_dies_early_is_not_waited_on_for_the_full_budget(self):
+        """An exited process is reported at once rather than after the deadline.
+
+        Otherwise a typo in a command line costs the whole budget before
+        anything is said about it, which on a slow machine is a minute of
+        nothing.
+        """
+        started = time.monotonic()
+        class Died:
+            def poll(self):
+                return 1
+
+        with self.assertRaisesRegex(AssertionError, "exited before connecting"):
+            await self.wait_for_subprocess_agent(Died(), "nobody", "A test agent", budget=10)
+        self.assertLess(time.monotonic() - started, 5,
+                        "an already-dead process was waited on for the full budget")
 
     async def test_cli_bridges_local_jsonrpc_endpoint(self):
         process = subprocess.Popen([sys.executable, "-m", "network_a2a", "--server", self.ws_url,
@@ -208,14 +318,8 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
                                    env={**os.environ, "A2A_TOKEN": TOKENS["b"]},
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
+            await self.wait_for_subprocess_agent(process, "b", "The CLI bridge")
             async with httpx.AsyncClient() as http:
-                for _ in range(150):
-                    listing = await http.get(self.http_url + "/agents", headers=self.headers("a"))
-                    if any(agent["id"] == "b" and agent["online"] for agent in listing.json()["agents"]):
-                        break
-                    if process.poll() is not None:
-                        self.fail("CLI bridge exited before connecting")
-                    await asyncio.sleep(.02)
                 response = await http.post(self.http_url + "/agents/b/invoke", headers=self.headers("a"),
                                            json={"jsonrpc": "2.0", "id": "inner-id", "method": "SendMessage",
                                                  "params": {"text": "real local HTTP bridge"}})
@@ -234,14 +338,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
                                    env={**os.environ, "A2A_TOKEN": TOKENS["b"]},
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            async with httpx.AsyncClient() as http:
-                for _ in range(150):
-                    listing = await http.get(self.http_url + "/agents", headers=self.headers("a"))
-                    if any(agent["id"] == "b" and agent["online"] for agent in listing.json()["agents"]):
-                        break
-                    if process.poll() is not None:
-                        self.fail("Provider CLI exited before connecting")
-                    await asyncio.sleep(.02)
+            await self.wait_for_subprocess_agent(process, "b", "The provider CLI")
             result = await a.request("b", {"text": "from Alice"})
             self.assertEqual(result["text"], "Model received: from Alice")
             self.assertEqual(result["provider"], "ollama")
