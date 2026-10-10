@@ -372,8 +372,20 @@ class MainWindow(QMainWindow):
             "Create an invitation that another device can use to join this workspace")
         self.add_button.setToolTip(
             "Connect a model agent to this workspace")
+        # The Cookbook is a window of its own rather than a rail entry: it is
+        # somewhere to go and look something up, not somewhere the work
+        # happens. Painted by navigation_icon like every other mark here, so it
+        # carries the same stroke as its neighbours instead of a glyph that
+        # came out of whatever font resolved.
+        self.cookbook_button = action("", self.open_cookbook, name="ghost")
+        self.cookbook_button.setIcon(navigation_icon("cookbook", color(self.theme, "text")))
+        self.cookbook_button.setToolTip(
+            "Cookbook: which AI models this device's memory can hold, and how "
+            "to run the ones that fit. Opens a separate window.")
+        self.cookbook_button.setAccessibleName("Open the Cookbook")
         self.invite_button.setEnabled(False)
         self.add_button.setEnabled(False)
+        top_layout.addWidget(self.cookbook_button)
         top_layout.addWidget(self.invite_button)
         top_layout.addWidget(self.add_button)
         body_layout.addWidget(top)
@@ -1298,6 +1310,10 @@ class MainWindow(QMainWindow):
             self.welcome_art.set_theme(name)
         for button, (_, key) in zip(self.nav_buttons, PAGES):
             button.setIcon(navigation_icon(key, color(name, "text")))
+        if hasattr(self, "cookbook_button"):
+            self.cookbook_button.setIcon(navigation_icon("cookbook", color(name, "text")))
+        if getattr(self, "_cookbook", None) is not None:
+            self._cookbook.set_theme(name)
         for provider, logo in self.provider_logos.items():
             logo.setPixmap(provider_pixmap(provider, name))
         if hasattr(self, "theme_picker"):
@@ -3706,6 +3722,24 @@ class MainWindow(QMainWindow):
     def add_workspace(self):
         """The rail's plus goes to the page, where both routes are offered."""
         self.navigate(WORKSPACES_PAGE)
+
+    def open_cookbook(self):
+        """Open the Cookbook, or raise the one already open.
+
+        Held on the window so a second press does not open a second window
+        with a second copy of the same list, and so the theme can be pushed
+        into it rather than the window having to poll for it.
+        """
+        dialog = getattr(self, "_cookbook", None)
+        if dialog is None:
+            from .cookbook_dialog import CookbookDialog
+            dialog = self._cookbook = CookbookDialog(self, self.theme)
+            dialog.finished.connect(lambda *_: setattr(self, "_cookbook", None))
+        dialog.set_theme(self.theme)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
 
     def leave_workspace(self):
         """Leave a workspace this device joined, from the page that shows it.

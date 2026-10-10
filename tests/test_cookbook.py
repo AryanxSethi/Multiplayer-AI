@@ -418,11 +418,47 @@ def test_every_shipped_number_is_traceable_to_a_publisher():
     assert sizes["Q2_K"] < sizes["Q4_K_M"] < sizes["f16"], (
         "a smaller quantisation cannot be a larger file")
 
+    one_half = catalog["Qwen/Qwen2.5-1.5B-Instruct"]
+    assert one_half.parameters == 1543714304
+    assert (one_half.layers, one_half.kv_heads, one_half.head_dim) == (28, 2, 128)
+    assert {variant.quantization: variant.size
+            for variant in one_half.variants}["Q4_K_M"] == 986048768
+
     small = catalog["Qwen/Qwen2.5-0.5B-Instruct"]
     assert small.parameters == 494032768
     assert (small.layers, small.kv_heads, small.head_dim) == (24, 2, 64)
     assert small.artifact_repo.endswith("-GGUF")
     assert small.variants[0].size < 1024 ** 3
+
+    phi = catalog["microsoft/Phi-3.5-mini-instruct"]
+    assert phi.parameters == 3821079552
+    assert phi.license == "mit"
+    assert (phi.layers, phi.kv_heads, phi.head_dim) == (32, 32, 96)
+    # Recorded as 4096 rather than the 131072 its config advertises, because
+    # that longer figure needs a LongRoPE scaling this catalogue cannot check
+    # any runtime applies. See SOURCES.md.
+    assert phi.context == 4096
+    assert {variant.quantization: variant.size
+            for variant in phi.variants}["Q4_K_M"] == 2393232672
+
+
+def test_the_catalogue_spans_more_than_one_hardware_tier():
+    """A catalogue of one size answers one question.
+
+    The point of the list is that a 0.5B model and a 7B one need very different
+    machines, so it has to hold both or the smallest screen can never see
+    anything and the largest only ever sees one answer.
+    """
+    catalog = load_catalog()
+    sizes = sorted(model.parameters for model in catalog)
+    assert len(sizes) >= 3, f"only {len(sizes)} models, which is not a catalogue"
+    assert sizes[-1] > sizes[0] * 5, (
+        f"every model is within a factor of five of every other: {sizes}")
+    tasks = {task for model in catalog for task in model.tasks}
+    assert "coding" in tasks and "general" in tasks, (
+        f"the catalogue only covers one kind of work: {tasks}")
+    for model in catalog:
+        assert model.variants, f"{model.repo} has no downloadable build, so it can never be suggested"
 
 
 def test_detection_reports_what_it_read_and_what_it_did_not():

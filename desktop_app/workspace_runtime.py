@@ -659,6 +659,30 @@ class WorkspaceRuntime:
         response.raise_for_status()
         return [item["name"] for item in response.json()["models"]]
 
+    async def cookbook_refresh(self, repo, artifact_repo=None):
+        """Read one model's details from the Hugging Face Hub, on request.
+
+        Reached only from the Cookbook's Refresh control, which says what the
+        request is before it is made. Nothing in this app calls it on a timer
+        or on open, because the Resources page tells the user that nothing is
+        sent anywhere and a background call would make that untrue.
+
+        Returns the fields the Cookbook can check rather than the whole
+        response, so a Hub payload that has grown new keys cannot quietly
+        become part of a recommendation. Anything absent is left out of the
+        result rather than defaulted: a missing context length would otherwise
+        become a key/value cache figure and an invented one is confidently
+        wrong by a factor of several.
+
+        The identifer is validated as ``publisher/name`` before it is put in a
+        URL, so a record cannot redirect the request somewhere else.
+        """
+        from .cookbook_hub import fetch_entry
+
+        async with self.mutation:
+            return await fetch_entry(self.relay_http() if self.remote else self.http,
+                                     repo, artifact_repo)
+
     async def set_coordinator(self, agent_id):
         """Save the owner's default model, retaining import order for Automatic."""
         async with self.mutation:

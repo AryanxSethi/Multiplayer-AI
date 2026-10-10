@@ -44,6 +44,37 @@ leaves wider, and metadata no bit count accounts for.
 **No benchmark scores, download links or capabilities are guessed.** Where the
 Hub did not carry a field it is absent from the record rather than filled in.
 
+**No gated model is listed.** A gated repository's `config.json` returns 401
+without an accepted licence agreement, so its layer geometry cannot be read and
+its KV cache cannot be worked out. `meta-llama/Llama-3.2-1B-Instruct` was
+dropped for exactly this reason, despite being an obvious candidate.
+
+**Phi-3.5 Mini records 4096 as its context, not 131072.** Its
+`config.json` declares `max_position_embeddings: 131072` but also
+`original_max_position_embeddings: 4096` and a LongRoPE scaling block. The
+longer figure depends on a runtime applying that scaling correctly, and this
+catalogue cannot tell whether one will. The native figure is recorded, so the
+cache is costed for a conversation the model definitely supports.
+
+## Widening the catalogue
+
+Each model costs three reads and cannot be added for less:
+
+1. `https://huggingface.co/api/models/<repo>` — parameter count, licence,
+   languages, and whether it is gated at all.
+2. `https://huggingface.co/<repo>/raw/main/config.json` — context, layers,
+   key/value heads, and `hidden_size / num_attention_heads`.
+3. `https://huggingface.co/api/models/<artifact_repo>/tree/main` — the real
+   size of every downloadable build.
+
+Step 3 is what makes a model recommendable. `best_variant()` walks variants, so
+a record with no verified file size never appears in a recommendation, which is
+correct — there would be nothing to download.
+
+Every figure currently in `catalog.json` is asserted in
+`tests/test_cookbook.py::test_every_shipped_number_is_traceable_to_a_publisher`,
+so a hand edit or a repointed repository fails the suite rather than shipping.
+
 ## Keeping it current
 
 The catalogue is a versioned data file under `desktop_app/assets/`, which
