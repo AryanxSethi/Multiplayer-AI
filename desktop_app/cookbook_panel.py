@@ -22,10 +22,11 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
 
-from .cookbook import (PREVIOUS_NAME, CatalogError, TASKS, describe_changes,
-                       detect_hardware, human_bytes, kv_cache_bytes,
-                       load_cache, load_catalog, ollama_commands, parse_model,
-                       recommend, rollback_catalog, save_catalog)
+from .cookbook import (EXPLANATIONS, PREVIOUS_NAME, CatalogError, TASKS,
+                       describe_changes, detect_hardware, human_bytes,
+                       kv_cache_bytes, load_cache, load_catalog,
+                       ollama_commands, parse_model, recommend,
+                       rollback_catalog, save_catalog)
 from .cookbook_hub import check_base
 from .widgets import Select, action, label
 
@@ -38,11 +39,29 @@ from .widgets import Select, action, label
 # It went unnoticed in a dialog and would not in a page, where the surrounding
 # stylesheet is in reach.
 TONE = {
-    "likely to run": "online",
-    "verified compatible": "online",
-    "possible with compromises": "muted",
-    "not recommended": "errorMessage",
-    "unknown": "muted",
+    "likely to run": "verdictOk",
+    "verified compatible": "verdictOk",
+    "possible with compromises": "verdictWarn",
+    "not recommended": "verdictBad",
+    "unknown": "verdictUnknown",
+}
+
+# The card each verdict is drawn on, which is what carries the colour.
+#
+# A coloured left border rather than a badge, because that is what this app
+# already does for a card whose status matters: #joinCard for success and
+# #createCard for accent. A pill would have been a second visual vocabulary
+# for a thing the interface already expresses.
+#
+# "unknown" and "possible with compromises" used to share one grey, which is
+# not a small difference: one says we do not know, the other says it runs but
+# slowly. A reader who cannot see the difference is being told nothing.
+CARD = {
+    "likely to run": "modelCardOk",
+    "verified compatible": "modelCardOk",
+    "possible with compromises": "modelCardWarn",
+    "not recommended": "modelCardBad",
+    "unknown": "modelCardUnknown",
 }
 
 # How many model cards one page holds.
@@ -310,9 +329,9 @@ class CookbookPanel(QWidget):
         self.mirror.clear()
         self.save_mirror()
 
-    def _card(self):
+    def _card(self, name="card"):
         from .window import frame
-        return frame("card")
+        return frame(name)
 
     def load(self):
         """The cached catalogue if there is one, otherwise the bundled one.
@@ -477,16 +496,26 @@ class CookbookPanel(QWidget):
 
     def _model_card(self, row):
         model, variant, verdict = row["model"], row["variant"], row["verdict"]
-        card, column = self._card()
+        card, column = self._card(CARD[verdict["result"]])
         column.setContentsMargins(20, 17, 20, 17)
 
-        top = QHBoxLayout()
-        top.addWidget(label(model.display, "heading", True))
+        column.addWidget(label(model.display, "heading", True))
+        # The verdict sits under the name as its own line rather than floating
+        # at the far right of the heading row. Beside a 19px heading it read as
+        # a second title, and "possible with compromises" is twenty-four
+        # characters of prose competing with the model's name for attention.
+        # The card's own left border carries the signal now; this says which.
         badge = label(verdict["result"], TONE.get(verdict["result"], "muted"))
-        badge.setAccessibleName(f"Assessment: {verdict['result']}")
-        top.addWidget(badge)
-        top.addStretch()
-        column.addLayout(top)
+        gloss = EXPLANATIONS.get(verdict["result"])
+        if gloss:
+            # Written out in EXPLANATIONS and never rendered until now: the
+            # verdict is an internal phrase, and a reader who cannot see the
+            # colour has nothing to go on.
+            badge.setToolTip(gloss)
+            badge.setAccessibleName(f"{verdict['result']}: {gloss}")
+        else:
+            badge.setAccessibleName(f"Assessment: {verdict['result']}")
+        column.addWidget(badge)
 
         facts = (f"{model.size_class} · {human_bytes(variant.size)} download "
                  f"· {variant.quantization} · {model.license or 'licence unstated'}")
@@ -505,8 +534,20 @@ class CookbookPanel(QWidget):
         if commands:
             column.addSpacing(6)
             column.addWidget(label("Run it", "muted"))
-            for entry in commands:
-                column.addWidget(label(entry["command"], "muted", True))
+            # One block holding all of them, monospaced. In the proportional
+            # face these were in, a repository path is an unbroken run of
+            # characters that wraps wherever it happens to land, which is the
+            # worst place for something the reader is about to copy and paste
+            # into a terminal and get exactly right.
+            block = label("\n".join(entry["command"] for entry in commands),
+                          "command", True)
+            block.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+            block.setAccessibleName(
+                f"{len(commands)} commands to run this model. Selectable, so "
+                "it can be copied rather than typed.")
+            column.addWidget(block)
 
         provenance = label(
             f"From {model.repo} on {model.source} · builds by "

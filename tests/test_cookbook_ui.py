@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page tests")
 pytest.importorskip("psutil", reason="psutil backs hardware detection")
 
-from PySide6.QtCore import QEvent  # noqa: E402
+from PySide6.QtCore import QEvent, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QScrollArea  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
@@ -245,27 +245,118 @@ def test_the_cookbook_icon_carries_no_emoji_or_font_glyph(window) -> None:
         assert painted > 0, f"the icon is blank at {size}px, so it needs a font"
 
 
-def test_a_not_recommended_badge_is_painted_in_the_danger_colour(window) -> None:
-    """The one badge that has to look wrong has to be styled to look wrong.
+def test_every_verdict_is_styled_and_no_two_meanings_look_alike(window) -> None:
+    """A verdict has to be told apart from every other verdict, in every theme.
 
-    It was given the theme token ``error`` where the Qt objectName wanted is
-    ``errorMessage``, and there is no rule for ``#error``, so the badge came out
-    in the default text colour -- a model this device should not run was drawn
-    exactly like one it should. A dialog hid it. On a page it does not, which
-    is why this is checked against the stylesheet rather than by eye.
+    This started as one narrow check on a name collision -- a badge given the
+    theme token ``error`` where the Qt objectName wanted was ``errorMessage``,
+    which matches no rule, so a model this device should not run was drawn
+    exactly like one it should. A dialog hid it; a page does not.
+
+    It now covers the whole mapping, because the same class of mistake is easy
+    to repeat by reuse: ``unknown`` and ``possible with compromises`` were both
+    sent to ``#muted``, so "we do not know" and "it runs but slowly" were drawn
+    identically. Every verdict must have a rule that exists in the stylesheet,
+    and the four distinct meanings must be visually distinct from each other.
     """
-    from desktop_app.cookbook_panel import TONE
-    from desktop_app.theme import color
-    assert TONE["not recommended"] == "errorMessage", (
-        f"the not-recommended badge is styled {TONE['not recommended']!r}, which "
-        "no label rule matches")
+    from desktop_app.cookbook_panel import CARD, TONE
+
+    assert set(TONE) == set(CARD), (
+        f"a verdict has a label style but no card, or the reverse: "
+        f"{set(TONE) ^ set(CARD)}")
+    for verdict, style in TONE.items():
+        assert CARD[verdict], f"{verdict!r} has no card to carry its colour"
+
     for theme in (DARK, LIGHT, MIKU):
-        assert "QLabel#errorMessage" in stylesheet(theme), (
-            f"the {theme} sheet does not style #errorMessage, so the badge "
-            "cannot be coloured")
-    # And it is not the same colour as the one that is fine, so it reads as a
-    # warning rather than as a second opinion.
-    assert color(DARK, "error") != color(DARK, "success")
+        for style in set(TONE.values()):
+            assert f"QLabel#{style}" in stylesheet(theme), (
+                f"the {theme} sheet has no QLabel#{style} rule, so a {style!r} "
+                "verdict renders as unstyled text")
+
+    # The colour now lives on the card, so each meaning needs its own card too,
+    # and no two meanings may collapse onto one.
+    assert len(set(CARD.values())) == 4, (
+        f"only {len(set(CARD.values()))} distinct cards for four meanings: "
+        f"{CARD}")
+    assert CARD["unknown"] != CARD["possible with compromises"], (
+        "'we do not know' and 'it runs but slowly' are drawn the same way")
+    assert CARD["not recommended"] != CARD["likely to run"]
+
+    for card in set(CARD.values()):
+        for theme in (DARK, LIGHT, MIKU):
+            assert f"QFrame#{card}" in stylesheet(theme), (
+                f"the {theme} sheet has no QFrame#{card} rule, so the verdict's "
+                "colour is never shown")
+    # And each card is drawn in the colour it claims, in every theme. The
+    # stylesheet resolves tokens on the way out, so this compares against the
+    # resolved palette value rather than against the @@token@@ that went in.
+    from desktop_app.theme import color
+    for card, token in (("modelCardOk", "success"),
+                        ("modelCardWarn", "warning"),
+                        ("modelCardBad", "error"),
+                        ("modelCardUnknown", "text_muted")):
+        for theme in (DARK, LIGHT, MIKU):
+            rule = [line for line in stylesheet(theme).splitlines()
+                    if line.startswith(f"QFrame#{card}")]
+            assert rule, f"no rule for {card} in {theme}"
+            assert color(theme, token) in rule[0], (
+                f"{card} is not drawn in {token} in {theme}: {rule[0]!r}")
+
+
+def test_the_verdict_carries_a_plain_english_gloss_for_hover_and_readers(window) -> None:
+    """The verdict word is internal vocabulary; the colour is not the only cue.
+
+    A colour is no use at all to somebody who cannot see it, and "possible
+    with compromises" means nothing on first reading. ``EXPLANATIONS`` holds a
+    sentence for each verdict and was never rendered anywhere -- this is what
+    it was written for.
+    """
+    from desktop_app.cookbook import EXPLANATIONS
+    from desktop_app.widgets import TickCheckBox  # noqa: F401  (import guard)
+
+    panel = panel_of(window)
+    settle()
+    badges = [widget for widget in panel.findChildren(QLabel)
+              if widget.objectName().startswith("verdict")]
+    assert badges, "no verdict badge was drawn at all"
+    for badge in badges:
+        result = badge.text()
+        assert result in EXPLANATIONS, (
+            f"{result!r} has no prepared explanation")
+        assert badge.toolTip() == EXPLANATIONS[result], (
+            f"the hover text for {result!r} is not its explanation")
+        assert EXPLANATIONS[result] in badge.accessibleName(), (
+            f"{result!r} is not explained to a screen reader")
+
+
+def test_a_command_is_monospaced_selectable_and_not_body_text(window) -> None:
+    """A command is to be copied, and a wrapped path cannot be.
+
+    These rendered in Segoe UI, where a repository identifier is an unbroken
+    run of characters that wraps wherever it happens to land -- the worst place
+    for something the reader is about to paste into a terminal and get exactly
+    right.
+    """
+    panel = panel_of(window)
+    settle()
+    blocks = [widget for widget in panel.findChildren(QLabel)
+              if widget.objectName() == "command"]
+    assert blocks, "no command block was drawn"
+    for theme in (DARK, LIGHT, MIKU):
+        rule = [line for line in stylesheet(theme).splitlines()
+                if line.startswith("QLabel#command")]
+        assert rule, f"the {theme} sheet has no QLabel#command rule"
+        assert "monospace" in rule[0] or "Consolas" in rule[0], (
+            f"commands are not monospaced in {theme}: {rule[0]!r}")
+
+    block = blocks[0]
+    assert "ollama run" in block.text()
+    assert block.text().count("\n") >= 2, (
+        "the commands are not held together in one block")
+    assert block.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse, (
+        "a command cannot be selected, so it can only be typed by hand")
+    assert block.accessibleName(), (
+        "the command block is silent to a screen reader")
 
 
 def test_opening_the_cookbook_asks_the_network_for_nothing(window) -> None:
