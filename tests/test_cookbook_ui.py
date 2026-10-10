@@ -664,6 +664,120 @@ def test_the_restore_button_only_works_once_there_is_something_behind_it(window)
         "restoring did not put the earlier models back on screen")
 
 
+def test_the_mirror_setting_can_be_reached_without_editing_the_json(window) -> None:
+    """Reading a setting nobody can change leaves the feature half-built.
+
+    ``cookbook_source`` was read by the page and documented in a commit
+    message, and the only way to set it was to open the preferences file by
+    hand. A mirror is the answer to a person who does not want the public host
+    to see their requests, so it has to be settable from the page.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    assert panel.mirror.accessibleName(), (
+        "the mirror box has no accessible name, so it does not exist to anyone "
+        "navigating by keyboard or screen reader")
+
+    panel.mirror.setText("https://hf-mirror.example.com")
+    panel.use_mirror.click()
+    settle()
+
+    assert panel.base == "https://hf-mirror.example.com", (
+        f"the mirror was not saved: {panel.base!r}")
+    assert window.storage.settings["cookbook_source"] == "https://hf-mirror.example.com"
+    # And every word on the page now names where a refresh would read from,
+    # rather than still claiming the public host.
+    assert "hf-mirror.example.com" in panel.refresh.text(), (
+        f"the button still names the wrong host: {panel.refresh.text()!r}")
+    assert "hf-mirror.example.com" in panel.refresh.toolTip(), (
+        "the disclosure still names the wrong host")
+    assert "huggingface.co" not in panel.catalog_note.text(), (
+        f"the note still claims the public host: {panel.catalog_note.text()!r}")
+
+
+def test_a_mirror_that_is_not_an_https_origin_is_refused_and_explained(window) -> None:
+    """The check is the one the request itself uses, so it fails before Refresh.
+
+    Accepting a value here that the request would later refuse would leave the
+    button promising to ask somewhere it cannot reach.
+    """
+    panel = panel_of(window)
+    # Shown, because isVisible() is false for anything in a window that is not
+    # on screen, and "the refusal was not shown" has to mean not shown rather
+    # than unshown.
+    window.show()
+    settle()
+    before = window.storage.settings.get("cookbook_source")
+
+    for bad in ("http://hf-mirror.example.com",
+                "https://hf-mirror.example.com/hf",
+                "https://hf-mirror.example.com?a=1",
+                "ftp://hf-mirror.example.com",
+                "not a host at all"):
+        panel.mirror.setText(bad)
+        panel.use_mirror.click()
+        settle()
+
+        assert panel.mirror_error.isVisible(), (
+            f"{bad!r} was accepted without saying anything")
+        assert panel.mirror_error.text(), (
+            f"{bad!r} was refused but not explained")
+        assert window.storage.settings.get("cookbook_source") == before, (
+            f"{bad!r} was written to the settings anyway")
+
+
+def test_clearing_the_mirror_goes_back_to_the_public_catalogue(window) -> None:
+    """There has to be a way back, or a mirror is a one-way door."""
+    panel = panel_of(window)
+    settle()
+    panel.mirror.setText("https://hf-mirror.example.com")
+    panel.use_mirror.click()
+    settle()
+    assert panel.base == "https://hf-mirror.example.com"
+
+    panel.restore_mirror.click()
+    settle()
+
+    assert not panel.base, f"the mirror is still in use: {panel.base!r}"
+    assert window.storage.settings.get("cookbook_source") is None
+    assert "huggingface.co" in panel.refresh.text(), (
+        f"the button did not go back to the public host: {panel.refresh.text()!r}")
+
+
+def test_an_empty_box_means_the_default_rather_than_an_error(window) -> None:
+    """Emptying the field is how you go back, so it must not read as a mistake."""
+    panel = panel_of(window)
+    settle()
+    panel.mirror.setText("https://hf-mirror.example.com")
+    panel.use_mirror.click()
+    settle()
+
+    panel.mirror.setText("")
+    panel.use_mirror.click()
+    settle()
+
+    assert not panel.mirror_error.isVisible(), (
+        f"emptying the box was reported as an error: {panel.mirror_error.text()!r}")
+    assert not panel.base
+
+
+def test_a_saved_mirror_is_shown_on_the_page(window) -> None:
+    """Whatever is in the setting is visible, not just held in a variable."""
+    # The window's own storage, not a separate fixture's: the page reads
+    # whatever the running window was built with.
+    window.storage.settings["cookbook_source"] = "https://hf-mirror.example.com"
+    window.storage.save()
+    panel = panel_of(window)
+    window.show()
+    settle()
+    assert panel.base == "https://hf-mirror.example.com"
+    assert panel.mirror.text() == "https://hf-mirror.example.com", (
+        "the page does not show the mirror it is about to use")
+    assert panel.mirror_box.isVisible(), (
+        "the mirror row is hidden while a mirror is set")
+
+
 def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(window) -> None:
     """The page holds no models of its own.
 

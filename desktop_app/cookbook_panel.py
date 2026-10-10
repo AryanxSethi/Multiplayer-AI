@@ -20,12 +20,13 @@ it sends before it is pressed.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
 
 from .cookbook import (PREVIOUS_NAME, CatalogError, TASKS, describe_changes,
                        detect_hardware, human_bytes, kv_cache_bytes,
                        load_cache, load_catalog, ollama_commands, parse_model,
                        recommend, rollback_catalog, save_catalog)
+from .cookbook_hub import check_base
 from .widgets import Select, action, label
 
 # The name of the badge beside each model, and the label style it wears.
@@ -67,7 +68,6 @@ class CookbookPanel(QWidget):
         # Both are per workspace: two workspaces can be looking at different
         # catalogues, and a shared cache would have them overwrite each other.
         self.directory = getattr(window.storage, "directory", None)
-        self.base = window.storage.settings.get("cookbook_source") or None
         self.setAccessibleName("Cookbook: models this device can run")
 
         page, layout = scroll_page()
@@ -164,6 +164,33 @@ class CookbookPanel(QWidget):
         pager.addWidget(self.next)
         layout.addLayout(pager)
 
+        # Where a refresh reads from. Reading the setting without ever offering
+        # a way to change it left the mirror documented and unreachable, and
+        # "set cookbook_source in the JSON" is not something a person can do.
+        self.mirror = QLineEdit()
+        self.mirror.setPlaceholderText("https://huggingface.co")
+        # Shown rather than left as a placeholder, so a mirror someone set
+        # months ago is visible on this page rather than being a fact only the
+        # code knows.
+        self.mirror.setText(self.base or "")
+        self.mirror.setAccessibleName("Model catalogue mirror host")
+        self.mirror.setToolTip(
+            "Leave empty to read from huggingface.co. A mirror is used for "
+            "every model on every refresh, and must be an https:// origin.")
+        self.mirror.editingFinished.connect(self.save_mirror)
+        self.use_mirror = action("Use this host", self.save_mirror, name="ghost")
+        self.use_mirror.setAccessibleName("Use this mirror host")
+        # A widget rather than a bare layout, so the whole row can be hidden
+        # together. A layout has no visibility of its own and hiding the two
+        # widgets inside it separately would leave the label's gap behind.
+        self.mirror_box = QWidget()
+        self.mirror_row = QHBoxLayout(self.mirror_box)
+        self.mirror_row.setContentsMargins(0, 0, 0, 0)
+        self.mirror_row.addWidget(label("Read from", "muted"))
+        self.mirror_row.addWidget(self.mirror, 1)
+        self.mirror_row.addWidget(self.use_mirror)
+        layout.addWidget(self.mirror_box)
+
         self.refresh = action(f"Refresh from {self.host_name()}", self.do_refresh, name="ghost")
         self.refresh.setToolTip(
             f"Re-read model details from {self.host_name()}. Sends your network "
@@ -173,9 +200,15 @@ class CookbookPanel(QWidget):
         self.restore.setToolTip(
             "Put back the catalogue that was in use before the last refresh. "
             "Useful when a refresh brought in something that does not fit.")
+        self.restore_mirror = action("Use the default host", self.reset_mirror,
+                                     name="ghost")
+        self.restore_mirror.setToolTip(
+            "Go back to reading from huggingface.co. Only appears once a "
+            "mirror has been set.")
         footer = QHBoxLayout()
         footer.addWidget(self.refresh)
         footer.addWidget(self.restore)
+        footer.addWidget(self.restore_mirror)
         footer.addStretch()
         # A Close box on a page is a lie: there is nothing to close. It was
         # there because this was a dialog, and it was the clearest sign the
@@ -183,11 +216,99 @@ class CookbookPanel(QWidget):
         # rail's job.
         layout.addLayout(footer)
 
+        self.mirror_error = label("", "errorMessage", True)
+        self.mirror_error.setWordWrap(True)
+        self.mirror_error.setVisible(False)
+        layout.addWidget(self.mirror_error)
+        self.mirror_box.setVisible(bool(self.base))
+        self.restore_mirror.setVisible(bool(self.base))
+
         self.load()
+
+    def showEvent(self, event):
+        """Re-read the mirror each time the page is shown.
+
+        A setting changed while this page was not on screen should not leave it
+        describing a host it has stopped using -- the box, the button and the
+        disclosure all name where the next request will go, and a stale name on
+        those is the page making a claim it cannot keep.
+
+        Skipped while the box has focus, so that arriving on the page does not
+        overwrite what somebody is in the middle of typing.
+        """
+        super().showEvent(event)
+        if self.mirror.hasFocus():
+            return
+        self.mirror.setText(self.base or "")
+        self.mirror_box.setVisible(bool(self.base))
+        self.restore_mirror.setVisible(bool(self.base))
+        self.refresh.setText(f"Refresh from {self.host_name()}")
+        self.refresh.setToolTip(
+            f"Re-read model details from {self.host_name()}. Sends your network "
+            "address and the model names being shown. Nothing is requested "
+            "until you press this.")
+
+    @property
+    def base(self):
+        """Where a refresh reads from, read live rather than remembered.
+
+        Cached at construction it went stale the moment the setting was changed
+        anywhere else -- the page would go on labelling its own button with a
+        host it had stopped using, which is the worst way for a control to
+        lie, since the button is what says where the request is about to go.
+        """
+        return self.window.storage.settings.get("cookbook_source") or None
 
     def host_name(self):
         """Where a refresh reads from, as a person would name it."""
         return self.base or "huggingface.co"
+
+    def save_mirror(self):
+        """Remember the mirror host, or say why the one typed is not usable.
+
+        The check is the one the request itself uses, so a value accepted here
+        cannot fail later at the point where the button says it is about to ask
+        somewhere. An empty box is not an error: it is the way back to the
+        default, which is also what the button beside it does.
+        """
+        typed = self.mirror.text().strip()
+        try:
+            host = check_base(typed or None)
+        except ValueError as error:
+            self.mirror_error.setText(str(error))
+            self.mirror_error.setVisible(True)
+            return
+        self.mirror_error.setVisible(False)
+
+        previous = dict(self.window.storage.settings)
+        self.window.storage.settings["cookbook_source"] = None if not typed else host
+        try:
+            self.window.storage.save()
+        except Exception as error:
+            # Put the setting back rather than leaving the box showing a host
+            # that was never saved, which would survive a restart and read as
+            # though it had taken.
+            self.window.storage.settings = previous
+            self.mirror_error.setText(f"That could not be saved: {error}")
+            self.mirror_error.setVisible(True)
+            return
+
+        self.refresh.setText(f"Refresh from {self.host_name()}")
+        self.refresh.setToolTip(
+            f"Re-read model details from {self.host_name()}. Sends your network "
+            "address and the model names being shown. Nothing is requested "
+            "until you press this.")
+        self.mirror_box.setVisible(bool(self.base))
+        self.restore_mirror.setVisible(bool(self.base))
+        self.catalog_note.setText(
+            f"Refreshes will be read from {self.host_name()}."
+            if self.base else
+            "Refreshes will be read from huggingface.co.")
+
+    def reset_mirror(self):
+        """Empty the box and go back to the public catalogue."""
+        self.mirror.clear()
+        self.save_mirror()
 
     def _card(self):
         from .window import frame
@@ -317,7 +438,7 @@ class CookbookPanel(QWidget):
             self.page_label.setText("")
             return
         self.page_label.setText(
-            f"Page {self._page + 1} of {pages} · {total} models")
+            f"Page {self._page + 1} of {pages} Â· {total} models")
         self.page_label.setAccessibleName(
             f"Page {self._page + 1} of {pages}, showing up to {PAGE_SIZE} of "
             f"{total} models")
@@ -335,7 +456,7 @@ class CookbookPanel(QWidget):
         note.setWordWrap(True)
         column.addWidget(note)
         column.addWidget(label(
-            f"{model.size_class} · {model.license or 'licence unstated'} · "
+            f"{model.size_class} Â· {model.license or 'licence unstated'} Â· "
             f"read {model.last_verified or 'unknown'}", "muted", True))
         return card
 
@@ -367,8 +488,8 @@ class CookbookPanel(QWidget):
         top.addStretch()
         column.addLayout(top)
 
-        facts = (f"{model.size_class} · {human_bytes(variant.size)} download "
-                 f"· {variant.quantization} · {model.license or 'licence unstated'}")
+        facts = (f"{model.size_class} Â· {human_bytes(variant.size)} download "
+                 f"Â· {variant.quantization} Â· {model.license or 'licence unstated'}")
         column.addWidget(label(facts, "muted", True))
         reason = label(verdict["reason"], "muted", True)
         reason.setWordWrap(True)
@@ -388,8 +509,8 @@ class CookbookPanel(QWidget):
                 column.addWidget(label(entry["command"], "muted", True))
 
         provenance = label(
-            f"From {model.repo} on {model.source} · builds by "
-            f"{model.artifact_repo} · read {model.last_verified or 'unknown'}",
+            f"From {model.repo} on {model.source} Â· builds by "
+            f"{model.artifact_repo} Â· read {model.last_verified or 'unknown'}",
             "muted", True)
         provenance.setWordWrap(True)
         column.addWidget(provenance)
