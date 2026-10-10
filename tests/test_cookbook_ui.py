@@ -16,7 +16,8 @@ pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page te
 pytest.importorskip("psutil", reason="psutil backs hardware detection")
 
 from PySide6.QtCore import QEvent, Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QDialog, QLabel,  # noqa: E402
+                             QPushButton, QScrollArea)
 
 from desktop_app import window as win  # noqa: E402
 from desktop_app.cookbook import (human_bytes, load_catalog,  # noqa: E402
@@ -972,6 +973,189 @@ def test_a_device_that_really_is_too_small_is_told_so_with_the_figures(window) -
                if button.isVisible()]
     assert not any("every model" in text.lower() for text in buttons), (
         f"widening the filter is offered for a device limit: {buttons}")
+
+
+def test_pressing_refresh_asks_before_it_reaches_the_network(window, monkeypatch) -> None:
+    """The disclosure is asked for at the moment of the action, not found earlier.
+
+    It used to be a muted line above the list and a tooltip on the button: a
+    paragraph somebody has to go looking for, about twelve HTTP requests they
+    are agreeing to, and the only thing in the app that leaves the machine
+    under its own power.
+    """
+    from desktop_app.dialogs import COOKBOOK_PATHS, RefreshDisclosure
+
+    panel = panel_of(window)
+    window.show()
+    settle()
+    asked = []
+
+    def answer(dialog):
+        asked.append(dialog)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(RefreshDisclosure, "exec", lambda self: answer(self))
+
+    pending = []
+    window.command = lambda name, *args, **kwargs: pending.append(kwargs)
+    panel.refresh.click()
+    settle()
+
+    assert len(asked) == 1, "pressing Refresh did not ask first"
+    dialog = asked[0]
+    said = " ".join(text.text() for text in dialog.findChildren(QLabel))
+
+    # Every part of it checkable before the press.
+    assert dialog.host == "https://huggingface.co"
+    assert dialog.host in said, f"the dialog never names the host: {said[:300]!r}"
+    assert str(len(panel.catalog) * len(COOKBOOK_PATHS)) in said, (
+        f"the dialog does not say how many requests this makes: {said[:300]!r}")
+    for path in COOKBOOK_PATHS:
+        assert f"{dialog.host}{path}" in said, (
+            f"the address {path} is never shown: {said[:400]!r}")
+    assert "IP address" in said, f"it does not say what is sent: {said[:400]!r}"
+    assert "no account" in said.lower(), (
+        f"it does not say what is not sent: {said[:400]!r}")
+    assert dialog.should_remember() is False, (
+        "the box starts ticked, so agreeing once is agreeing for good")
+    assert len(pending) == 1, (
+        f"it asked {len(pending)} times, so the first request went out before "
+        "the reader agreed to it")
+
+
+def test_cancelling_the_disclosure_requests_nothing(window, monkeypatch) -> None:
+    """Saying no has to actually mean no.
+
+    A disclosure that asks and then sends anyway is worse than none: it is the
+    same request, now with the app claiming the reader agreed to it.
+    """
+    from desktop_app.dialogs import RefreshDisclosure
+
+    panel = panel_of(window)
+    settle()
+    monkeypatch.setattr(RefreshDisclosure, "exec",
+                        lambda self: QDialog.DialogCode.Rejected)
+
+    pending = []
+    window.command = lambda name, *args, **kwargs: pending.append(kwargs)
+    panel.refresh.click()
+    settle()
+
+    assert pending == [], f"declining still sent {len(pending)} requests"
+    assert not panel._busy, "the page is left marked busy after a refusal"
+    assert panel.refresh.isEnabled(), "the button stayed dead after a refusal"
+    assert [model.repo for model in panel.catalog], "the list was disturbed"
+
+
+def test_agreement_is_remembered_per_host_not_once_forever(window, monkeypatch) -> None:
+    """A mirror is a different site, so it gets asked about separately.
+
+    Agreeing to tell huggingface.co which models you run is not agreeing to
+    tell somebody else, and the mirror is exactly the case where the reader
+    most needs to be told which host they are about to hand the list to.
+    """
+    from desktop_app.dialogs import RefreshDisclosure
+
+    panel = panel_of(window)
+    settle()
+    shown = []
+
+    def remember_now(self):
+        shown.append(self.host)
+        self.remember.setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(RefreshDisclosure, "exec", remember_now)
+
+    pending = []
+
+    def refuse_all(name, *args, **kwargs):
+        # Answered as it arrives, so the refresh finishes and the page is not
+        # left busy -- a second press would otherwise be ignored and the test
+        # would pass for the wrong reason.
+        pending.append(kwargs)
+        kwargs["failure"]("declined in test")
+
+    window.command = refuse_all
+
+    panel.refresh.click()
+    settle()
+    assert shown == ["https://huggingface.co"], f"asked about {shown}"
+    assert panel.consented("https://huggingface.co")
+
+    # Same host, no dialog at all -- that is the point of remembering.
+    shown.clear()
+    panel.refresh.click()
+    settle()
+    assert shown == [], f"the same host asked about twice: {shown}"
+
+    # A different host is asked about afresh, even after the first agreement.
+    panel.mirror.setText("https://hf-mirror.example.com")
+    panel.save_mirror()
+    settle()
+    panel.refresh.click()
+    settle()
+    assert shown == ["https://hf-mirror.example.com"], (
+        f"a new host was not disclosed: {shown}")
+    assert panel.consented("https://hf-mirror.example.com")
+    assert panel.consented("https://huggingface.co"), (
+        "agreeing to a mirror un-agreed the public host")
+
+
+def test_a_refused_consent_is_not_left_half_remembered(window, monkeypatch) -> None:
+    """If the agreement cannot be saved, it must not look saved.
+
+    Otherwise the reader is not warned again this session and is warned again
+    next time, which is worse than not remembering at all.
+    """
+    from desktop_app.dialogs import RefreshDisclosure
+
+    panel = panel_of(window)
+    settle()
+    monkeypatch.setattr(RefreshDisclosure, "exec", lambda self: (
+        self.remember.setChecked(True),
+        QDialog.DialogCode.Accepted)[1])
+
+    def refuse_save():
+        raise OSError("the preferences file is not writable")
+
+    monkeypatch.setattr(window.storage, "save", refuse_save)
+    window.command = lambda name, *args, **kwargs: None
+    panel.refresh.click()
+    settle()
+
+    assert not panel.consented("https://huggingface.co"), (
+        "an agreement that was never written down is being treated as given")
+    assert "cookbook_refresh_ok" not in window.storage.settings
+    assert "could not be saved" in panel.catalog_note.text(), (
+        f"the reader was not told: {panel.catalog_note.text()!r}")
+
+
+def test_a_mirror_is_named_as_somebody_elses_server(window, monkeypatch) -> None:
+    """The dialog says when the host is not the public catalogue.
+
+    This app cannot vouch for a mirror. What it can do is make sure the reader
+    knows that is what they are about to hand the model list to.
+    """
+    from desktop_app.dialogs import RefreshDisclosure
+
+    panel = panel_of(window)
+    settle()
+    panel.mirror.setText("https://hf-mirror.example.com")
+    panel.save_mirror()
+    settle()
+
+    asked = []
+    monkeypatch.setattr(RefreshDisclosure, "exec", lambda self: (
+        asked.append(self), QDialog.DialogCode.Accepted)[1])
+    window.command = lambda name, *args, **kwargs: None
+    panel.refresh.click()
+    settle()
+
+    said = " ".join(t.text() for t in asked[0].findChildren(QLabel))
+    assert "mirror" in said.lower(), (
+        f"a mirror is being presented as the public catalogue: {said[:300]!r}")
+    assert "hf-mirror.example.com" in asked[0].host
 
 
 def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(window) -> None:

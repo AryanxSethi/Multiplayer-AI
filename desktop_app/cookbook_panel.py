@@ -20,7 +20,8 @@ it sends before it is pressed.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
+                             QWidget)
 
 from .cookbook import (EXPLANATIONS, NOT_ENOUGH_PUBLISHED, NO_CATALOGUE,
                        PREVIOUS_NAME, CatalogError, TASKS, describe_changes,
@@ -115,8 +116,8 @@ class CookbookPanel(QWidget):
         layout.addWidget(label("WHICH MODELS FIT THIS MACHINE", "eyebrow"))
         layout.addWidget(label("Cookbook", "title"))
         layout.addWidget(label(
-            "Sized against this device's memory. Nothing is sent anywhere "
-            "unless you press Refresh.", "muted", True))
+            "Sized against this device's memory. Pressing Refresh asks first, "
+            "and says where it is about to read from.", "muted", True))
 
         self.hardware = detect_hardware(
             window.storage.directory if hasattr(window, "storage") else None)
@@ -211,7 +212,8 @@ class CookbookPanel(QWidget):
         self.mirror_row.addWidget(self.use_mirror)
         layout.addWidget(self.mirror_box)
 
-        self.refresh = action(f"Refresh from {self.host_name()}", self.do_refresh, name="ghost")
+        self.refresh = action(f"Refresh from {self.host_name()}", self.ask_to_refresh,
+                           name="ghost")
         self.refresh.setToolTip(
             f"Re-read model details from {self.host_name()}. Sends your network "
             "address and the model names being shown. Nothing is requested "
@@ -282,6 +284,18 @@ class CookbookPanel(QWidget):
     def host_name(self):
         """Where a refresh reads from, as a person would name it."""
         return self.base or "huggingface.co"
+
+    def host_origin(self):
+        """The full origin a request will go to, scheme included.
+
+        Separate from :meth:`host_name` because the button reads better saying
+        "huggingface.co" and the disclosure must not. A dialog asking for
+        permission to make twelve requests should show the reader the actual
+        address, and showing it without its scheme would mean the default host
+        was named one way and a mirror another, which is exactly the sort of
+        thing that makes the address hard to check.
+        """
+        return check_base(self.base)
 
     def save_mirror(self):
         """Remember the mirror host, or say why the one typed is not usable.
@@ -611,6 +625,63 @@ class CookbookPanel(QWidget):
                 f"about {human_bytes(full)} of conversation memory, "
                 f"{human_bytes(current or 0)} more than the figures above. "
                 f"Raise the context length only if you need it.")
+
+    def ask_to_refresh(self):
+        """Say what pressing Refresh will do, then do it if that is welcome.
+
+        The disclosure used to be a muted line above the list and a tooltip on
+        the button -- a paragraph somebody has to go looking for, about twelve
+        requests they are agreeing to. It is now asked for at the moment of the
+        action, where the decision is actually being made.
+
+        Remembered per host rather than once and forever. Pointing the Cookbook
+        at a mirror means a different site sees the request, and agreeing to
+        tell huggingface.co which models you run is not agreeing to tell
+        somebody else.
+
+        ``do_refresh`` is left ungated so it is the thing under test rather
+        than a dialog: nothing else in the app calls it.
+        """
+        if self._busy or not self.catalog:
+            return
+        host = self.host_origin()
+        if self.consented(host):
+            self.do_refresh()
+            return
+
+        from .dialogs import RefreshDisclosure
+        dialog = RefreshDisclosure(self.window, host, self.catalog,
+                                   mirror=bool(self.base))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dialog.should_remember():
+            self.remember_consent(host)
+        self.do_refresh()
+
+    def consented(self, host):
+        """Whether this host has been agreed to before."""
+        agreed = self.window.storage.settings.get("cookbook_refresh_ok")
+        return isinstance(agreed, dict) and bool(agreed.get(host))
+
+    def remember_consent(self, host):
+        """Record the agreement, and refuse to keep it if it cannot be saved."""
+        settings = self.window.storage.settings
+        previous = settings.get("cookbook_refresh_ok")
+        agreed = dict(previous) if isinstance(previous, dict) else {}
+        agreed[host] = True
+        settings["cookbook_refresh_ok"] = agreed
+        try:
+            self.window.storage.save()
+        except Exception as error:
+            # Put it back rather than leaving a remembered agreement that did
+            # not survive a restart: the reader would not be warned again this
+            # session and would be warned again next time, which is worse than
+            # not remembering at all.
+            if previous is None:
+                settings.pop("cookbook_refresh_ok", None)
+            else:
+                settings["cookbook_refresh_ok"] = previous
+            self.catalog_note.setText(f"That could not be saved: {error}")
 
     def do_refresh(self):
         """The one control that leaves the machine, and only when pressed.
