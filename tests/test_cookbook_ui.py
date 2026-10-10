@@ -15,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page tests")
 pytest.importorskip("psutil", reason="psutil backs hardware detection")
 
+from PySide6.QtCore import QEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QScrollArea  # noqa: E402
 
 from desktop_app import window as win  # noqa: E402
@@ -74,6 +75,50 @@ def text_of(panel):
     return " ".join(widget.text() for widget in panel.findChildren(QLabel))
 
 
+def settle():
+    """Let queued deletions and layout actually happen before reading the tree."""
+    QApplication.processEvents()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    QApplication.processEvents()
+
+
+def cards_on_page(panel):
+    """The model cards the page is currently holding.
+
+    Counted as the widgets in the results layout rather than by matching text,
+    so that a header, a withdrawn notice or an empty-state card cannot be
+    mistaken for a model.
+    """
+    found = []
+    for index in range(panel.results.count()):
+        item = panel.results.itemAt(index)
+        widget = item.widget() if item is not None else None
+        if widget is not None:
+            found.append(widget)
+    return found
+
+
+def repopulate(panel, count):
+    """Give the panel a catalogue of ``count`` real models to page through.
+
+    Cloned from the shipped catalogue rather than invented, because the point
+    of these tests is paging and not model arithmetic -- and a fabricated record
+    would be refused by validation, which would look like paging working.
+    """
+    from dataclasses import replace
+
+    shipped = load_catalog()
+    panel.catalog = [
+        replace(shipped[index % len(shipped)],
+                repo=f"example/model-{index:02d}",
+                name=f"Repeat Model {index:02d}")
+        for index in range(count)
+    ]
+    panel.render_models()
+    settle()
+    return panel.catalog
+
+
 def test_the_cookbook_is_a_page_in_the_navigation_stack(window) -> None:
     """It is a destination like any other, not a window that happens to float.
 
@@ -115,7 +160,7 @@ def test_the_cookbook_scrolls_its_cards_rather_than_clipping_them(window) -> Non
     window.resize(1200, 900)
     window.show()
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
 
     scroll = panel.findChild(QScrollArea)
     assert scroll is not None, "the Cookbook page has no scroll area at all"
@@ -241,7 +286,7 @@ def test_opening_the_cookbook_asks_the_network_for_nothing(window) -> None:
 
     window.navigate(win.COOKBOOK_PAGE)
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     assert sent == [], f"opening the Cookbook asked the network for {sent!r}"
     assert panel.catalog, "opening the page produced no catalogue at all"
 
@@ -268,7 +313,7 @@ def test_nothing_refreshes_on_its_own(window) -> None:
 def test_the_cookbook_explains_the_device_it_is_judging_models_against(window) -> None:
     """A recommendation with no stated basis is one nobody can check."""
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     said = text_of(panel)
     assert "memory" in said.lower(), f"the device is not described: {said[:200]!r}"
 
@@ -298,7 +343,7 @@ def test_every_recommendation_says_why_and_what_it_would_take(window) -> None:
     nothing else is the thing this feature exists to stop being.
     """
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     said = text_of(panel)
     assert "Qwen2.5" in said, f"nothing was recommended: {said[:300]!r}"
     assert "GB" in said or "MB" in said, f"no size is shown: {said[:300]!r}"
@@ -316,7 +361,7 @@ def test_the_cookbook_shows_a_command_that_names_a_real_repository(window) -> No
     quantised build is the quantiser's and not the model's publisher.
     """
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     said = text_of(panel)
     assert "ollama run hf.co/" in said, f"no runnable command: {said[:400]!r}"
     assert "bartowski/" in said, (
@@ -326,7 +371,7 @@ def test_the_cookbook_shows_a_command_that_names_a_real_repository(window) -> No
 def test_the_cookbook_can_be_narrowed_to_one_kind_of_work(window) -> None:
     """Choosing a task changes the list rather than only the label."""
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     everything = text_of(panel)
     assert "Everything" in " ".join(
         panel.task_picker.itemText(i) for i in range(panel.task_picker.count())), (
@@ -336,7 +381,7 @@ def test_the_cookbook_can_be_narrowed_to_one_kind_of_work(window) -> None:
     index = panel.task_picker.findData("coding")
     assert index >= 0, "there is no way to ask for a coding model"
     panel.task_picker.setCurrentIndex(index)
-    QApplication.processEvents()
+    settle()
     assert text_of(panel) != everything, "choosing a task changed nothing on screen"
 
 
@@ -353,7 +398,7 @@ def test_the_refresh_button_says_what_it_sends_before_it_is_pressed(window) -> N
 def test_refreshing_asks_once_and_reports_a_failure_without_losing_the_list(window) -> None:
     """One press is one request, and a refusal leaves what was already there."""
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     pending = []
     window.command = lambda name, *args, **kwargs: pending.append(kwargs)
 
@@ -366,7 +411,7 @@ def test_refreshing_asks_once_and_reports_a_failure_without_losing_the_list(wind
     assert len(pending) == 1, "a second request started while the first was running"
 
     pending[0]["failure"]("huggingface.co could not be reached.")
-    QApplication.processEvents()
+    settle()
 
     said = text_of(panel).lower()
     assert "could not be read" in said, "a failed refresh said nothing"
@@ -385,7 +430,7 @@ def test_a_refreshed_model_goes_through_the_same_validation_as_a_bundled_one(win
     record is refused.
     """
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     # The catalogue itself, rather than everything on the page: refusing a
     # record is supposed to change the line saying it was refused, and only
     # the list of models must be untouched.
@@ -399,7 +444,7 @@ def test_a_refreshed_model_goes_through_the_same_validation_as_a_bundled_one(win
         window.command = lambda name, *args, **kwargs: pending.append(kwargs)
         panel.do_refresh()
         pending[0]["success"](dict(record, last_verified="now"))
-        QApplication.processEvents()
+        settle()
         assert "unusable" in text_of(panel).lower(), (
             f"{record!r} was accepted: {text_of(panel)[:200]!r}")
         assert [model.repo for model in panel.catalog] == before, (
@@ -417,7 +462,7 @@ def test_a_good_refresh_replaces_the_model_and_saves_it_for_next_time(window) ->
     """
     from desktop_app.cookbook import load_cache
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     pending = []
     window.command = lambda name, *args, **kwargs: pending.append(kwargs)
     panel.do_refresh()
@@ -429,7 +474,7 @@ def test_a_good_refresh_replaces_the_model_and_saves_it_for_next_time(window) ->
         "tasks": ("general",), "verified": False,
         "variants": [{"name": "m-Q4_K_M.gguf", "quantization": "Q4_K_M", "size": 500_000_000}],
         "last_verified": "2026-10-10 12:00 UTC"})
-    QApplication.processEvents()
+    settle()
 
     said = text_of(panel)
     assert "Brand New Model" in said, f"the refreshed model is not shown: {said[:300]!r}"
@@ -447,7 +492,7 @@ def test_the_restore_button_only_works_once_there_is_something_behind_it(window)
     """
     from desktop_app.cookbook import PREVIOUS_NAME, save_catalog
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     assert not panel.restore.isEnabled(), (
         "restoring is offered before anything has been replaced")
 
@@ -461,7 +506,7 @@ def test_the_restore_button_only_works_once_there_is_something_behind_it(window)
         "the earlier catalogue is on disk but restoring is not offered")
 
     panel.do_restore()
-    QApplication.processEvents()
+    settle()
     assert "Restored" in text_of(panel), (
         f"restoring said nothing: {text_of(panel)[:200]!r}")
     assert "a/b" in text_of(panel), (
@@ -475,11 +520,174 @@ def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(w
     checks, and the drift would be invisible until a figure was wrong.
     """
     panel = panel_of(window)
-    QApplication.processEvents()
+    settle()
     said = text_of(panel)
     for model in load_catalog():
         assert model.display in said, (
             f"{model.display} is in the catalogue but not on screen")
+
+
+def test_no_more_than_ten_models_are_shown_at_once(window) -> None:
+    """A page of cards has a limit, and the limit is ten.
+
+    Rendering a whole catalogue at once produces one undifferentiated column
+    that nobody reads to the bottom -- the same failure as having no scrollbar,
+    reached from the other side. Ten is about two screens: enough to compare
+    models against each other, few enough that a next page is expected.
+    """
+    from desktop_app.cookbook_panel import PAGE_SIZE
+
+    panel = panel_of(window)
+    settle()
+    repopulate(panel, 26)
+    assert len(panel.page_entries()) == 26, (
+        f"the fixture did not produce 26 models, so this proves nothing: "
+        f"{len(panel.page_entries())}")
+
+    for page in range(3):
+        panel._page = page
+        panel.render_page()
+        settle()
+        shown = len(cards_on_page(panel))
+        assert shown <= PAGE_SIZE, (
+            f"page {page + 1} drew {shown} cards, past the limit of {PAGE_SIZE}")
+
+
+def test_every_model_is_reachable_across_the_pages(window) -> None:
+    """Paging must not swallow anything.
+
+    The failure this guards against is a list that is quietly truncated: page
+    one looks right, the count on the pager says there are more, and the models
+    on the later pages cannot be found by anyone. So this walks every page and
+    requires the union to be exactly the catalogue, with nothing repeated.
+    """
+    panel = panel_of(window)
+    settle()
+    catalog = repopulate(panel, 26)
+
+    seen = []
+    while True:
+        panel.render_page()
+        settle()
+        said = text_of(panel)
+        for model in catalog:
+            if model.display in said:
+                seen.append(model.repo)
+        if not panel.next.isEnabled():
+            break
+        panel.next.click()
+        settle()
+
+    assert sorted(seen) == sorted(model.repo for model in catalog), (
+        f"paging lost or repeated models: saw {len(seen)} of {len(catalog)}")
+    assert len(seen) == len(set(seen)), "a model was shown on two pages"
+
+
+def test_the_page_controls_say_where_you_are(window) -> None:
+    """A pager nobody can read is a pager nobody will press.
+
+    Both ends of a run have to disable, and the position has to be stated in
+    words as well as arrows: an icon-only pair of arrows leaves a screen-reader
+    user with no way to know how much is left.
+    """
+    panel = panel_of(window)
+    # Shown, because isVisible() is false for a widget whose window is not on
+    # screen, and "the pager is hidden" has to mean hidden rather than unshown.
+    window.show()
+    settle()
+    repopulate(panel, 26)
+
+    assert panel.page_label.isVisible(), "the pager is hidden while there are pages"
+    assert not panel.previous.isEnabled(), (
+        "there is a previous page from the first page")
+    assert panel.next.isEnabled(), "there are more pages but Next is dead"
+
+    panel.next.click()
+    settle()
+    assert panel.previous.isEnabled(), "Previous is dead on the second page"
+    assert "Page 2 of 3" in panel.page_label.text(), (
+        f"the pager does not say where it is: {panel.page_label.text()!r}")
+    assert "26" in panel.page_label.text(), (
+        f"the pager does not say how many there are: {panel.page_label.text()!r}")
+    assert panel.page_label.accessibleName(), (
+        "the position is only in the visible text, so it does not exist to "
+        "anyone navigating by keyboard or screen reader")
+
+    while panel.next.isEnabled():
+        panel.next.click()
+        settle()
+    assert not panel.next.isEnabled(), "Next is still live on the last page"
+    assert "Page 3 of 3" in panel.page_label.text()
+
+
+def test_a_catalogue_that_fits_is_not_given_a_pager(window) -> None:
+    """One page of models needs no controls to move between pages.
+
+    Offering "Next" over a list that fits is a control that does nothing when
+    pressed, which is worse than not having it.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    repopulate(panel, 4)
+
+    assert len(panel.page_entries()) == 4
+    assert not panel.page_label.isVisible(), (
+        "a pager is shown for a catalogue that fits on one page")
+    assert not panel.next.isVisible(), "a dead Next button is on screen"
+    assert len(cards_on_page(panel)) == 4
+
+
+def test_changing_the_task_returns_to_the_first_page(window) -> None:
+    """A filter must not strand the reader on a page that no longer exists.
+
+    The empty page is the dangerous outcome: it renders the "nothing fits this
+    device" card, which is a claim about somebody's hardware that a change of
+    filter never established.
+    """
+    panel = panel_of(window)
+    settle()
+    repopulate(panel, 26)
+
+    panel._page = 2
+    panel.render_page()
+    settle()
+    assert panel.page_label.text().startswith("Page 3")
+
+    index = panel.task_picker.findData("coding")
+    if index >= 0:
+        panel.task_picker.setCurrentIndex(index)
+        settle()
+
+    assert panel._page == 0, (
+        f"choosing a task left the reader on page {panel._page + 1}")
+    assert cards_on_page(panel), "the filter left an empty page behind"
+    assert "Nothing in the catalogue fits" not in text_of(panel), (
+        "filtering produced the empty-state card, which claims nothing fits")
+
+
+def test_a_page_number_past_the_end_lands_somewhere_real(window) -> None:
+    """The page is clamped rather than rendering nothing.
+
+    Reached by a catalogue that shrinks under a reader who is already on a
+    later page -- a refresh, or a rollback to a shorter one.
+    """
+    panel = panel_of(window)
+    settle()
+    repopulate(panel, 26)
+    panel._page = 2
+    panel.render_page()
+    settle()
+
+    repopulate(panel, 4)
+    assert panel._page == 0, f"a shorter catalogue left the reader on page {panel._page + 1}"
+    assert cards_on_page(panel), "a shorter catalogue left an empty page behind"
+
+    # And a hand-set nonsense value is clamped rather than trusted.
+    panel.go_to_page(99)
+    settle()
+    assert 0 <= panel._page < 2
+    assert cards_on_page(panel)
 
 
 def test_the_invite_button_goes_to_the_page_and_not_a_window(window, monkeypatch) -> None:
@@ -499,7 +707,7 @@ def test_the_invite_button_goes_to_the_page_and_not_a_window(window, monkeypatch
     # screen. The focus is the point of the change, so it is asserted rather
     # than assumed.
     window.show()
-    QApplication.processEvents()
+    settle()
     window.invite_button.setEnabled(True)
     before = window.stack.currentIndex()
 

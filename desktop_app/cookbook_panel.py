@@ -19,6 +19,7 @@ it sends before it is pressed.
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from .cookbook import (PREVIOUS_NAME, CatalogError, TASKS, describe_changes,
@@ -43,6 +44,16 @@ TONE = {
     "unknown": "muted",
 }
 
+# How many model cards one page holds.
+#
+# Ten is not a layout preference. A card is a dozen lines of wrapped text, and a
+# catalogue of any size rendered at once turns the page into a single undifferentiated
+# column that nobody scrolls through -- which is the same failure as having no
+# scrollbar at all, reached from the other direction. Ten is about two screens,
+# enough to compare against each other and few enough that the next page is
+# something you expect to exist.
+PAGE_SIZE = 10
+
 
 class CookbookPanel(QWidget):
     """A list of models sized against the machine they are being read on."""
@@ -51,6 +62,7 @@ class CookbookPanel(QWidget):
         super().__init__()
         self.window = window
         self._busy = False
+        self._page = 0
         # Where a cached catalogue lives, and the host a refresh reads from.
         # Both are per workspace: two workspaces can be looking at different
         # catalogues, and a shared cache would have them overwrite each other.
@@ -133,6 +145,25 @@ class CookbookPanel(QWidget):
         self.body.setLayout(self.results)
         layout.addWidget(self.body)
 
+        # Paging sits directly under the list and above the actions, so it is
+        # read as part of the list it moves rather than as another toolbar.
+        # Both controls are built here and hidden rather than removed when the
+        # catalogue fits on one page: a button that appears and disappears
+        # between filter choices makes the row jump under the pointer.
+        self.previous = action("Previous", lambda: self.go_to_page(self._page - 1),
+                               name="ghost")
+        self.previous.setAccessibleName("Previous page of models")
+        self.page_label = label("", "muted")
+        self.page_label.setAlignment(Qt.AlignCenter)
+        self.next = action("Next", lambda: self.go_to_page(self._page + 1), name="ghost")
+        self.next.setAccessibleName("Next page of models")
+        pager = QHBoxLayout()
+        pager.addStretch()
+        pager.addWidget(self.previous)
+        pager.addWidget(self.page_label, 1)
+        pager.addWidget(self.next)
+        layout.addLayout(pager)
+
         self.refresh = action(f"Refresh from {self.host_name()}", self.do_refresh, name="ghost")
         self.refresh.setToolTip(
             f"Re-read model details from {self.host_name()}. Sends your network "
@@ -194,51 +225,121 @@ class CookbookPanel(QWidget):
             PREVIOUS_NAME).is_file()))
 
     def render_models(self):
-        """Draw the recommendations for the chosen task.
+        """Rebuild the list from the first page.
 
-        Withdrawn models are listed after the recommended ones rather than
-        filtered out, so somebody who already has one can find out why nothing
-        recommends it. They are not ranked with the rest: a withdrawn model
-        cannot be recommended, and putting it among the ones that can would be
-        an argument for downloading it.
+        Every reason the list changes -- a different task, a refresh, a
+        rollback, a first load -- goes through here, and every one of them
+        returns to page one. Carrying the page number across would land the
+        reader on an empty page whenever a filter or a refresh changed how many
+        models there are, and an empty page reads as "nothing fits this
+        device", which is a claim about their hardware that they never made.
         """
+        self._page = 0
+        self.render_page()
+
+    def go_to_page(self, number):
+        """Show a different page of the same list."""
+        self._page = max(0, int(number))
+        self.render_page()
+
+    def page_entries(self):
+        """Everything the current filter matches, as one ordered list of cards.
+
+        Recommended models first and withdrawn after them, in a single sequence
+        rather than two sections, so the page limit can be applied to the whole
+        thing. Withdrawn are not ranked with the rest: a withdrawn model cannot
+        be recommended, and putting it among the ones that can would be an
+        argument for downloading it. They are listed so somebody who already has
+        one can find out why nothing recommends it.
+        """
+        task = self.task_picker.currentData()
+        if not self.catalog:
+            return []
+        offered = recommend(self.catalog, self.hardware, task=task)
+        withdrawn = [model for model in self.catalog
+                     if model.deprecated and (not task or task in model.tasks)]
+        return [("model", row) for row in offered] + [("withdrawn", model)
+                                                      for model in withdrawn]
+
+    def render_page(self):
+        """Draw one page of cards, and the controls that move between them."""
         while self.results.count():
             item = self.results.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget() if item is not None else None
+            if widget is None:
+                continue
+            # Detached before being scheduled for deletion, not just deleted.
+            # deleteLater() alone leaves the card parented to the panel until
+            # the event loop next runs, so the previous page's widgets are
+            # still findable, still painted over, and still holding memory --
+            # which is how a list grows on every page turn.
+            widget.setParent(None)
+            widget.deleteLater()
 
-        task = self.task_picker.currentData()
-        offered = recommend(self.catalog, self.hardware, task=task) if self.catalog else []
-        withdrawn = [model for model in self.catalog if model.deprecated
-                     and (not task or task in model.tasks)]
-        for row in offered:
-            self.results.addWidget(self._model_card(row))
-        if withdrawn:
-            if offered:
-                self.results.addSpacing(6)
+        entries = self.page_entries()
+        pages = max(1, -(-len(entries) // PAGE_SIZE))
+        self._page = min(max(0, self._page), pages - 1)
+        start = self._page * PAGE_SIZE
+        window = entries[start:start + PAGE_SIZE]
+
+        withdrawn_header_drawn = False
+        for kind, entry in window:
+            if kind == "model":
+                self.results.addWidget(self._model_card(entry))
+                continue
+            if not withdrawn_header_drawn:
+                withdrawn_header_drawn = True
+                if start:
+                    # Only separated from the recommended models when it is not
+                    # already the top of the page.
+                    self.results.addSpacing(6)
                 column = self._card()
                 column.addWidget(label("Withdrawn by their publishers", "heading"))
                 column.addWidget(label(
                     "Still listed so you can tell what happened to one you have. "
                     "They are not recommended for download.", "muted", True))
                 self.results.addWidget(column)
-            for model in withdrawn:
-                card, column = self._card()
-                column.addWidget(label(model.display, "heading", True))
-                note = label(
-                    "Withdrawn by its publisher." + (
-                        f" {model.deprecated_reason}" if model.deprecated_reason else ""),
-                    "errorMessage", True)
-                note.setWordWrap(True)
-                column.addWidget(note)
-                column.addWidget(label(
-                    f"{model.size_class} · {model.license or 'licence unstated'} · "
-                    f"read {model.last_verified or 'unknown'}", "muted", True))
-                self.results.addWidget(card)
-        if offered or withdrawn:
-            self.results.addStretch()
-            return
+            self.results.addWidget(self._withdrawn_card(entry))
 
+        if window:
+            self.results.addStretch()
+        else:
+            self._empty_card()
+
+        self.update_pager(len(entries), pages)
+
+    def update_pager(self, total, pages):
+        """Say how much of the list is on screen, and which page this is."""
+        paging = pages > 1
+        for control in (self.previous, self.next, self.page_label):
+            control.setVisible(paging)
+        if not paging:
+            self.page_label.setText("")
+            return
+        self.page_label.setText(
+            f"Page {self._page + 1} of {pages} · {total} models")
+        self.page_label.setAccessibleName(
+            f"Page {self._page + 1} of {pages}, showing up to {PAGE_SIZE} of "
+            f"{total} models")
+        self.previous.setEnabled(self._page > 0)
+        self.next.setEnabled(self._page < pages - 1)
+
+    def _withdrawn_card(self, model):
+        """One model that its publisher has taken back."""
+        card, column = self._card()
+        column.addWidget(label(model.display, "heading", True))
+        note = label(
+            "Withdrawn by its publisher." + (
+                f" {model.deprecated_reason}" if model.deprecated_reason else ""),
+            "errorMessage", True)
+        note.setWordWrap(True)
+        column.addWidget(note)
+        column.addWidget(label(
+            f"{model.size_class} · {model.license or 'licence unstated'} · "
+            f"read {model.last_verified or 'unknown'}", "muted", True))
+        return card
+
+    def _empty_card(self):
         # Nothing at all to show. Which sentence is true depends on why, and
         # "nothing fits this device" over a catalogue that has withdrawn
         # everything would be a confident falsehood about somebody's
