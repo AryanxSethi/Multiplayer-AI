@@ -438,7 +438,7 @@ class CookbookPanel(QWidget):
             self.page_label.setText("")
             return
         self.page_label.setText(
-            f"Page {self._page + 1} of {pages} Â· {total} models")
+            f"Page {self._page + 1} of {pages} · {total} models")
         self.page_label.setAccessibleName(
             f"Page {self._page + 1} of {pages}, showing up to {PAGE_SIZE} of "
             f"{total} models")
@@ -456,7 +456,7 @@ class CookbookPanel(QWidget):
         note.setWordWrap(True)
         column.addWidget(note)
         column.addWidget(label(
-            f"{model.size_class} Â· {model.license or 'licence unstated'} Â· "
+            f"{model.size_class} · {model.license or 'licence unstated'} · "
             f"read {model.last_verified or 'unknown'}", "muted", True))
         return card
 
@@ -488,8 +488,8 @@ class CookbookPanel(QWidget):
         top.addStretch()
         column.addLayout(top)
 
-        facts = (f"{model.size_class} Â· {human_bytes(variant.size)} download "
-                 f"Â· {variant.quantization} Â· {model.license or 'licence unstated'}")
+        facts = (f"{model.size_class} · {human_bytes(variant.size)} download "
+                 f"· {variant.quantization} · {model.license or 'licence unstated'}")
         column.addWidget(label(facts, "muted", True))
         reason = label(verdict["reason"], "muted", True)
         reason.setWordWrap(True)
@@ -509,8 +509,8 @@ class CookbookPanel(QWidget):
                 column.addWidget(label(entry["command"], "muted", True))
 
         provenance = label(
-            f"From {model.repo} on {model.source} Â· builds by "
-            f"{model.artifact_repo} Â· read {model.last_verified or 'unknown'}",
+            f"From {model.repo} on {model.source} · builds by "
+            f"{model.artifact_repo} · read {model.last_verified or 'unknown'}",
             "muted", True)
         provenance.setWordWrap(True)
         column.addWidget(provenance)

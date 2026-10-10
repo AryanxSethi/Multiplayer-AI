@@ -160,3 +160,37 @@ def test_no_dialog_result_is_compared_with_is(path):
                     f"{path.name}: line {node.lineno} compares a StandardButton "
                     f"with '{word}'")
     assert not offenders, "\n".join(offenders)
+
+
+MOJIBAKE = ("\u00c2", "\u00c3", "\u00e2", "\ufffd")
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda path: path.name)
+def test_no_source_file_has_been_mangled_by_an_encoding_change(path):
+    """Text read as one encoding and written back as another corrupts silently.
+
+    Eight separators on the Cookbook page turned from a middot into the two
+    characters its UTF-8 bytes look like when decoded as Windows-1252, so every
+    model card read "1.5B Â· 940.4 MB download". Nothing threw, nothing failed,
+    and no assertion covered the string -- the tests stayed green while the
+    interface was wrong in front of whoever was reading it.
+
+    A bulk edit is the usual way this happens, so the check is on the bytes
+    rather than on anything an interpreter would notice.
+    """
+    text = path.read_text(encoding="utf-8")
+    offenders = [f"{path.name}: line {number} contains {mark!r}"
+                 for number, line in enumerate(text.splitlines(), 1)
+                 for mark in MOJIBAKE if mark in line]
+    assert not offenders, "\n".join(offenders)
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda path: path.name)
+def test_every_source_file_is_valid_utf8(path):
+    """A file that is not valid UTF-8 fails to import, so it cannot reach here.
+
+    Stated as its own check because the failure it prevents is invisible from
+    the inside: the damage above was well-formed UTF-8 that decoded to the
+    wrong characters, which is precisely why it passed everything.
+    """
+    path.read_bytes().decode("utf-8")
