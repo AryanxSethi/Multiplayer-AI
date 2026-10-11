@@ -14,7 +14,8 @@ pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QPoint
+from PySide6.QtGui import QColor, QImage, QPainter, QRegion
 from PySide6.QtWidgets import QApplication, QLabel, QStyle, QStyleOptionButton
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -103,35 +104,79 @@ class OrchestrationUITests(unittest.TestCase):
                     enabled.initStyleOption(option)
                     rect = enabled.style().subElementRect(
                         QStyle.SubElement.SE_CheckBoxIndicator, option, enabled)
-                    image = enabled.grab().toImage().copy(rect)
-                    tick = color(theme, "success")
-                    painted = sum(image.pixelColor(x, y).name() == tick
-                                  for x in range(image.width()) for y in range(image.height()))
-                    self.assertGreater(painted, 10,
-                                       "the delegation switch shows no tick when it is on")
 
-                    # Disabled at the same opacity the paint applies, so the
-                    # two can be compared rather than merely both looked at.
-                    enabled.setEnabled(False)
-                    self.app.processEvents()
-                    faded = enabled.grab().toImage().copy(rect)
-                    dimmed = sum(faded.pixelColor(x, y).name() == tick
-                                 for x in range(faded.width()) for y in range(faded.height()))
-                    # Asserted, not assumed. A tick painted through a
-                    # half-opacity pen blends with what is under it, so how many
-                    # of its pixels survive as exactly the tick colour depends
-                    # on the two colours meeting; it came out at one and two
-                    # here, and there is nothing in the comparison below that
-                    # would have noticed it being none. "0 < painted" is true
-                    # of a control drawn at full strength and of one drawn not
-                    # at all.
-                    self.assertGreater(dimmed, 0, (
-                        "a disabled switch draws none of the tick at all, so "
-                        "there is nothing to compare and the assertion below "
-                        "says nothing either way"))
-                    self.assertLess(dimmed, painted, (
-                        "a disabled switch is painted at full strength, so it "
-                        "reads as though it could still be turned on"))
+                    # Rendered rather than grabbed, and that is the whole fix.
+                    #
+                    # The indicator's background is transparent, so grab()
+                    # snapshots this widget over whatever is under it rather
+                    # than over a background, and the half-opacity pen
+                    # composites with a leftover tick instead: the disabled
+                    # grab came back with pixels of #3ba65c and #3aa55c, which
+                    # is the pure tick colour and not a blend of anything. The
+                    # old count of "pixels exactly the tick colour" was
+                    # therefore counting a rendering artefact, and comparing it
+                    # with the enabled count proved nothing -- a control drawn at
+                    # full strength and one drawn not at all both give zero.
+                    #
+                    # Rendering onto a chosen background makes the arithmetic
+                    # available. Half of the tick over half of what is behind it
+                    # is a colour that can be written down and checked for, and
+                    # that is the only thing that can tell a half-faded tick
+                    # from an absent one.
+                    background = QColor("#101010")
+                    tick = color(theme, "success")
+
+                    def painted_at(strength):
+                        enabled.setEnabled(strength)
+                        self.app.processEvents()
+                        image = QImage(enabled.width(), enabled.height(),
+                                       QImage.Format.Format_RGB32)
+                        image.fill(background)
+                        painter = QPainter(image)
+                        # The source region is given explicitly. Rendering the
+                        # whole widget without one crashed this process outright
+                        # on the offscreen platform.
+                        enabled.render(painter, QPoint(0, 0),
+                                       QRegion(0, 0, enabled.width(),
+                                               enabled.height()))
+                        painter.end()
+                        return image
+
+                    def distance(image, other):
+                        return min(
+                            sum(abs(image.pixelColor(x, y).getRgb()[i]
+                                    - other.getRgb()[i]) for i in range(3)) / 3
+                            for x in range(image.width())
+                            for y in range(image.height()))
+
+                    solid = painted_at(True)
+                    exact = sum(solid.pixelColor(x, y).name() == tick
+                                for x in range(solid.width())
+                                for y in range(solid.height()))
+                    self.assertGreater(exact, 10, (
+                        "the delegation switch shows no tick when it is on"))
+
+                    faded = painted_at(False)
+                    self.assertEqual(
+                        sum(faded.pixelColor(x, y).name() == tick
+                            for x in range(faded.width())
+                            for y in range(faded.height())), 0, (
+                        "a disabled switch still paints some of the tick at "
+                        "full strength, so it reads as though it could be "
+                        "turned on"))
+                    # What the half-opacity pen should have produced.
+                    blend = QColor(*(round(0.5 * QColor(tick).getRgb()[i]
+                                            + 0.5 * background.getRgb()[i])
+                                     for i in range(3)))
+                    self.assertLessEqual(distance(faded, blend), 8, (
+                        f"the disabled tick is not half faded: the closest "
+                        f"pixel is {distance(faded, blend):.0f} from the blend "
+                        f"it should be"))
+                    # And it is genuinely faded, not merely gone: the same
+                    # pixel is nowhere near the full-strength colour.
+                    self.assertGreaterEqual(distance(faded, QColor(tick)), 15, (
+                        "the disabled tick is indistinguishable from a solid "
+                        "one, so fading it does nothing"))
                     enabled.setEnabled(True)
         finally:
             form.close()
