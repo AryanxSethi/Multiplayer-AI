@@ -15,8 +15,8 @@ from desktop_app.cookbook import (CATALOG_VERSION, LIKELY, NOT_ENOUGH_PUBLISHED,
                                   NO_MODELS_FOR_TASK, NOTHING_FITS, POSSIBLE,
                                   TASKS, UNKNOWN, VERIFIED, CatalogError,
                                   GpuAdapter, Model, Variant, _vram_from_registry,
-                                  best_variant, build_rows, classify,
-                                  detect_hardware, empty_reason, estimate,
+                                  best_variant, bits_from_label, build_rows,
+                                  classify, detect_hardware, empty_reason, estimate,
                                   human_bytes, kv_cache_bytes, load_catalog,
                                   ollama_commands, parse_catalog, parse_model,
                                   pick_graphics_adapter, recommend, vendor_of)
@@ -935,6 +935,53 @@ def test_a_published_record_is_never_treated_as_a_verified_one():
     assert model.verified is False
     assert classify(model, Variant(name="v.gguf", quantization="Q4_K_M", size=1024),
                     device(total_gb=64, available_gb=60))["result"] != VERIFIED
+
+
+@pytest.mark.parametrize("model", load_catalog(), ids=lambda m: m.repo)
+def test_every_shipped_model_is_internally_consistent(model):
+    """What must hold of every catalogue entry, whenever it was added.
+
+    The figures themselves are pinned per model further down, because that is
+    what makes them provenance rather than plausibility. But a model added
+    later by ``scripts/grow_catalogue.py`` cannot have someone hand-write its
+    expected values, so these are the checks that cover every entry no matter
+    how it got there.
+    """
+    assert model.repo.count("/") == 1, f"{model.repo} is not a publisher/name id"
+    assert model.artifact_repo and model.artifact_repo.count("/") == 1, (
+        f"{model.repo} has no usable build repository: {model.artifact_repo!r}")
+    assert model.parameters > 0, f"{model.repo} has no parameter count"
+    assert model.tasks, f"{model.repo} is tagged with nothing, so no filter shows it"
+    assert set(model.tasks) <= set(TASKS), (
+        f"{model.repo} is tagged with tasks this build does not know: "
+        f"{sorted(set(model.tasks) - set(TASKS))}")
+    assert model.last_verified, f"{model.repo} has no date it was read on"
+    assert model.variants, (
+        f"{model.repo} has no downloadable build, so nothing to recommend")
+
+    sized = [variant for variant in model.variants if variant.size]
+    assert sized, f"{model.repo} has builds but not one with a file size"
+    # A build's file size has to be plausible for its own precision. This
+    # replaces a check on sizes being monotonic, which is wrong: for a small
+    # model the fixed metadata outweighs the weights, so the two-bit build of
+    # Qwen2.5 0.5B is 344k *larger* than the three-bit one. What cannot vary is
+    # the order of magnitude -- a size pasted onto the wrong build is caught
+    # here, and a genuinely monotonic ordering is not.
+    for variant in sized:
+        bits = (variant.bits_per_weight
+                or bits_from_label(variant.quantization or variant.name))
+        if not bits or not model.parameters:
+            continue
+        expected = model.parameters * bits / 8
+        assert expected / 2 <= variant.size <= expected * 4, (
+            f"{model.repo} {variant.quantization} is {variant.size} bytes, "
+            f"which is not within reach of the {expected} that "
+            f"{model.parameters} parameters at {bits} bits would be")
+
+    # Every build has to name its own quantisation: it is how the preference
+    # order finds a build and how the commands name it.
+    assert all(variant.quantization or variant.name for variant in model.variants), (
+        f"{model.repo} has a build with neither a quantisation nor a name")
 
 
 def test_the_catalogue_file_is_bundled_where_the_build_already_looks():

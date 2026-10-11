@@ -71,9 +71,50 @@ Step 3 is what makes a model recommendable. `best_variant()` walks variants, so
 a record with no verified file size never appears in a recommendation, which is
 correct — there would be nothing to download.
 
-Every figure currently in `catalog.json` is asserted in
-`tests/test_cookbook.py::test_every_shipped_number_is_traceable_to_a_publisher`,
-so a hand edit or a repointed repository fails the suite rather than shipping.
+### Doing those reads
+
+`scripts/grow_catalogue.py` does them, through the same validated path the
+Refresh control uses at runtime, so a model added this way has been through
+exactly the checks a refreshed one has:
+
+```
+python scripts/grow_catalogue.py candidates.json --dry-run
+python scripts/grow_catalogue.py candidates.json
+```
+
+The candidate file is a list of objects, and holds the only things the Hub
+cannot answer — what a model is *for*, which is a judgement and not a
+published fact:
+
+```json
+[
+  {"repo": "Qwen/Qwen2.5-7B-Instruct",
+   "artifact_repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+   "tasks": ["coding", "reasoning", "writing"],
+   "name": "Qwen2.5 7B"}
+]
+```
+
+Everything else is read from the Hub. A model that fails validation is
+reported and skipped, and if *anything* in the run fails nothing is written at
+all, so a half-finished catalogue cannot ship. Run `--dry-run` first.
+
+### Checking them afterwards
+
+`tests/test_cookbook.py::test_every_shipped_number_is_traceable_to_a_publisher`
+pins the figures of the models that shipped by hand, which is what makes them
+provenance rather than plausibility. A model added afterwards has nobody to
+hand-write its expected values, so
+`test_every_shipped_model_is_internally_consistent` covers every entry however
+it got there: the identifier shape, a usable build repository, a parameter
+count, known tasks, a read date, at least one sized build, and a file size
+within reach of what that model and precision would actually weigh.
+
+Note what that last check deliberately does *not* assert. File sizes are not
+monotonic across quantisations — for a small model the fixed metadata outweighs
+the weights, and Qwen2.5 0.5B's two-bit build is larger on disk than its
+three-bit one. Only the order of magnitude is meaningful, so only that is
+checked.
 
 ## Keeping it current
 
@@ -81,4 +122,5 @@ The catalogue is a versioned data file under `desktop_app/assets/`, which
 `MultiplayerAI.spec` already bundles whole, so a catalogue change needs no
 build. It can be refreshed from the Hub at runtime — see the Refresh control
 in the app, which is the only thing that causes a request to leave the
-machine. If a refresh cannot be validated, the shipped catalogue is kept.
+machine, and which asks first. If a refresh cannot be validated, the shipped
+catalogue is kept.
