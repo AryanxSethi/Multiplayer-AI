@@ -1218,27 +1218,40 @@ def test_a_mirror_is_named_as_somebody_elses_server(window, monkeypatch) -> None
 
 
 def build_toggles(panel):
-    """The "other builds" controls, one per card that has alternatives."""
+    """The controls that reveal a card's builds.
+
+    Matched on the count the label leads with rather than on its wording, so
+    neither the phrase changing nor a summary being appended can silently stop
+    the test from finding it.
+    """
     found = []
     for card in cards_on_page(panel):
         for button in card.findChildren(QPushButton):
-            if "other builds" in button.text():
-                found.append(button)
+            head = button.text().split(" · ")[0]
+            if head.endswith(" build") or head.endswith(" builds"):
+                if not button.property("buildRow"):
+                    found.append(button)
     return found
 
 
 def build_rows_of(card):
-    return [child for child in card.findChildren(QWidget)
-            if child.objectName() == "buildRow"]
+    """The build rows on a card.
+
+    Identified by the dynamic property rather than the objectName, because the
+    rows have to keep ``ghost`` as their objectName for the checkable styling
+    that marks the chosen one to apply.
+    """
+    return [child for child in card.findChildren(QPushButton)
+            if child.property("buildRow") is True]
 
 
-def test_every_other_build_is_reachable_from_its_card(window) -> None:
-    """Twenty-seven of the thirty-one builds had no route to the screen.
+def test_every_build_is_reachable_from_its_card(window) -> None:
+    """Thirty-one builds sat behind four cards with nothing that reached them.
 
     A machine with a 4GiB card was shown the 5.1GB four-bit build of a 7B model
     at "possible with compromises" while the 3.6GB two-bit build in the same
-    catalogue would have fitted outright, and nothing in the interface could
-    have told anyone that.
+    catalogue would have fitted outright, and no control anywhere could have
+    told anyone that.
     """
     panel = panel_of(window)
     window.show()
@@ -1246,32 +1259,102 @@ def test_every_other_build_is_reachable_from_its_card(window) -> None:
 
     rows = recommend(panel.catalog, panel.hardware)
     assert rows, "nothing was recommended, so this proves nothing"
-    expected = sum(len(row["model"].variants) - 1 for row in rows)
-    assert expected > 0, "the catalogue holds only one build per model"
+    expected = sum(len(row["model"].variants) for row in rows)
+    assert expected > 0, "the catalogue holds no builds at all"
 
     toggles = build_toggles(panel)
-    assert toggles, "no card offers its other builds"
+    assert toggles, "no card offers its builds"
     offered = sum(int(text.split()[0]) for text in
                   (button.text() for button in toggles))
     assert offered == expected, (
-        f"the cards offer {offered} alternative builds and there are "
-        f"{expected}; some are still unreachable")
+        f"the cards offer {offered} builds and there are {expected}; some are "
+        "still unreachable")
 
     # Collapsed until asked, so a list of what fits stays comparable.
     for button in toggles:
         assert not button.isChecked(), "the section starts open"
     card = toggles[0].parent()
+    # The rows are built as soon as the card is, inside a hidden container --
+    # so this is a question about visibility, not about which widgets exist.
+    assert build_rows_of(card), "the card has no build rows in it at all"
     assert not any(row.isVisible() for row in build_rows_of(card)), (
         "the builds are on screen before anyone asked for them")
 
     toggles[0].click()
     settle()
-    assert any(row.isVisible() for row in build_rows_of(card)), (
-        "pressing the control did not show any build")
+    assert build_rows_of(card), "pressing the control did not show any build"
 
 
-def test_an_alternative_build_can_actually_be_run(window) -> None:
-    """An alternative is no use if the reader has to work out its repository tag."""
+def test_choosing_a_build_changes_what_the_card_says_and_how_to_run_it(window) -> None:
+    """The whole point: an offered build has to be usable.
+
+    It used to be a list you could read and not take. The page said a 7B model
+    was "possible with compromises" at four-bit, offered the two-bit build in
+    the row below it, and then printed a command for the four-bit one.
+
+    The verdict was always worked out per build by ``build_rows``; only one of
+    them was ever drawn. So choosing one updates the badge, the figures and the
+    command together, because they are all reading the same entry now.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    toggles = build_toggles(panel)
+    assert toggles
+    toggles[0].click()
+    settle()
+
+    card = toggles[0].parent()
+    rows = {row.property("buildVariant"): row for row in build_rows_of(card)}
+    assert len(rows) > 1, "the card offers no choice of build"
+
+    def card_says():
+        card = cards_on_page(panel)[0]
+        badge = [label for label in card.findChildren(QLabel)
+                 if label.objectName().startswith("verdict")]
+        facts = [label for label in card.findChildren(QLabel)
+                 if label.objectName() == "meta"]
+        command = [label for label in card.findChildren(QLabel)
+                   if label.objectName() == "command"]
+        return (badge[0].text() if badge else "",
+                card.objectName(),
+                facts[0].text() if facts else "",
+                command[0].text() if command else "")
+
+    before = card_says()
+    # Choose a build that is not the one currently on show. Read the current
+    # build off the command rather than out of the figures prose, so this
+    # keeps working if that line is reworded.
+    current = before[3].splitlines()[0].rsplit(":", 1)[-1]
+    target = next(row for row in rows.values()
+                  if row.property("buildVariant") != current)
+    target_name = target.property("buildVariant")
+    target.click()
+    settle()
+
+    after = card_says()
+    assert after[2] != before[2], f"the figures did not change: {after[2]!r}"
+    assert target_name in after[2], (
+        f"the card still describes another build: {after[2]!r}")
+    assert f":{target_name}" in after[3].splitlines()[0], (
+        f"the command is for a different build: {after[3]!r}")
+    # Choosing a build re-draws the card, so the old widget is gone; the table
+    # has to still be open afterwards, because the reader was standing in it.
+    card = cards_on_page(panel)[0]
+    checked = [row.property("buildVariant") for row in build_rows_of(card)
+               if row.isChecked()]
+    assert checked == [target_name], (
+        f"more than one row is chosen, or the wrong one: {checked}")
+    assert build_toggles(panel)[0].isChecked(), (
+        "the build table closed the moment a build was chosen")
+
+
+def test_the_build_the_card_is_using_is_shown_as_recommended(window) -> None:
+    """It used to be excluded from the list, so the table never said what was in use.
+
+    A reader expanding a card saw six or seven builds and no indication of which
+    one the card was actually describing above them.
+    """
     panel = panel_of(window)
     window.show()
     settle()
@@ -1283,16 +1366,90 @@ def test_an_alternative_build_can_actually_be_run(window) -> None:
     card = toggles[0].parent()
     rows = build_rows_of(card)
     assert rows
-    for row in rows:
-        commands = [label for label in row.findChildren(QLabel)
-                    if label.objectName() == "command"]
-        assert commands, "a build is listed with no way to run it"
-        assert "ollama run" in commands[0].text(), (
-            f"not a runnable command: {commands[0].text()!r}")
+    marked = [row for row in rows
+              if any(label.text() == "recommended"
+                     for label in row.findChildren(QLabel))]
+    assert len(marked) == 1, (
+        f"expected exactly one row marked as the recommended build, found "
+        f"{len(marked)}")
 
-    # Each row is a different build, and none of them is the chosen one twice.
-    said = " ".join(label.text() for row in rows for label in row.findChildren(QLabel))
-    assert len(rows) == len(set(rows)), "the same build is listed twice"
+    # It is marked and it is the one chosen by default.
+    chosen = [row.property("buildVariant") for row in rows if row.isChecked()]
+    assert chosen == [marked[0].property("buildVariant")], (
+        f"the marked build is {marked[0].property('buildVariant')} but the card "
+        f"is showing {chosen}")
+
+    command = [label for label in card.findChildren(QLabel)
+               if label.objectName() == "command"][0].text()
+    assert f":{chosen[0]}" in command.splitlines()[0], (
+        f"the recommended row is not the build being run: {command!r}")
+
+
+def test_a_long_build_list_is_capped_and_says_so(window) -> None:
+    """Twenty-three builds made a card over a thousand pixels tall.
+
+    Eight are shown and the rest are counted, not silently dropped. The ones
+    beyond are the largest, which are the ones this device cannot run anyway --
+    the table is smallest first so the truncation drops what matters least.
+    """
+    from dataclasses import replace
+
+    from desktop_app.cookbook_panel import BUILDS_SHOWN
+
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    # A catalogue with far more builds than the card can usefully show.
+    base = panel.catalog[0]
+    extra = tuple(base.variants) + tuple(
+        replace(v, name=f"extra-{index}.gguf", size=(index + 1) * 100_000_000)
+        for index, v in enumerate(base.variants))
+    wide = replace(base, variants=extra)
+    assert len(wide.variants) > BUILDS_SHOWN, "the fixture is not wide enough"
+    panel.catalog = [wide]
+    panel.render_models()
+    settle()
+
+    toggles = build_toggles(panel)
+    toggles[0].click()
+    settle()
+    card = toggles[0].parent()
+
+    rows = build_rows_of(card)
+    assert len(rows) == BUILDS_SHOWN, (
+        f"{len(rows)} rows shown, expected the cap of {BUILDS_SHOWN}")
+    said = " ".join(label.text() for label in card.findChildren(QLabel))
+    assert "and " in said and "larger build" in said, (
+        f"the hidden builds are not counted: {said[-260:]!r}")
+
+
+def test_a_build_chosen_then_forgotten_falls_back_rather_than_breaking(window) -> None:
+    """The choice is resolved every time, never trusted from memory.
+
+    A refresh or a rollback can replace the catalogue underneath, and a
+    remembered build would then be a command naming a file that is not there.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    panel._chosen[panel.catalog[0].repo] = "Q8_0"
+    panel.render_models()
+    settle()
+
+    # Ask about the same repository the choice was stored for. The engine
+    # reorders the list, so catalog[0] is not the card on page one.
+    row = next(r for r in recommend(panel.catalog, panel.hardware)
+               if r["model"].repo == panel.catalog[0].repo)
+    entry = panel._chosen_entry(row)
+    assert entry is not None, "the card lost its build entirely"
+    assert entry["variant"].quantization == "Q8_0"
+
+    panel._chosen[panel.catalog[0].repo] = "not-a-build"
+    entry = panel._chosen_entry(row)
+    assert entry is not None
+    assert entry["selected"], (
+        "an unknown build was not replaced by the engine's recommendation")
 
 
 def test_a_build_that_spills_is_marked_as_such_and_not_counted_as_on_the_card(window) -> None:
@@ -1338,29 +1495,42 @@ def test_a_build_that_spills_is_marked_as_such_and_not_counted_as_on_the_card(wi
     assert len(on_card) < len(alternatives), (
         "this fixture needs some builds that do not fit the card")
 
+    # The counts are over every build the card shows, which is every build the
+    # model has -- the recommended one is in the table now, not beside it.
+    counted_on_card = [entry for entry in entries
+                       if entry["verdict"]["result"] in ("likely to run",
+                                                         "verified compatible")]
+
     # The number on that model's own control has to be the number that fits.
     coder_card = next(
         card for card in cards_on_page(panel)
         if coder.display in " ".join(label.text()
                                      for label in card.findChildren(QLabel)))
     toggle = next(button for button in coder_card.findChildren(QPushButton)
-                  if "other builds" in button.text())
+                  if re.fullmatch(r"\d+ builds", button.text()))
     found = re.search(r"(\d+) run on the graphics card", toggle.toolTip())
     assert found, (
         f"the card does not say how many builds run on the card: "
         f"{toggle.toolTip()!r}")
-    assert int(found.group(1)) == len(on_card), (
+    assert int(found.group(1)) == len(counted_on_card), (
         f"the control claims {found.group(1)} builds run on the card, and "
-        f"{len(on_card)} do")
+        f"{len(counted_on_card)} do")
     assert f"{len(spilling)} spill to the CPU" in toggle.toolTip(), (
         f"the card does not admit which builds spill: {toggle.toolTip()!r}")
 
 
-def test_the_builds_section_closes_when_the_list_is_rebuilt(window) -> None:
+def test_the_builds_section_never_shows_builds_that_are_gone(window) -> None:
     """A refresh or a filter change replaces the catalogue underneath.
 
-    Leaving a section open against a set of builds that is no longer on screen
-    would be showing something untrue.
+    What must not happen is a table left showing a set of builds that is no
+    longer true. That used to be prevented by closing the section, which also
+    threw away the reader's place every time the list was rebuilt.
+
+    It is now prevented by keying the open section to a repository and
+    regenerating its contents from whatever the catalogue holds at the moment
+    of drawing. So this checks the thing that actually matters -- that what is
+    on screen is what the catalogue says -- rather than that a button is in a
+    particular position.
     """
     panel = panel_of(window)
     window.show()
@@ -1374,9 +1544,24 @@ def test_the_builds_section_closes_when_the_list_is_rebuilt(window) -> None:
     panel.task_picker.setCurrentIndex(panel.task_picker.findData("coding"))
     settle()
 
-    for button in build_toggles(panel):
-        assert not button.isChecked(), (
-            "the section stayed open across a change of catalogue")
+    for model in panel.catalog:
+        card = next((card for card in cards_on_page(panel)
+                     if model.display in " ".join(label.text()
+                                                  for label in
+                                                  card.findChildren(QLabel))),
+                    None)
+        if card is None:
+            continue
+        listed = [row.property("buildVariant") for row in build_rows_of(card)]
+        if not listed:
+            continue
+        current = [v.quantization or v.name for v in model.variants]
+        assert set(listed) <= set(current), (
+            f"{model.repo} lists {listed}, which the catalogue no longer "
+            f"has: {current}")
+        # And the table is drawn from the model it claims to be, smallest
+        # first, rather than carried over from the previous catalogue.
+        assert listed == [q for q in current if q in listed]
 
 
 def test_rebuilding_the_page_never_puts_a_window_on_screen(window) -> None:
@@ -1441,6 +1626,106 @@ def test_emptying_the_filter_draws_the_page_once(window) -> None:
     assert panel.task_picker.currentData() is None, (
         f"the filter is still {panel.task_picker.currentText()!r}")
     assert cards_on_page(panel), "widening the filter left the page empty"
+
+
+def test_the_page_title_is_not_followed_by_a_paragraph(window) -> None:
+    """Nothing sits between "Cookbook" and the device card.
+
+    The subtitle used to say the page sizes against this device's memory and
+    that Refresh asks first. Both are true, both are said again where they are
+    acted on -- the device card above, and the dialog the Refresh control opens
+    -- and neither earns the gap it put between the title and the first thing
+    on the page that a reader actually came for.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    texts = [child.text() for child in panel.findChildren(QLabel) if child.text()]
+    assert "WHICH MODELS FIT THIS MACHINE" in texts, (
+        "the page lost its eyebrow")
+    assert "Cookbook" in texts, "the page lost its title"
+    assert not any("Sized against this device" in text for text in texts), (
+        "the subtitle under the title is still there")
+
+
+def test_pressing_show_every_model_does_not_rebuild_under_its_own_click(
+        window) -> None:
+    """The button that widens the filter is drawn on the card being thrown away.
+
+    "Show every model" sits inside the very card saying the catalogue has
+    nothing to show, so rebuilding the page inside the click handler tears down
+    the widget that is still processing that click -- parented, laid out, and
+    still the widget under the cursor at the moment the platform asks which
+    window owns it. On Windows that question gets answered by putting a window
+    on screen.
+
+    So the rebuild waits a turn of the event loop. ``deleteLater`` was already
+    keeping the card alive long enough to be drawn, which is why a widget-count
+    check passes and a person still sees the box; this asserts the rebuild has
+    not even been attempted by the time the click returns.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    panel.task_picker.setCurrentIndex(panel.task_picker.findData("vision"))
+    settle()
+
+    buttons = [button for button in panel.findChildren(QPushButton)
+               if button.isVisible() and "every model" in button.text().lower()]
+    assert buttons, "there is no Show every model button to press"
+    button = buttons[0]
+    card = button.parent()
+
+    calls = []
+    original = panel.render_page
+    panel.render_page = lambda: (calls.append(1), original())
+    try:
+        button.click()
+        # Still inside the click's own call stack here.
+        assert not calls, (
+            "the page was rebuilt while the click was still being handled")
+        assert card.parent() is not None, (
+            "the card holding the pressed button was detached mid-click, which "
+            "is what promotes it to a top-level window")
+        assert not card.isWindow(), (
+            "the card holding the pressed button became a window mid-click")
+        # And now let the deferred rebuild happen, still being counted.
+        settle()
+        assert calls == [1], (
+            f"the page was drawn {len(calls)} times, expected once")
+    finally:
+        panel.render_page = original
+
+    assert panel.task_picker.currentData() is None, (
+        f"the filter is still {panel.task_picker.currentText()!r}")
+    assert cards_on_page(panel), "widening the filter left the page empty"
+
+
+def test_mashing_show_every_model_rebuilds_once(window) -> None:
+    """A reader who leans on the button should not queue a render per press.
+
+    Each press used to schedule its own rebuild, so a held-down or
+    double-clicked button redrew the page several times over.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    panel.task_picker.setCurrentIndex(panel.task_picker.findData("vision"))
+    settle()
+
+    calls = []
+    original = panel.render_page
+    panel.render_page = lambda: (calls.append(1), original())
+    try:
+        for _ in range(5):
+            panel.show_everything()
+        settle()
+    finally:
+        panel.render_page = original
+
+    assert len(calls) == 1, (
+        f"five presses of Show every model drew the page {len(calls)} times")
 
 
 def test_the_button_that_widens_the_filter_is_not_destroyed_by_its_own_click(window) -> None:

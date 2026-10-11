@@ -19,7 +19,7 @@ it sends before it is pressed.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
 
@@ -79,6 +79,15 @@ PAGE_SIZE = 10
 # One card's padding, for every card. Left, top, right, bottom.
 CARD_PADDING = (20, 17, 20, 17)
 
+# How many builds one card's table shows at once.
+#
+# Eight, and then it says how many it is not showing. A repository with twenty
+# builds produced a card over a thousand pixels tall, which is the clustering
+# problem arriving from the other direction -- and the ones beyond the eighth
+# are the largest, which are the ones this device cannot run anyway. The table
+# is smallest first precisely so that the truncation drops what matters least.
+BUILDS_SHOWN = 8
+
 
 # What a refresh may not overwrite, because the Hub does not carry it.
 #
@@ -123,6 +132,21 @@ class CookbookPanel(QWidget):
         self.window = window
         self._busy = False
         self._page = 0
+        # Set while a "Show every model" click is waiting for its turn of the
+        # event loop, so repeated presses collapse into one rebuild.
+        self._widening = False
+        # The build each card is showing, by repository. Not by position, and
+        # not reset on every rebuild: switching the filter to Coding and back
+        # should not quietly put a reader back on the build they rejected.
+        # A repository that no longer has it -- a refresh, a rollback -- simply
+        # falls back to the engine's choice, because every read goes through
+        # _chosen_entry rather than trusting what is here.
+        self._chosen = {}
+        # Which cards have their build table open, by repository, for the same
+        # reason. Choosing a build re-draws the card, and the reader was in the
+        # middle of a list when they did it; a table that closes the instant it
+        # is used is a table people stop trusting.
+        self._open = set()
         # Where a cached catalogue lives, and the host a refresh reads from.
         # Both are per workspace: two workspaces can be looking at different
         # catalogues, and a shared cache would have them overwrite each other.
@@ -153,9 +177,6 @@ class CookbookPanel(QWidget):
 
         layout.addWidget(label("WHICH MODELS FIT THIS MACHINE", "eyebrow"))
         layout.addWidget(label("Cookbook", "title"))
-        layout.addWidget(label(
-            "Sized against this device's memory. Pressing Refresh asks first, "
-            "and says where it is about to read from.", "muted", True))
 
         self.hardware = detect_hardware(
             window.storage.directory if hasattr(window, "storage") else None)
@@ -594,48 +615,97 @@ class CookbookPanel(QWidget):
     def show_everything(self):
         """Put the filter back to Everything, which is where models are.
 
+        Deferred to the next turn of the event loop, and that is the whole fix.
+
+        The button being pressed lives inside the card this throws away --
+        "Show every model" is drawn on the very card saying the catalogue has
+        nothing to show. So whatever the filter change rebuilds has to wait
+        until the click has finished travelling: it is delivered by the button,
+        the signal runs this, and the card the button sits in is torn down while
+        its own click is still being processed. ``deleteLater`` keeps the object
+        alive until the loop returns, which is why the teardown itself was
+        enough to stop the stray windows; doing the rebuild here as well means
+        the card is still parented, still laid out and still the widget under
+        the cursor at the exact moment the platform is asking which window owns
+        it, and on Windows that question is answered by putting one on screen.
+
+        Waiting a turn also means a reader who mashes the button gets one
+        rebuild rather than one per press.
+
         Only the picker's own signal does the rendering. Calling render_models
-        as well drew the whole page twice -- setCurrentIndex fires
-        currentIndexChanged, which is already connected to it -- so every card
-        was torn down and rebuilt twice over, which is where the stray windows
-        were coming from. It also means the button this was pressed from is
-        inside the first of those teardowns, so the click destroyed the control
-        that was handling it.
+        as well would draw the page twice, since setCurrentIndex already fires
+        currentIndexChanged, which is wired to the render.
         """
         index = self.task_picker.findData(None)
         if index < 0:
             return
+        if self._widening:
+            return
+        self._widening = True
+        QTimer.singleShot(0, lambda: self._widen_now(index))
+
+    def _widen_now(self, index):
+        """The deferred half of show_everything."""
+        self._widening = False
         if index == self.task_picker.currentIndex():
             # Already on it, so no signal is coming.
             self.render_models()
         else:
             self.task_picker.setCurrentIndex(index)
 
-    def _other_builds(self, column, row):
-        """Every build of this model except the recommended one, behind a toggle.
+    def _chosen_entry(self, row):
+        """The build this card is showing: the reader's choice, or the best one.
 
-        Thirty-one builds sat behind four cards with nothing on screen that
-        reached the other twenty-seven. That is not a cosmetic gap: a machine
-        with a 4GiB card was shown the 5.1GB four-bit build of a 7B model at
-        "possible with compromises" while the 3.6GB two-bit build in the same
-        catalogue would have fitted outright, and the only way to find that out
-        was to read the source.
-
-        Collapsed by default so the page stays comparable model to model, which
-        is what somebody scanning a list of what fits is actually doing. The
-        list is smallest first, so it reads as a ladder of trade-offs rather
-        than a scramble, and each row carries its own command -- an alternative
-        build is no use if the reader has to work out its repository tag.
-
-        The state is not remembered across a re-render. A refresh or a filter
-        change replaces the catalogue underneath, and reopening a section that
-        was expanded against a different set of builds would be showing
-        something that is no longer true.
+        Always resolved rather than remembered. A catalogue that changed under
+        the choice -- a refresh, a rollback, a filter over a different
+        catalogue -- no longer has that build, and a remembered one would be a
+        command naming a file that is not there.
         """
-        builds = [entry for entry in row.get("builds") or []
-                  if not entry["selected"]]
-        if not builds:
+        builds = row.get("builds") or []
+        wanted = self._chosen.get(row["model"].repo)
+        for entry in builds:
+            if wanted and entry["variant"].quantization == wanted:
+                return entry
+        return next((entry for entry in builds if entry["selected"]), None)
+
+    def choose_build(self, repo, quantization):
+        """Show a different build of this model, and re-draw the card for it."""
+        if self._chosen.get(repo) == quantization:
             return
+        self._chosen[repo] = quantization
+        # render_page and not render_models: the choice is not a new list, it
+        # is a different build of one already on it, and sending the reader
+        # back to page one for choosing a quantisation would be absurd.
+        self.render_page()
+
+    def toggle_builds(self, repo, opened):
+        """Remember which cards are open, so a re-render can leave them that way."""
+        if opened:
+            self._open.add(repo)
+        else:
+            self._open.discard(repo)
+
+    def _other_builds(self, column, row):
+        """Every build of this model, as a table you can choose from.
+
+        It used to be a list you could only read, and a list you could only
+        read was not much use: the page said a 7B model was "possible with
+        compromises" at four-bit, offered the two-bit build in the row below,
+        and then gave you a command for the four-bit one. Three failures at
+        once -- the alternative was unselectable, unrunnable, and seven copies
+        of the same fifty-nine characters differing only in the tag.
+
+        Choosing a build now changes the card: the verdict and its colour, the
+        reason, the figures and the command all follow, because the verdict was
+        always computed per build by ``build_rows`` and only the one on show
+        was ever drawn. The engine's choice is the default rather than being
+        excluded, so what the card is using is visible in the list instead of
+        being something you have to infer.
+        """
+        builds = list(row.get("builds") or [])
+        if len(builds) < 2:
+            return
+        chosen = self._chosen_entry(row)
 
         on_card = sum(1 for entry in builds
                       if entry["verdict"]["result"] in (VERIFIED, LIKELY))
@@ -648,7 +718,7 @@ class CookbookPanel(QWidget):
         # does not wrap, so a long summary here forced the whole card wider
         # than the page and put a horizontal scrollbar under it. The counts go
         # in the tooltip and inside the section, both of which wrap.
-        summary = [f"{len(builds)} other builds"]
+        summary = [f"{len(builds)} builds"]
         if on_card:
             summary.append(f"{on_card} run on the graphics card")
         if spilling:
@@ -657,51 +727,70 @@ class CookbookPanel(QWidget):
         toggle = action(summary[0], None, name="ghost")
         toggle.setToolTip(f"{summary[0]} — {detail_text}")
         toggle.setAccessibleName(
-            f"Show the other {len(builds)} builds of {row['model'].display}. "
-            f"{detail_text}.")
-        toggle.setAccessibleName(
-            f"Show the other {len(builds)} builds of {row['model'].display}, "
-            "with their size and what this device makes of each")
+            f"Show the {len(builds)} builds of {row['model'].display}, with "
+            f"their size and what this device makes of each. {detail_text}.")
         toggle.setCheckable(True)
-        toggle.setChecked(False)
+        toggle.setChecked(row["model"].repo in self._open)
         column.addWidget(toggle, 0, Qt.AlignmentFlag.AlignLeft)
 
         detail = QWidget()
         listing = QVBoxLayout(detail)
         listing.setContentsMargins(0, 6, 0, 0)
-        listing.setSpacing(8)
+        listing.setSpacing(4)
         note = label(detail_text, "muted", True)
         note.setWordWrap(True)
         listing.addWidget(note)
-        for entry in builds:
-            listing.addWidget(self._build_row(row["model"], entry))
-        detail.setVisible(False)
+
+        shown = builds[:BUILDS_SHOWN]
+        for entry in shown:
+            listing.addWidget(self._build_row(row["model"], entry, chosen))
+        hidden = len(builds) - len(shown)
+        if hidden > 0:
+            listing.addWidget(label(
+                f"and {hidden} larger build{'s' if hidden != 1 else ''} this "
+                "device cannot run", "muted", True))
+
+        detail.setVisible(toggle.isChecked())
         toggle.toggled.connect(detail.setVisible)
+        toggle.toggled.connect(
+            lambda opened, repo=row["model"].repo: self.toggle_builds(repo, opened))
         column.addWidget(detail)
 
-    def _build_row(self, model, entry):
-        """One alternative build: its size, its verdict, and how to run it."""
+    def _build_row(self, model, entry, chosen):
+        """One build, as a row you can choose.
+
+        A checkable ghost button rather than a label with a click handler, so
+        the choice is a real control -- reachable by keyboard, and drawn as
+        chosen by the ``#ghost:checked`` rule the app already has. Its property
+        marks it as a build row for the tests, since the objectName has to stay
+        ``ghost`` for the styling to apply.
+        """
         variant, verdict = entry["variant"], entry["verdict"]
         total = (entry["figures"] or {}).get("total")
+        is_chosen = bool(chosen and variant.quantization == chosen["variant"].quantization)
 
-        block = QWidget()
-        block.setObjectName("buildRow")
-        line = QVBoxLayout(block)
-        line.setContentsMargins(0, 0, 0, 0)
-        line.setSpacing(4)
+        row = action("", lambda: self.choose_build(model.repo,
+                                                   variant.quantization),
+                     name="ghost")
+        row.setCheckable(True)
+        row.setChecked(is_chosen)
+        row.setProperty("buildRow", True)
+        row.setProperty("buildVariant", variant.quantization)
+        row.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(10)
+        line = QHBoxLayout(row)
+        line.setContentsMargins(10, 5, 10, 5)
+        line.setSpacing(10)
 
-        name = label(variant.quantization or variant.name, "buildName")
-        head.addWidget(name)
+        line.addWidget(label(variant.quantization or variant.name, "buildName"))
 
         size = f"{human_bytes(variant.size)} download"
         if total and total != variant.size:
             size += f" · {human_bytes(total)} in memory"
-        measured = label(size, "muted", True)
-        head.addWidget(measured, 1)
+        line.addWidget(label(size, "muted", True), 1)
+
+        if entry["selected"]:
+            line.addWidget(label("recommended", "muted"))
 
         if entry["spills"]:
             mark, style = "spills to CPU", TONE[POSSIBLE]
@@ -719,25 +808,24 @@ class CookbookPanel(QWidget):
         verdict_label.setToolTip(
             f"{verdict['result']} — {verdict['reason']}" + (
                 f"\n\n{gloss}" if gloss else ""))
+        # Carries the whole verdict too, so the short mark cannot be read
+        # without the number that produced it. The row's own accessible name
+        # says the same thing, because the row is now a control; this is what
+        # a reader gets if they move onto the text itself.
         verdict_label.setAccessibleName(
-            f"{variant.quantization}, {size}, {verdict['result']}, "
-            f"{verdict['reason']}" + (f". {gloss}" if gloss else ""))
-        head.addWidget(verdict_label)
-        # The whole reason is on the row too, so a verdict cannot be read
-        # without the number that produced it.
-        block.setToolTip(verdict["reason"])
-        line.addLayout(head)
+            f"{verdict['result']}, {verdict['reason']}" + (
+                f". {gloss}" if gloss else ""))
+        line.addWidget(verdict_label)
 
-        commands = ollama_commands(model, variant)
-        if commands:
-            command = label(commands[0]["command"], "command", True)
-            command.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-                | Qt.TextInteractionFlag.TextSelectableByKeyboard)
-            command.setAccessibleName(
-                f"Command to run the {variant.quantization} build")
-            line.addWidget(command)
-        return block
+        parts = [variant.quantization, size]
+        if entry["selected"]:
+            parts.append("the recommended build")
+        parts.append(f"{verdict['result']}, {verdict['reason']}")
+        if gloss:
+            parts.append(gloss)
+        row.setAccessibleName(". ".join(parts))
+        row.setToolTip(verdict["reason"])
+        return row
 
     def _model_card(self, row):
         """One model, in four groups: who it is, what it costs, how to run it,
@@ -749,7 +837,14 @@ class CookbookPanel(QWidget):
         read as one undifferentiated block: the verdict's own explanation was
         indistinguishable from the disclaimer three lines below it.
         """
-        model, variant, verdict = row["model"], row["variant"], row["verdict"]
+        model = row["model"]
+        # The build being shown, which is the reader's choice where they have
+        # made one. Everything below -- the badge, its colour, the figures, the
+        # command -- follows it, because the verdict was always worked out per
+        # build and only one of them was ever drawn.
+        entry = self._chosen_entry(row)
+        variant = (entry or {}).get("variant", row["variant"])
+        verdict = (entry or {}).get("verdict", row["verdict"])
         card, column = self._card(CARD[verdict["result"]])
 
         # Group one: what this is.
