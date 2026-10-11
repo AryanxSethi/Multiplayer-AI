@@ -162,7 +162,25 @@ def test_no_dialog_result_is_compared_with_is(path):
     assert not offenders, "\n".join(offenders)
 
 
-MOJIBAKE = ("\u00c2", "\u00c3", "\u00e2", "\ufffd")
+# What actually gets written when UTF-8 text is decoded as Windows-1252 and
+# encoded back as UTF-8: a two- or three-character sequence whose characters
+# are individually perfectly good.
+#
+# Matched as sequences rather than as the single characters they are built
+# from, because those characters are letters. U+00E2 is an a-circumflex and
+# U+00C2 is an A-circumflex, which between them appear in ordinary French
+# ("âge"), Portuguese ("árvore") and Romanian ("îngust") -- so matching them
+# alone fails the build on correct text, which is a guard that stops being
+# turned on rather than one that catches something.
+MOJIBAKE = (
+    "\u00c2\u00b7",   # Â·  a middot
+    "\u00c3\u00a9",   # Ã©  an e-acute
+    "\u00c3\u00a8",   # Ã¨  a e-grave
+    "\u00e2\u20ac",   # â€  the start of every em-dash or curly quote
+    "\u00e2\u0080",   # â\x80 the same, mid-sequence
+    "\u00ef\u00bb\u00bf",  # ï»¿ a byte-order mark read as text
+    "\ufffd",         # the replacement character, which is never correct
+)
 
 
 @pytest.mark.parametrize("path", SOURCES, ids=lambda path: path.name)
@@ -175,7 +193,7 @@ def test_no_source_file_has_been_mangled_by_an_encoding_change(path):
     and no assertion covered the string -- the tests stayed green while the
     interface was wrong in front of whoever was reading it.
 
-    A bulk edit is the usual way this happens, so the check is on the bytes
+    A bulk edit is the usual way this happens, so the check is on the text
     rather than on anything an interpreter would notice.
     """
     text = path.read_text(encoding="utf-8")
@@ -183,6 +201,25 @@ def test_no_source_file_has_been_mangled_by_an_encoding_change(path):
                  for number, line in enumerate(text.splitlines(), 1)
                  for mark in MOJIBAKE if mark in line]
     assert not offenders, "\n".join(offenders)
+
+
+@pytest.mark.parametrize("text", (
+    "Le calcul de l’âge du modèle. Café au lait.",
+    "A árvore e a relação entre camadas",
+    "Além do cálculo, a página não cabe.",
+    "Calculul îngust pentru un model",
+))
+def test_the_mojibake_guard_does_not_fail_on_correct_text(text):
+    """A guard that cries wolf on French is a guard nobody leaves switched on.
+
+    The first version matched the individual characters the corruption is built
+    from, which rejected this whole list -- "âge" and "árvore" both contain an
+    a-circumflex, which is U+00E2, and U+00E2 was one of the things it looked
+    for. Every one of these is the second half of a check that is supposed to
+    be impossible to turn off by accident.
+    """
+    assert not [mark for mark in MOJIBAKE if mark in text], (
+        f"{text!r} is correct text and matched {MOJIBAKE!r}")
 
 
 @pytest.mark.parametrize("path", SOURCES, ids=lambda path: path.name)
