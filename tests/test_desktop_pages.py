@@ -2141,6 +2141,110 @@ def test_leaving_asks_before_it_acts_and_says_when_the_host_refuses(window, monk
         "the button stayed dead after the host refused, with nothing saying why")
 
 
+def test_the_join_card_says_where_leaving_is_possible(window) -> None:
+    """The card names a control that is only on screen in one of the two cases.
+
+    "Leave it from the card above" is true while this device is a member of
+    the workspace it is looking at, because that is when the current
+    workspace's card carries a Leave control. Hosting your own workspace while
+    holding a membership elsewhere is the other half: the card above is yours,
+    it has no Leave on it, and the way out is to switch to that workspace
+    first. Sending somebody to a button that is not there is worse than saying
+    nothing, because it reads as the control being broken.
+    """
+    window.ready = True
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.navigate(win.WORKSPACES_PAGE)
+    window.show()
+    window.remote = True
+    joined = {"id": "workspace-abc", "name": "Alex's studio", "kind": "remote",
+              "url": "wss://studio.example/connect"}
+
+    # A member looking at the workspace they joined: the card above is theirs.
+    window.workspace_list = [{"id": "local", "name": "Mine", "kind": "local"},
+                             joined]
+    window.remote = True
+    window.render_workspace_page()
+    assert window.workspace_leave_button.isVisible(), (
+        "this fixture needs the Leave control on the card for the instruction "
+        "to be true")
+    in_it = window.card_lines["workspace:join"].message.text()
+    assert "Alex's studio" in in_it, f"it does not name the workspace: {in_it!r}"
+    assert "card above" in in_it, (
+        f"it does not point at the control that works: {in_it!r}")
+
+    # Hosting our own, with a membership elsewhere: not the card above.
+    window.remote = False
+    window.render_workspace_page()
+    assert not window.workspace_leave_button.isVisible(), (
+        "this fixture needs no Leave control, or the instruction would be "
+        "right for the wrong reason")
+    hosted = window.card_lines["workspace:join"].message.text()
+    assert "Alex's studio" in hosted, f"it lost the name: {hosted!r}"
+    assert "rail" in hosted, (
+        f"it does not say how to leave while hosting another workspace: {hosted!r}")
+    assert "card above" not in hosted, (
+        f"it points at a button this device cannot see: {hosted!r}")
+
+
+def test_the_join_card_stops_naming_a_workspace_after_leaving_it(window) -> None:
+    """The message used to outlive the thing it described.
+
+    It was written only when there was a workspace joined and never cleared,
+    so after leaving, the card went on saying "You are in 'Alex's studio'" --
+    naming a workspace this device was no longer a member of, and pointing at
+    a button that was already enabled again.
+    """
+    window.ready = True
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.navigate(win.WORKSPACES_PAGE)
+    window.show()
+    window.remote = True
+    joined = {"id": "workspace-abc", "name": "Alex's studio", "kind": "remote",
+              "url": "wss://studio.example/connect"}
+
+    window.workspace_list = [{"id": "local", "name": "Mine", "kind": "local"},
+                             joined]
+    window.remote = True
+    window.render_workspace_page()
+    assert "Alex's studio" in window.card_lines["workspace:join"].message.text()
+
+    window.workspace_list = [{"id": "local", "name": "Mine", "kind": "local"}]
+    window.remote = False
+    window.render_workspace_page()
+
+    line = window.card_lines["workspace:join"].message
+    assert not line.text(), (
+        f"the card still names a workspace this device has left: {line.text()!r}")
+    assert not line.isVisible(), "the line is still on screen saying it"
+    assert window.workspace_join_button.isEnabled(), (
+        "joining is still refused after the only membership was left")
+
+
+def test_leaving_a_workspace_does_not_wipe_a_join_that_failed(window) -> None:
+    """The line carries an error and a standing hint, and they are not the same.
+
+    Clearing it unconditionally on leaving -- which is what a first attempt at
+    this did -- threw away the only account of a join that had actually failed,
+    because the message was on the same line as the explanation of which
+    workspace you are in. Only the hint is cleared.
+    """
+    window.ready = True
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.navigate(win.WORKSPACES_PAGE)
+    window.show()
+    window.remote = True
+
+    # A join is attempted and refused, and that is what the line says.
+    window.set_card_message(window.workspace_join_line, "the relay refused the token")
+    window.workspace_list = []
+    window.render_workspace_page()
+
+    assert "refused" in window.workspace_join_line.message.text(), (
+        "leaving a workspace cleared the error from a failed join: "
+        f"{window.workspace_join_line.message.text()!r}")
+
+
 def test_the_join_card_explains_itself_while_another_workspace_is_joined(window) -> None:
     """One invitation at a time, and the page says so instead of going quiet.
 
@@ -2153,6 +2257,9 @@ def test_the_join_card_explains_itself_while_another_workspace_is_joined(window)
     window.ready = True
     window.network_event("ready", {"port": 0, "device_id": "device-test"})
     window.navigate(win.WORKSPACES_PAGE)
+    # Shown, because isVisible() is false for anything in a window that is not
+    # on screen, and whether the Leave control is there is the point.
+    window.show()
     window.set_card_message(window.workspace_join_line, "")
 
     assert window.workspace_join_button.isEnabled(), (
@@ -2166,7 +2273,12 @@ def test_the_join_card_explains_itself_while_another_workspace_is_joined(window)
         "a second workspace can be joined while one is already joined")
     line = window.card_lines["workspace:join"].message.text()
     assert "Alex's studio" in line, f"the line does not say which workspace to leave: {line!r}"
-    assert "Leave" in line, f"the line does not say how to leave: {line!r}"
+    # How to leave it depends on whether this device is looking at that
+    # workspace or at its own; either way the line has to say, rather than only
+    # naming a problem. Which of the two is checked properly alongside this,
+    # in the test that sets up both cases.
+    assert ("card above" in line) or ("rail" in line), (
+        f"the line does not say how to leave: {line!r}")
     """Inviting a device belongs on the page, beside what it is for."""
     window.ready = True
     window.navigate(win.WORKSPACES_PAGE)

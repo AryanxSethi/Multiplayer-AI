@@ -3493,10 +3493,31 @@ class MainWindow(QMainWindow):
                     if entry.get("kind") == "remote"), None)
         self.workspace_join_button.setEnabled(
             self.ready and not self.workspace_busy["join"] and not joined)
+        # Where to leave it depends on whether this device is in that
+        # workspace right now. The Leave control sits on the current
+        # workspace's card and is shown only when this device is a member of
+        # the one it is looking at, so "the card above" is only true while
+        # that is the case. Hosting your own workspace while holding a
+        # membership elsewhere is the other half, and there the card above is
+        # yours and has no Leave on it at all -- the way out is to switch to
+        # that workspace first.
+        #
+        # Cleared when there is nothing joined any more, but only when what the
+        # line is holding is the hint that was put there. It used to be written
+        # only when there was, so the line outlived the workspace and went on
+        # naming one this device had already left; but this line also carries
+        # the error from a join that actually failed, and clearing that because
+        # some unrelated workspace was left would throw away the only account
+        # of what went wrong.
         if joined:
-            self.set_card_message(
-                self.workspace_join_line,
-                f"You are in '{joined}'. Leave it from the card above before joining another.")
+            hint = f"You are in '{joined}'. " + (
+                "Leave it from the card above before joining another."
+                if self.remote else
+                "Switch to it in the rail to leave it, before joining another.")
+            self._join_derived = hint
+            self.set_card_message(self.workspace_join_line, hint)
+        elif self.workspace_join_line.message.text() == getattr(self, "_join_derived", ""):
+            self.set_card_message(self.workspace_join_line, "")
         # The relay's port is not known when this card is built, so the
         # address it generated first carried port 0 and the invitation would
         # have advertised it. Harmless to repeat here: a typed address is
