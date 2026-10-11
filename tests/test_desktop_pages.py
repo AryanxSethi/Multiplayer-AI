@@ -2279,6 +2279,9 @@ def test_the_join_card_explains_itself_while_another_workspace_is_joined(window)
     # in the test that sets up both cases.
     assert ("card above" in line) or ("rail" in line), (
         f"the line does not say how to leave: {line!r}")
+
+
+def test_the_invite_card_is_on_the_workspaces_page(window) -> None:
     """Inviting a device belongs on the page, beside what it is for."""
     window.ready = True
     window.navigate(win.WORKSPACES_PAGE)
