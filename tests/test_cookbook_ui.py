@@ -17,7 +17,7 @@ pytest.importorskip("psutil", reason="psutil backs hardware detection")
 
 from PySide6.QtCore import QEvent, Qt  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QDialog, QLabel,  # noqa: E402
-                             QPushButton, QScrollArea)
+                             QPushButton, QScrollArea, QWidget)
 
 from desktop_app import window as win  # noqa: E402
 from desktop_app.cookbook import (human_bytes, load_catalog,  # noqa: E402
@@ -312,23 +312,33 @@ def test_the_verdict_carries_a_plain_english_gloss_for_hover_and_readers(window)
     with compromises" means nothing on first reading. ``EXPLANATIONS`` holds a
     sentence for each verdict and was never rendered anywhere -- this is what
     it was written for.
+
+    Checked by looking for one of the prepared sentences rather than by
+    matching the label's visible text, because the alternative-build rows show
+    a short mark ("on the card") and carry the whole verdict on hover.
     """
+    import re
+
     from desktop_app.cookbook import EXPLANATIONS
-    from desktop_app.widgets import TickCheckBox  # noqa: F401  (import guard)
 
     panel = panel_of(window)
     settle()
     badges = [widget for widget in panel.findChildren(QLabel)
               if widget.objectName().startswith("verdict")]
     assert badges, "no verdict badge was drawn at all"
+
+    prepared = set(EXPLANATIONS.values())
     for badge in badges:
-        result = badge.text()
-        assert result in EXPLANATIONS, (
-            f"{result!r} has no prepared explanation")
-        assert badge.toolTip() == EXPLANATIONS[result], (
-            f"the hover text for {result!r} is not its explanation")
-        assert EXPLANATIONS[result] in badge.accessibleName(), (
-            f"{result!r} is not explained to a screen reader")
+        hover = badge.toolTip() or ""
+        name = badge.accessibleName() or ""
+        assert any(gloss in hover for gloss in prepared), (
+            f"{badge.text()!r} has no prepared explanation on hover: {hover!r}")
+        assert any(gloss in name for gloss in prepared), (
+            f"{badge.text()!r} is not explained to a screen reader: {name!r}")
+        # And it names a verdict that actually exists, rather than any sentence.
+        assert any(re.search(r"\b" + re.escape(result), name)
+                   for result in EXPLANATIONS), (
+            f"{badge.text()!r} names no verdict in {name!r}")
 
 
 def test_a_command_is_monospaced_selectable_and_not_body_text(window) -> None:
@@ -1156,6 +1166,151 @@ def test_a_mirror_is_named_as_somebody_elses_server(window, monkeypatch) -> None
     assert "mirror" in said.lower(), (
         f"a mirror is being presented as the public catalogue: {said[:300]!r}")
     assert "hf-mirror.example.com" in asked[0].host
+
+
+def build_toggles(panel):
+    """The "other builds" controls, one per card that has alternatives."""
+    found = []
+    for card in cards_on_page(panel):
+        for button in card.findChildren(QPushButton):
+            if "other builds" in button.text():
+                found.append(button)
+    return found
+
+
+def build_rows_of(card):
+    return [child for child in card.findChildren(QWidget)
+            if child.objectName() == "buildRow"]
+
+
+def test_every_other_build_is_reachable_from_its_card(window) -> None:
+    """Twenty-seven of the thirty-one builds had no route to the screen.
+
+    A machine with a 4GiB card was shown the 5.1GB four-bit build of a 7B model
+    at "possible with compromises" while the 3.6GB two-bit build in the same
+    catalogue would have fitted outright, and nothing in the interface could
+    have told anyone that.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    rows = recommend(panel.catalog, panel.hardware)
+    assert rows, "nothing was recommended, so this proves nothing"
+    expected = sum(len(row["model"].variants) - 1 for row in rows)
+    assert expected > 0, "the catalogue holds only one build per model"
+
+    toggles = build_toggles(panel)
+    assert toggles, "no card offers its other builds"
+    offered = sum(int(text.split()[0]) for text in
+                  (button.text() for button in toggles))
+    assert offered == expected, (
+        f"the cards offer {offered} alternative builds and there are "
+        f"{expected}; some are still unreachable")
+
+    # Collapsed until asked, so a list of what fits stays comparable.
+    for button in toggles:
+        assert not button.isChecked(), "the section starts open"
+    card = toggles[0].parent()
+    assert not any(row.isVisible() for row in build_rows_of(card)), (
+        "the builds are on screen before anyone asked for them")
+
+    toggles[0].click()
+    settle()
+    assert any(row.isVisible() for row in build_rows_of(card)), (
+        "pressing the control did not show any build")
+
+
+def test_an_alternative_build_can_actually_be_run(window) -> None:
+    """An alternative is no use if the reader has to work out its repository tag."""
+    panel = panel_of(window)
+    window.show()
+    settle()
+    toggles = build_toggles(panel)
+    assert toggles
+    toggles[0].click()
+    settle()
+
+    card = toggles[0].parent()
+    rows = build_rows_of(card)
+    assert rows
+    for row in rows:
+        commands = [label for label in row.findChildren(QLabel)
+                    if label.objectName() == "command"]
+        assert commands, "a build is listed with no way to run it"
+        assert "ollama run" in commands[0].text(), (
+            f"not a runnable command: {commands[0].text()!r}")
+
+    # Each row is a different build, and none of them is the chosen one twice.
+    said = " ".join(label.text() for row in rows for label in row.findChildren(QLabel))
+    assert len(rows) == len(set(rows)), "the same build is listed twice"
+
+
+def test_a_build_that_spills_is_marked_as_such_and_not_counted_as_on_the_card(window) -> None:
+    """"Possible with compromises" fits, but it does not run on the card.
+
+    Calling those builds "fits" claimed six of seven ran on the graphics card
+    when one did -- which is the difference between a fast model and one running
+    on the processor.
+    """
+    from desktop_app.cookbook import build_rows, load_catalog
+    import re
+
+    panel = panel_of(window)
+    window.show()
+    settle()
+    coder = next(model for model in load_catalog() if "Coder" in model.name)
+    entries = build_rows(coder, panel.hardware)
+    spilling = [entry for entry in entries if entry["spills"]]
+    assert spilling, "this fixture needs builds that overrun the card"
+
+    alternatives = [entry for entry in entries if not entry["selected"]]
+    on_card = [entry for entry in alternatives
+               if entry["verdict"]["result"] in ("likely to run",
+                                                 "verified compatible")]
+    assert on_card, "this fixture needs at least one build that fits the card"
+    assert len(on_card) < len(alternatives), (
+        "this fixture needs some builds that do not fit the card")
+
+    # The number on that model's own control has to be the number that fits.
+    coder_card = next(
+        card for card in cards_on_page(panel)
+        if coder.display in " ".join(label.text()
+                                     for label in card.findChildren(QLabel)))
+    toggle = next(button for button in coder_card.findChildren(QPushButton)
+                  if "other builds" in button.text())
+    found = re.search(r"(\d+) run on the graphics card", toggle.toolTip())
+    assert found, (
+        f"the card does not say how many builds run on the card: "
+        f"{toggle.toolTip()!r}")
+    assert int(found.group(1)) == len(on_card), (
+        f"the control claims {found.group(1)} builds run on the card, and "
+        f"{len(on_card)} do")
+    assert f"{len(spilling)} spill to the CPU" in toggle.toolTip(), (
+        f"the card does not admit which builds spill: {toggle.toolTip()!r}")
+
+
+def test_the_builds_section_closes_when_the_list_is_rebuilt(window) -> None:
+    """A refresh or a filter change replaces the catalogue underneath.
+
+    Leaving a section open against a set of builds that is no longer on screen
+    would be showing something untrue.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    toggles = build_toggles(panel)
+    assert toggles
+    toggles[0].click()
+    settle()
+    assert toggles[0].isChecked()
+
+    panel.task_picker.setCurrentIndex(panel.task_picker.findData("coding"))
+    settle()
+
+    for button in build_toggles(panel):
+        assert not button.isChecked(), (
+            "the section stayed open across a change of catalogue")
 
 
 def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(window) -> None:

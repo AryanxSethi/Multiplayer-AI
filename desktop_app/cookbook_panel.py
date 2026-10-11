@@ -23,11 +23,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
 
-from .cookbook import (EXPLANATIONS, NOT_ENOUGH_PUBLISHED, NO_CATALOGUE,
-                       PREVIOUS_NAME, CatalogError, TASKS, describe_changes,
-                       detect_hardware, empty_reason, human_bytes,
-                       kv_cache_bytes, load_cache, load_catalog,
-                       ollama_commands, parse_model, recommend,
+from .cookbook import (EXPLANATIONS, FITTING, LIKELY, NOT_ENOUGH_PUBLISHED,
+                       NO_CATALOGUE, POSSIBLE, PREVIOUS_NAME, VERIFIED,
+                       CatalogError, TASKS, describe_changes, detect_hardware,
+                       empty_reason, human_bytes, kv_cache_bytes, load_cache,
+                       load_catalog, ollama_commands, parse_model, recommend,
                        rollback_catalog, save_catalog)
 from .cookbook_hub import check_base
 from .widgets import Select, action, label
@@ -535,6 +535,134 @@ class CookbookPanel(QWidget):
             self.task_picker.setCurrentIndex(index)
         self.render_models()
 
+    def _other_builds(self, column, row):
+        """Every build of this model except the recommended one, behind a toggle.
+
+        Thirty-one builds sat behind four cards with nothing on screen that
+        reached the other twenty-seven. That is not a cosmetic gap: a machine
+        with a 4GiB card was shown the 5.1GB four-bit build of a 7B model at
+        "possible with compromises" while the 3.6GB two-bit build in the same
+        catalogue would have fitted outright, and the only way to find that out
+        was to read the source.
+
+        Collapsed by default so the page stays comparable model to model, which
+        is what somebody scanning a list of what fits is actually doing. The
+        list is smallest first, so it reads as a ladder of trade-offs rather
+        than a scramble, and each row carries its own command -- an alternative
+        build is no use if the reader has to work out its repository tag.
+
+        The state is not remembered across a re-render. A refresh or a filter
+        change replaces the catalogue underneath, and reopening a section that
+        was expanded against a different set of builds would be showing
+        something that is no longer true.
+        """
+        builds = [entry for entry in row.get("builds") or []
+                  if not entry["selected"]]
+        if not builds:
+            return
+
+        on_card = sum(1 for entry in builds
+                      if entry["verdict"]["result"] in (VERIFIED, LIKELY))
+        spilling = sum(1 for entry in builds if entry["spills"])
+        # Counted separately and worded honestly. "Possible with compromises"
+        # is technically a fitting verdict, so calling these "fits" would have
+        # claimed six of seven run on the graphics card when one does.
+        #
+        # Kept short on the button itself: a ghost button sizes to its text and
+        # does not wrap, so a long summary here forced the whole card wider
+        # than the page and put a horizontal scrollbar under it. The counts go
+        # in the tooltip and inside the section, both of which wrap.
+        summary = [f"{len(builds)} other builds"]
+        if on_card:
+            summary.append(f"{on_card} run on the graphics card")
+        if spilling:
+            summary.append(f"{spilling} spill to the CPU")
+        detail_text = " · ".join(summary[1:]) or "all of them fit system memory"
+        toggle = action(summary[0], None, name="ghost")
+        toggle.setToolTip(f"{summary[0]} — {detail_text}")
+        toggle.setAccessibleName(
+            f"Show the other {len(builds)} builds of {row['model'].display}. "
+            f"{detail_text}.")
+        toggle.setAccessibleName(
+            f"Show the other {len(builds)} builds of {row['model'].display}, "
+            "with their size and what this device makes of each")
+        toggle.setCheckable(True)
+        toggle.setChecked(False)
+        column.addWidget(toggle, 0, Qt.AlignmentFlag.AlignLeft)
+
+        detail = QWidget()
+        listing = QVBoxLayout(detail)
+        listing.setContentsMargins(0, 6, 0, 0)
+        listing.setSpacing(8)
+        note = label(detail_text, "muted", True)
+        note.setWordWrap(True)
+        listing.addWidget(note)
+        for entry in builds:
+            listing.addWidget(self._build_row(row["model"], entry))
+        detail.setVisible(False)
+        toggle.toggled.connect(detail.setVisible)
+        column.addWidget(detail)
+
+    def _build_row(self, model, entry):
+        """One alternative build: its size, its verdict, and how to run it."""
+        variant, verdict = entry["variant"], entry["verdict"]
+        total = (entry["figures"] or {}).get("total")
+
+        block = QWidget()
+        block.setObjectName("buildRow")
+        line = QVBoxLayout(block)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.setSpacing(4)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(10)
+
+        name = label(variant.quantization or variant.name, "heading")
+        head.addWidget(name)
+
+        size = f"{human_bytes(variant.size)} download"
+        if total and total != variant.size:
+            size += f" · {human_bytes(total)} in memory"
+        measured = label(size, "muted", True)
+        head.addWidget(measured, 1)
+
+        if entry["spills"]:
+            mark, style = "spills to CPU", TONE[POSSIBLE]
+        else:
+            result = verdict["result"]
+            # Short in the row, whole on hover. "possible with compromises" is
+            # 24 characters of prose in a dense list, and it also forced the
+            # card wider than the page.
+            mark = {"verified compatible": "on the card",
+                    "likely to run": "on the card",
+                    "not recommended": "too big"}.get(result, "unknown")
+            style = TONE.get(result, "muted")
+        verdict_label = label(mark, style)
+        gloss = EXPLANATIONS.get(verdict["result"])
+        verdict_label.setToolTip(
+            f"{verdict['result']} — {verdict['reason']}" + (
+                f"\n\n{gloss}" if gloss else ""))
+        verdict_label.setAccessibleName(
+            f"{variant.quantization}, {size}, {verdict['result']}, "
+            f"{verdict['reason']}" + (f". {gloss}" if gloss else ""))
+        head.addWidget(verdict_label)
+        # The whole reason is on the row too, so a verdict cannot be read
+        # without the number that produced it.
+        block.setToolTip(verdict["reason"])
+        line.addLayout(head)
+
+        commands = ollama_commands(model, variant)
+        if commands:
+            command = label(commands[0]["command"], "command", True)
+            command.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+            command.setAccessibleName(
+                f"Command to run the {variant.quantization} build")
+            line.addWidget(command)
+        return block
+
     def _model_card(self, row):
         model, variant, verdict = row["model"], row["variant"], row["verdict"]
         card, column = self._card(CARD[verdict["result"]])
@@ -596,6 +724,8 @@ class CookbookPanel(QWidget):
             "muted", True)
         provenance.setWordWrap(True)
         column.addWidget(provenance)
+
+        self._other_builds(column, row)
 
         disclaimer = label(
             "Sized from published figures, not measured on this device.", "muted", True)
