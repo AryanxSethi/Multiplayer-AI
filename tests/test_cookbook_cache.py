@@ -13,9 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from desktop_app.cookbook import (PREVIOUS_NAME, CatalogError, Model, Variant,
-                                  describe_changes, load_cache, parse_catalog,
-                                  parse_model, rollback_catalog, save_catalog)
+from desktop_app.cookbook import (CACHE_NAME, PREVIOUS_NAME, CatalogError, Model,
+                                  Variant, cache_paths, describe_changes,
+                                  load_cache, parse_catalog, parse_model,
+                                  rollback_catalog, save_catalog)
 from tests.test_cookbook import CODER
 
 
@@ -152,6 +153,63 @@ def test_there_is_nothing_to_roll_back_to_until_there_has_been(tmp_path) -> None
     save_catalog([a_model("a/b")], tmp_path)
     assert rollback_catalog(tmp_path) is None, (
         "the first catalogue claimed a predecessor it did not have")
+
+
+def test_a_failed_write_puts_the_previous_catalogue_back(tmp_path,
+                                                         monkeypatch) -> None:
+    """A failed refresh must not leave no catalogue at all.
+
+    The live file is moved aside *because* a rollback is then possible, so
+    letting the write's error escape with the move already done turns a failed
+    refresh into a missing one: the caller gets an exception and finds the
+    directory holding nothing current to show for it.
+
+    ``write_json_durably`` is imported inside the function, so patching it on
+    the module is what actually takes effect.
+    """
+    import desktop_app.storage as storage
+
+    save_catalog([a_model("a/b")], tmp_path)
+    live, previous = cache_paths(tmp_path)
+    assert not previous.is_file(), "the fixture did not leave a rollback target"
+
+    def refuse(path, text):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(storage, "write_json_durably", refuse)
+    with pytest.raises(OSError):
+        save_catalog([a_model("c/d")], tmp_path)
+
+    assert [model.repo for model in load_cache(tmp_path)] == ["a/b"], (
+        "the catalogue in use before the failed write is gone, so the failure "
+        "left the app with nothing rather than with something older")
+    assert rollback_catalog(tmp_path) is None, (
+        "the previous file was left holding the same catalogue, so the next "
+        "refresh would overwrite the only rollback target with itself")
+
+
+def test_a_failed_first_write_reports_and_leaves_nothing_behind(tmp_path,
+                                                               monkeypatch) -> None:
+    """With no previous catalogue there is nothing to put back.
+
+    The behaviour has to stay what it was: the error propagates, and no restore
+    is attempted. Attempting one would move a file into place that was never
+    there.
+    """
+    import desktop_app.storage as storage
+
+    def refuse(path, text):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(storage, "write_json_durably", refuse)
+    with pytest.raises(OSError):
+        save_catalog([a_model("a/b")], tmp_path)
+
+    live, previous = cache_paths(tmp_path)
+    assert not live.is_file(), "a partial catalogue was left as if it were whole"
+    assert not previous.is_file(), (
+        "a restore was attempted with nothing to restore, which would have put "
+        "an empty file where the cache should be")
 
 
 def test_a_previous_catalogue_that_will_not_load_is_reported_not_restored(tmp_path) -> None:

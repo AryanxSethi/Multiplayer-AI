@@ -1697,19 +1697,19 @@ def test_choosing_a_build_waits_for_the_click_and_leaves_the_page_alone(
         window) -> None:
     """Picking a quantisation must not rebuild under the row, nor move the page.
 
-    The row that was pressed is inside the card the rebuild throws away, so
-    doing it inside the click is the same hazard as the "Show every model"
-    button: a widget still processing its own click is torn down underneath
-    itself. So the rebuild waits a turn, which is the part that bites -- an
-    earlier version of this rebuilt inside the click and this caught it.
+    The row that was pressed is inside the card being replaced, so doing it
+    inside the click is the same hazard as the "Show every model" button: a
+    widget still processing its own click is torn down underneath itself. So the
+    work waits a turn, which is the part that bites -- an earlier version of
+    this rebuilt inside the click and this caught it.
 
-    The scroll assertion is a guard rather than a reproduction. Rebuilding from
-    scratch drops the scroll bar, and the builds are the last thing on a card,
-    so somebody choosing between eight quantisations has scrolled down to do it
-    and landing at the top again makes them scroll back for every one. Qt did
-    happen to preserve the value in practice, so this is pinning behaviour that
-    should not be left to Qt's discretion -- but it is not, on its own, a
-    demonstration that anything was broken.
+    The scroll assertion is a guard rather than a reproduction. Rebuilding drops
+    the scroll bar, and the builds are the last thing on a card, so somebody
+    choosing between eight quantisations has scrolled down to do it and landing
+    at the top again makes them scroll back for every one. Qt did happen to
+    preserve the value in practice, so this is pinning behaviour that should not
+    be left to Qt's discretion -- but it is not, on its own, a demonstration
+    that anything was broken.
     """
     panel = panel_of(window)
     # Short enough that the list cannot all fit, which is the case that matters.
@@ -1734,22 +1734,168 @@ def test_choosing_a_build_waits_for_the_click_and_leaves_the_page_alone(
     where = bar.value()
     assert where > 0, "could not scroll away from the top to test this"
 
+    card = toggles[0].parent()
+    repo = next(row["model"].repo
+                for row in recommend(panel.catalog, panel.hardware))
+
+    rows[0].click()
+    # Still inside the click's own call stack: nothing has been touched yet.
+    assert panel._cards.get(repo) is card, (
+        "the card was replaced while the pressed row was still handling the "
+        "click that chose it")
+    assert card.parent() is not None, (
+        "the card holding the pressed row was detached mid-click, which is "
+        "what promotes it to a top-level window")
+    assert not card.isWindow(), (
+        "the card holding the pressed row became a window mid-click")
+    settle()
+
+    assert panel._cards.get(repo) is not card, (
+        "the card was never replaced, so the choice did not take")
+    assert bar.value() == where, (
+        f"choosing a build moved the page from {where} to {bar.value()}; the "
+        "reader has to scroll back down to try the next one")
+
+
+def _nothing_fits(panel):
+    """Put a device on the page that no catalogued model can run on.
+
+    Used rather than a task filter, because which models fit depends on the
+    machine the tests happen to be running on. An earlier version of these two
+    tests emptied the list with the "vision" filter and passed for the wrong
+    reason on a machine with memory to spare: every vision-capable model fit,
+    the list never emptied, and it compared a page with itself.
+    """
+    from desktop_app.cookbook import Hardware
+
+    panel.hardware = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=1,
+        memory_total=256 * 1024 ** 2, memory_available=128 * 1024 ** 2,
+        disk_free=16 * 1024 ** 2, vram=None, unified_memory=False, sources={})
+    panel.render_models()
+    settle()
+
+
+def test_an_empty_list_looks_like_a_full_one(window) -> None:
+    """Whether anything is in the list must not change what the page looks like.
+
+    The page had no trailing stretch, so a short page -- which an empty list
+    makes it -- had space to spare, and a vertical box with no stretch hands
+    that spare space to every row rather than pooling it at the end. Measured
+    with the list empty: the eyebrow 14px -> 104px, the title 42 -> 105, the
+    device card 86 -> 104, the catalogue note 18 -> 104. Ninety pixels of dead
+    space above and below every element, which made an empty filter read as a
+    different page rather than the same one with nothing on it.
+    """
+    panel = panel_of(window)
+    window.resize(1200, 900)
+    window.show()
+    settle()
+
+    def heights():
+        outer = panel.layout().itemAt(0).widget()
+        page_layout = outer.widget().layout()
+        # The eyebrow, the title and the device card are the first three things
+        # in the page layout and are built once in __init__, so their position
+        # is fixed. What changes with the list is whether the page has spare
+        # room, and these are what absorbs it.
+        return [page_layout.itemAt(i).widget().geometry().height()
+                for i in range(3)]
+
+    full = heights()
+
+    _nothing_fits(panel)
+    assert not panel._cards, "the list did not empty, so there is nothing to compare"
+    empty = heights()
+
+    assert empty == full, (
+        "the page is laid out differently when the list is empty:\n"
+        f"  with models: {full}\n  empty     : {empty}")
+
+def test_the_empty_page_is_not_wider_than_a_scrolling_one(window) -> None:
+    """Pins the sideways shift that reserving the scrollbar would fix.
+
+    The scrollbar only takes its 7px when there is something to scroll, so the
+    page is 7px wider with an empty list than with four models in it, and
+    everything on it moves sideways as the list fills or empties.
+
+    An always-on scroll bar reserves the width and removes the shift, and was
+    tried. It is not what this page wants: with nothing to scroll, Qt paints the
+    thumb filling the entire groove -- measured 1026px of solid #4e5058 down the
+    side of a page that cannot scroll, where there was 7px of quiet track before.
+    Trading a small shift for a permanent stripe down the page is the worse
+    defect, so the shift stands until the thumb can be hidden independently of
+    the track.
+
+    If this ever starts failing it means the page got a gutter, and the two
+    assertions below say what it cost.
+    """
+    panel = panel_of(window)
+    window.resize(1200, 900)
+    window.show()
+    settle()
+
+    bar = panel.scroller.verticalScrollBar()
+    assert bar.maximum() > 0, "the page does not scroll, so there is no bar"
+    content = panel.layout().itemAt(0).widget().widget()
+    scrolling = content.width()
+
+    _nothing_fits(panel)
+    assert not panel._cards, "the list did not empty, so there is nothing to compare"
+    empty = content.width()
+
+    assert empty > scrolling, (
+        f"the page is {scrolling}px with models and {empty}px empty; the gutter "
+        "has been reserved, so check the thumb is not painted on an unscrolled "
+        "page before keeping it")
+
+
+def test_choosing_a_build_replaces_one_card_not_the_page(window) -> None:
+    """Choosing a build must not empty the list and refill it.
+
+    Rebuilding the page destroys every card before building any, so the list
+    collapses and refills on every click -- and the card being destroyed is the
+    one the pointer is resting on, which is how a row that should be part of a
+    card briefly becomes a window of its own. A parentless widget is a window
+    in Qt, with the app icon and the minimise, maximise and close buttons.
+
+    This checks the order the two happen in, not that the page still has
+    content: a rebuild in the right order would satisfy anything less.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    toggles = build_toggles(panel)
+    assert toggles, "no card offers its builds"
+    toggles[0].click()
+    settle()
+
+    card = toggles[0].parent()
+    repo = next(row["model"].repo
+                for row in recommend(panel.catalog, panel.hardware))
+    assert panel._cards.get(repo) is card, (
+        "the panel is not tracking the card it drew, so it cannot replace it")
+
+    rows = [row for row in build_rows_of(card) if not row.isChecked()]
+    assert rows, "no build is offered as a choice"
+
     calls = []
     original = panel.render_page
     panel.render_page = lambda: (calls.append(1), original())
     try:
         rows[0].click()
-        assert not calls, (
-            "the page was rebuilt while the pressed row was still handling the "
-            "click that chose it")
         settle()
-        assert calls == [1], f"one choice drew the page {len(calls)} times"
     finally:
         panel.render_page = original
 
-    assert bar.value() == where, (
-        f"choosing a build moved the page from {where} to {bar.value()}; the "
-        "reader has to scroll back down to try the next one")
+    assert not calls, (
+        "choosing a build rebuilt the whole page, which empties the list before "
+        "refilling it and destroys the card the pointer is resting on")
+    replaced = panel._cards.get(repo)
+    assert replaced is not None and replaced is not card, (
+        "the card was not replaced at all")
+    assert panel.results.indexOf(replaced) >= 0, (
+        "the replacement card is not in the list")
 
 
 def test_pressing_show_every_model_does_not_rebuild_under_its_own_click(

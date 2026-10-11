@@ -362,9 +362,12 @@ the device, and shows the agents in its group. This workspace is remembered for
 the next launch. Use the workspace's initials to return to it, or click **M** to
 open your first owned workspace. One shared workspace at a time: while this device is a
 member of another one, the join card says which and why, and the button stays off until
-that one is left from the card above. Reconnecting to the workspace you are already in
-still works at any time.
-While joining, the button shows **Connecting.**. Success opens an online peer's
+that membership ends. To end it, switch to the joined workspace using its initials in the
+rail: the Leave workspace control sits on the card for the workspace you are currently
+in, so it only appears once you have switched. Leaving it there removes the membership and
+lets you join another.
+Reconnecting to the workspace you are already in still works at any time.
+While joining, the button shows **Connecting.** Success opens an online peer's
 conversation; if nobody else is online, the app shows the agent list instead.
 A timeout or unreachable host produces a visible error. LAN invitations require
 a reachable host address on your network and an allowed host firewall port.

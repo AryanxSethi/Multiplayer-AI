@@ -19,6 +19,8 @@ it sends before it is pressed.
 
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
@@ -93,6 +95,43 @@ CARD_PADDING = (20, 17, 20, 17)
 BUILDS_SHOWN = 8
 
 
+# Off by default. Set COOKBOOK_DEBUG_WINDOWS=1 to have the page report any
+# top-level widget that is not the main window, at the moments a build is
+# chosen.
+#
+# It exists because the symptom is a window that lasts a few milliseconds, which
+# is too short for a screenshot and too short for a test to catch by polling. A
+# reader who sees one can turn this on and get the widget's class and geometry
+# printed instead of having it described again.
+#
+# The QComboBox popups every picker carries are excluded: they are windows by
+# design and have been since before any of this.
+DEBUG_WINDOWS = os.environ.get("COOKBOOK_DEBUG_WINDOWS") == "1"
+
+
+def _report_stray_windows(tag):
+    """Name any top-level widget that should not be one. Debug builds only."""
+    if not DEBUG_WINDOWS:
+        return
+    from PySide6.QtWidgets import QApplication
+
+    application = QApplication.instance()
+    if application is None:
+        return
+    for widget in application.topLevelWidgets():
+        try:
+            parent = widget.parent()
+            if parent is not None and type(parent).__name__ == "Select":
+                continue
+            if widget.isWidget() and widget.isWindow() and widget.isVisible():
+                print(f"[cookbook {tag}] {type(widget).__name__} "
+                      f"name={widget.objectName()!r} "
+                      f"parent={type(parent).__name__ if parent else None} "
+                      f"geom={widget.geometry().getRect()}", flush=True)
+        except RuntimeError:
+            continue
+
+
 # What a refresh may not overwrite, because the Hub does not carry it.
 #
 # fetch_entry returns parameter counts, geometry, licences and file sizes --
@@ -151,6 +190,9 @@ class CookbookPanel(QWidget):
         # middle of a list when they did it; a table that closes the instant it
         # is used is a table people stop trusting.
         self._open = set()
+        # The model card currently on screen for each repository, so choosing a
+        # build can replace that one card instead of rebuilding the page.
+        self._cards = {}
         # Where a cached catalogue lives, and the host a refresh reads from.
         # Both are per workspace: two workspaces can be looking at different
         # catalogues, and a shared cache would have them overwrite each other.
@@ -318,6 +360,21 @@ class CookbookPanel(QWidget):
         layout.addWidget(self.mirror_error)
         self.mirror_box.setVisible(bool(self.base))
         self.restore_mirror.setVisible(bool(self.base))
+
+        # A trailing stretch, and the last thing in this layout.
+        #
+        # Without it the page looked like a different application depending on
+        # whether anything was in the list. The scroll area resizes its content
+        # to the viewport, so a short page had space to spare, and a vertical
+        # box with no stretch hands that spare space to every row that will take
+        # it rather than pooling it at the end. Measured with the list empty
+        # and no other change: the eyebrow 14px -> 104px, the title 42 -> 105,
+        # the device card 86 -> 104, the catalogue note 18 -> 104. Ninety pixels
+        # of dead space above and below every element, which is why an empty
+        # filter read as a different page rather than as the same one with
+        # nothing on it. One stretch puts the slack in one place and both states
+        # render identically.
+        layout.addStretch()
 
         self.load()
 
@@ -530,9 +587,12 @@ class CookbookPanel(QWidget):
         window = entries[start:start + PAGE_SIZE]
 
         withdrawn_header_drawn = False
+        self._cards = {}
         for kind, entry in window:
             if kind == "model":
-                self.results.addWidget(self._model_card(entry))
+                card = self._model_card(entry)
+                self._cards[entry["model"].repo] = card
+                self.results.addWidget(card)
                 continue
             if not withdrawn_header_drawn:
                 withdrawn_header_drawn = True
@@ -697,18 +757,46 @@ class CookbookPanel(QWidget):
             return
         self._chosen[repo] = quantization
         where = self.scroller.verticalScrollBar().value()
-        QTimer.singleShot(0, lambda: self._rebuild_at(where))
+        _report_stray_windows("before choosing a build")
+        QTimer.singleShot(0, lambda: self._rebuild_at(where, repo))
 
-    def _rebuild_at(self, where):
-        """The deferred half of choose_build, put the reader back where they were."""
-        self.render_page()
+    def _rebuild_at(self, where, repo):
+        """The deferred half of choose_build: swap one card, keep the reader put.
+
+        Built and inserted *before* the old card is destroyed, rather than the
+        other way round. Rebuilding the page empties it first, so the list
+        collapses to nothing and refills on every click -- and the card being
+        destroyed is the one the pointer is resting on, which is how a widget
+        that should be a row on a card briefly becomes a window of its own. A
+        parentless widget is a window in Qt, complete with the app icon and the
+        minimise, maximise and close buttons.
+
+        Falls back to a full rebuild for anything it cannot place, so a card
+        that is not where it was thought to be costs a redraw rather than a
+        page with a hole in it.
+        """
+        self._swap_card(repo)
         bar = self.scroller.verticalScrollBar()
-        # The layout has to be told to measure before the bar will accept a
-        # value, or a scroll further down than the old content had is clamped
-        # to zero and silently discarded.
-        self.results.activate()
         if where:
             bar.setValue(where)
+        _report_stray_windows("after choosing a build")
+
+    def _swap_card(self, repo):
+        """Put a freshly built card where the old one for this model was."""
+        old = self._cards.get(repo)
+        index = self.results.indexOf(old) if old is not None else -1
+        entry = next((item for kind, item in self.page_entries()
+                      if kind == "model" and item["model"].repo == repo), None)
+        if old is None or index < 0 or entry is None:
+            self.render_page()
+            return
+        fresh = self._model_card(entry)
+        self.results.insertWidget(index, fresh)
+        self._cards[repo] = fresh
+        # Only now, with the replacement sitting in the layout where the old one
+        # was.
+        old.hide()
+        old.deleteLater()
 
     def toggle_builds(self, repo, opened):
         """Remember which cards are open, so a re-render can leave them that way."""

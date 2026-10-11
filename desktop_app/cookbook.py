@@ -1252,6 +1252,11 @@ def save_catalog(models, directory, updated=None):
     both visible to every reader once the rename happens, and only a power cut
     loses them. Raising here would be worse than the situation it describes.
 
+    A write that fails outright restores the previous cache before the error
+    is re-raised. The move aside is what makes the rollback possible, so
+    letting an exception escape with the live file already moved would turn a
+    failed refresh into a missing catalogue.
+
     Args:
         models: The parsed catalogue to store.
         directory: Where the cache lives. The storage directory, not the
@@ -1288,7 +1293,28 @@ def save_catalog(models, directory, updated=None):
             # goes ahead anyway and the caller is told it did, because a
             # catalogue one revision old beats no catalogue at all.
             kept = False
-    write_json_durably(live, serialised)
+    try:
+        write_json_durably(live, serialised)
+    except Exception:
+        # The live cache was moved aside and the write never put anything in
+        # its place, so the directory now has no current catalogue at all: the
+        # caller is about to be handed an error and left with nothing live to
+        # show for it. Put the old one back before letting the error out.
+        #
+        # Only when there was one to put back. If nothing had been kept -- a
+        # first save, or a move that failed -- then there is nothing to restore
+        # and the live file either never existed or is still exactly as it was,
+        # so the error is the whole of what there is to say.
+        if kept:
+            try:
+                previous.replace(live)
+            except OSError:
+                # Swallowing this on purpose. It is the less important failure:
+                # the caller still gets the write error that actually happened,
+                # and ``previous`` still holds the catalogue for a rollback, so
+                # raising here would replace a real cause with a secondary one.
+                pass
+        raise
     return kept
 
 
