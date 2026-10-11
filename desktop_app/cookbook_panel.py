@@ -76,6 +76,9 @@ CARD = {
 # something you expect to exist.
 PAGE_SIZE = 10
 
+# One card's padding, for every card. Left, top, right, bottom.
+CARD_PADDING = (20, 17, 20, 17)
+
 
 class CookbookPanel(QWidget):
     """A list of models sized against the machine they are being read on."""
@@ -162,6 +165,13 @@ class CookbookPanel(QWidget):
 
         self.results = QVBoxLayout()
         self.results.setSpacing(12)
+        # Zeroed, because a layout on a widget gets Qt's 9px default. That
+        # inset was the last thing keeping the cards off the page's left edge:
+        # the device card sits directly in the page layout at 30px while the
+        # model cards were pushed a further 9px in by this one, so their text
+        # started at 51 and 60 -- three different edges, and the cards were 18px
+        # narrower than the card above them for no reason anybody chose.
+        self.results.setContentsMargins(0, 0, 0, 0)
         self.body = QWidget()
         self.body.setLayout(self.results)
         layout.addWidget(self.body)
@@ -346,7 +356,21 @@ class CookbookPanel(QWidget):
 
     def _card(self, name="card"):
         from .window import frame
-        return frame(name)
+        widget, column = frame(name)
+        # Every card, whatever it is for. It used to be set on the model card
+        # alone, so the device card, the withdrawn ones and the empty state all
+        # fell back to Qt's 9px default and their text started 11px outboard of
+        # the model cards beside them -- four different left edges on one page,
+        # measured at 30, 39, 40 and 62. This is the padding the rest of the app
+        # uses for a card, so one number covers all of them.
+        padding = CARD_PADDING
+        if name.startswith("modelCard"):
+            # Two pixels back, because a model card carries a 3px left border
+            # where the others carry 1px, and the extra two push its text out
+            # of line with everything else on the page.
+            padding = (CARD_PADDING[0] - 2,) + CARD_PADDING[1:]
+        column.setContentsMargins(*padding)
+        return widget, column
 
     def load(self):
         """The cached catalogue if there is one, otherwise the bundled one.
@@ -635,7 +659,7 @@ class CookbookPanel(QWidget):
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(10)
 
-        name = label(variant.quantization or variant.name, "heading")
+        name = label(variant.quantization or variant.name, "buildName")
         head.addWidget(name)
 
         size = f"{human_bytes(variant.size)} download"
@@ -683,7 +707,6 @@ class CookbookPanel(QWidget):
     def _model_card(self, row):
         model, variant, verdict = row["model"], row["variant"], row["verdict"]
         card, column = self._card(CARD[verdict["result"]])
-        column.setContentsMargins(20, 17, 20, 17)
 
         column.addWidget(label(model.display, "heading", True))
         # The verdict sits under the name as its own line rather than floating

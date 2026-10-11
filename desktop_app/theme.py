@@ -545,6 +545,9 @@ QLabel#verdictWarn { color: @@warning@@; font-size: 11px; font-weight: 700; }
 QLabel#verdictBad { color: @@error@@; font-size: 11px; font-weight: 700; }
 QLabel#verdictUnknown { color: @@text_muted@@; font-size: 11px; font-weight: 700; }
 QLabel#command { font-family: 'Cascadia Mono', 'Consolas', monospace; font-size: 12px; color: @@text_strong@@; background: @@surface_base@@; border: 1px solid @@border@@; border-radius: 7px; padding: 8px 10px; }
+QLabel#buildName { color: @@text_strong@@; font-size: 13px; font-weight: 650; }
+QLabel#meta { color: @@text@@; font-size: 12px; }
+QLabel#footer { color: @@text_muted@@; font-size: 11px; }
 QPushButton { background: @@button@@; border: 1px solid @@button_border@@; border-radius: 7px; padding: 10px 16px; color: @@text@@; font-weight: 550; }
 QPushButton:hover { background: @@button_hover@@; color: @@text_strong@@; }
 QPushButton:pressed { background: @@button_press@@; }

@@ -16,12 +16,16 @@ pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page te
 pytest.importorskip("psutil", reason="psutil backs hardware detection")
 
 from PySide6.QtCore import QEvent, Qt  # noqa: E402
-from PySide6.QtWidgets import (QApplication, QDialog, QLabel,  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,  # noqa: E402
                              QPushButton, QScrollArea, QWidget)
 
 from desktop_app import window as win  # noqa: E402
 from desktop_app.cookbook import (human_bytes, load_catalog,  # noqa: E402
                                  pick_graphics_adapter, recommend)
+from desktop_app.cookbook_panel import CARD  # noqa: E402
+
+# Every card frame the page can put on screen.
+CARD_NAMES = {"card", *(name for name in CARD.values())}
 from desktop_app.storage import Storage  # noqa: E402
 from desktop_app.theme import DARK, LIGHT, MIKU, stylesheet  # noqa: E402
 from tests.test_desktop_runtime import MemoryVault  # noqa: E402
@@ -1406,6 +1410,110 @@ def test_the_button_that_widens_the_filter_is_not_destroyed_by_its_own_click(win
     assert len(survivors) == 1, (
         f"the page was drawn {len(survivors)} times; the first teardown "
         "removes the button handling the click")
+
+
+def test_every_card_on_the_page_is_padded_the_same_way(window) -> None:
+    """One card style, so the page does not step in and out as you read it.
+
+    The padding was set on the model card alone. Everything else -- the device
+    card, the withdrawn cards, the empty state -- fell back to Qt's 9px
+    default, and card text therefore started at four different places on one
+    page: the title at 30, the device card at 40, a build's name at 39 and a
+    model at 62. A model list is read by scanning down a column, and a column
+    that steps is a column that is read one card at a time instead.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    cards = [card for card in panel.findChildren(QFrame)
+             if card.objectName() in CARD_NAMES]
+    assert len(cards) > 1, "not enough cards to compare"
+
+    lefts = {}
+    for card in cards:
+        margins = card.layout().contentsMargins()
+        lefts.setdefault(margins.left(), []).append(card.objectName())
+    assert len(lefts) <= 2, (
+        f"cards disagree about their own padding: {lefts}")
+
+    widths = {card.width() for card in cards}
+    assert len(widths) == 1, (
+        f"cards on one page are different widths: {sorted(widths)}")
+
+    # And the padding is the app's card padding, not Qt's default.
+    from PySide6.QtWidgets import QVBoxLayout
+    default = QVBoxLayout().contentsMargins().left()
+    for card in cards:
+        assert card.layout().contentsMargins().left() > default, (
+            f"{card.objectName} is still using Qt's {default}px default")
+
+
+def test_text_on_every_card_starts_on_the_same_line(window) -> None:
+    """The headings line up, whatever produced the card.
+
+    This is the one people actually see. A model card carries a 3px left border
+    where the others carry 1px, so matching the padding alone still left its
+    name two pixels outboard of the device card above it.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    def left_edge_of(widget, root):
+        total = 0
+        current = widget
+        while current is not None and current is not root:
+            total += current.x()
+            current = current.parent()
+        return total
+
+    root = panel.findChild(QScrollArea).widget()
+    found = []
+    for card in panel.findChildren(QFrame):
+        if card.objectName() not in CARD_NAMES:
+            continue
+        for label in card.findChildren(QLabel):
+            if label.objectName() == "heading" and label.text():
+                found.append((left_edge_of(label, root), card.objectName()))
+                break
+
+    edges = {edge for edge, _ in found}
+    names = {name for _, name in found}
+    assert len(names) >= 2, (
+        f"expected headings on more than one kind of card, got {names}")
+    assert len(edges) == 1, (
+        f"card headings do not line up: "
+        f"{sorted((edge, name) for edge, name in found)}")
+
+
+def test_a_build_name_is_not_a_heading(window) -> None:
+    """Q2_K was drawn at 19px, the same size as the model it belongs to.
+
+    Besides looking wrong in a dense row, anything that reads the page by
+    finding headings found twenty of them per page -- every quantisation on
+    every model -- which buries the one thing that is actually a heading.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    for button in build_toggles(panel):
+        button.click()
+    settle()
+
+    build_names = [label for label in panel.findChildren(QLabel)
+                   if label.objectName() == "buildName"]
+    assert build_names, "no build names were drawn"
+    assert not [label for label in panel.findChildren(QLabel)
+                if label.objectName() == "heading"
+                and label.text() in {"Q2_K", "Q3_K_S", "Q4_0", "Q4_K_M",
+                                     "Q5_K_M", "Q6_K", "Q8_0", "f16"}], (
+        "a quantisation is still being drawn as a heading")
+
+    for theme in (DARK, LIGHT, MIKU):
+        rule = [line for line in stylesheet(theme).splitlines()
+                if line.startswith("QLabel#buildName")]
+        assert rule, f"the {theme} sheet has no QLabel#buildName rule"
 
 
 def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(window) -> None:
