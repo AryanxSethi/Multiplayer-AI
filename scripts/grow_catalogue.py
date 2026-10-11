@@ -129,7 +129,7 @@ async def fetch_candidates(entries, base=DEFAULT_BASE):
     return records, failures
 
 
-def build_catalogue(existing, incoming, updated):
+def build_catalogue(existing, incoming):
     """The new catalogue: models already there kept, additions merged in.
 
     Re-read entries replace what was there for the same repository, because a
@@ -214,10 +214,14 @@ def main(argv=None):
         print("Nothing could be read, so nothing was written.")
         return 1
 
-    models, added, replaced = build_catalogue(existing, records,
-                                              args.today or "")
+    models, added, replaced = build_catalogue(existing, records)
     current = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
-    text = serialise(models, current.get("updated", ""), current.get("note", ""))
+    # The date the figures were read, not the date the file was last touched.
+    # It used to always be the catalogue's existing "updated", so --today was
+    # accepted by the parser and then discarded and the file kept claiming to
+    # have been read on the day it was first written.
+    text = serialise(models, args.today or current.get("updated", ""),
+                     current.get("note", ""))
 
     print(f"read     : {len(records)} of {len(wanted)}")
     print(f"added    : {', '.join(added) or 'none'}")

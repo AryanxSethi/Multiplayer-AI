@@ -95,7 +95,7 @@ def test_merging_keeps_what_was_shipped_and_puts_additions_on_the_end():
     existing = load_catalog()
     incoming = [a_record(repo="new/one"), a_record(repo="new/two")]
 
-    models, added, replaced = build_catalogue(existing, incoming, "2026-10-11")
+    models, added, replaced = build_catalogue(existing, incoming)
 
     assert [model.repo for model in existing] == [
         model.repo for model in models[:len(existing)]], (
@@ -112,7 +112,7 @@ def test_a_reread_model_replaces_its_own_figures_and_nothing_else():
     bigger = a_record(repo=target.repo, artifacts=target.artifact_repo,
                       name=target.display, size=999_000_000)
 
-    models, added, replaced = build_catalogue(existing, [bigger], "2026-10-11")
+    models, added, replaced = build_catalogue(existing, [bigger])
 
     assert added == [], f"a re-read was treated as an addition: {added}"
     assert replaced == [target.repo], replaced
@@ -134,7 +134,7 @@ def test_a_record_that_fails_validation_is_refused_not_merged():
     broken["context"] = -8
 
     with pytest.raises(CatalogError):
-        build_catalogue(existing, [broken], "2026-10-11")
+        build_catalogue(existing, [broken])
 
 
 def test_a_model_with_no_downloadable_build_is_never_recommended():
@@ -151,7 +151,7 @@ def test_a_model_with_no_downloadable_build_is_never_recommended():
     existing = load_catalog()
     empty = a_record()
     empty["variants"] = []
-    models, _, _ = build_catalogue(existing, [empty], "2026-10-11")
+    models, _, _ = build_catalogue(existing, [empty])
 
     stored = next(model for model in models if model.repo == empty["repo"])
     assert stored.variants == (), "the fixture did not reach the catalogue"
@@ -170,8 +170,7 @@ def test_the_file_written_is_one_this_build_can_actually_load():
     before it is returned rather than trusted.
     """
     existing = load_catalog()
-    models, _, _ = build_catalogue(existing, [a_record(repo="new/one")],
-                                   "2026-10-11")
+    models, _, _ = build_catalogue(existing, [a_record(repo="new/one")])
     text = serialise(models, "2026-10-11", "Every number here was read.")
 
     payload = json.loads(text)
@@ -219,12 +218,62 @@ def test_the_tasks_a_person_supplied_reach_the_catalogue(monkeypatch):
     records, failures = asyncio.run(fetch_candidates(entries))
     assert not failures
 
-    models, _, _ = build_catalogue(load_catalog(), records, "2026-10-11")
+    models, _, _ = build_catalogue(load_catalog(), records)
     added = next(model for model in models if model.repo == "new/one")
     assert added.tasks == ("coding", "writing"), (
         f"the supplied tasks did not survive: {added.tasks}")
     assert added.display == "Chosen Name", (
         f"the supplied name did not survive: {added.display}")
+
+
+def test_the_date_on_the_file_is_the_day_the_figures_were_read(monkeypatch, tmp_path):
+    """--today was accepted by the parser and then thrown away.
+
+    It was passed to build_catalogue, whose `updated` parameter its own body
+    never used, and serialise was handed the catalogue's existing date
+    instead. So the file always claimed to have been read on the day it was
+    first written, however long after the figures were actually fetched -- and
+    the date is the whole provenance of a catalogue whose point is that its
+    numbers came from somewhere.
+    """
+    import asyncio
+    import json as _json
+    import scripts.grow_catalogue as tool
+
+    # One model read from a stubbed fetch, and a catalogue to merge it into.
+    async def one_reads(client, repo, artifact_repo=None, base=None):
+        return a_record(repo=repo, artifacts=artifact_repo)
+
+    import desktop_app.cookbook_hub as hub
+    monkeypatch.setattr(hub, "fetch_entry", one_reads)
+
+    existing = json.loads(tool.CATALOG_PATH.read_text(encoding="utf-8"))
+    monkeypatch.setattr(tool, "CATALOG_PATH", tmp_path / "catalog.json")
+    (tmp_path / "catalog.json").write_text(
+        _json.dumps(dict(existing, updated="2020-01-01")), encoding="utf-8")
+
+    candidates = write_candidates(tmp_path, [a_candidate(repo="new/one")])
+
+    before = (tmp_path / "catalog.json").read_text(encoding="utf-8")
+    assert tool.main([str(candidates), "--dry-run",
+                      "--today", "2026-10-11"]) == 0
+    assert (tmp_path / "catalog.json").read_text(encoding="utf-8") == before, (
+        "a dry run wrote to the catalogue")
+
+    assert tool.main([str(candidates), "--today", "2026-10-11"]) == 0
+    payload = _json.loads((tmp_path / "catalog.json").read_text(encoding="utf-8"))
+    assert payload["updated"] == "2026-10-11", (
+        f"--today did not reach the file; it still says {payload['updated']!r}")
+
+    # Without it, the existing date is kept rather than blanked -- a run that
+    # added nothing should not claim to have re-read everything.
+    candidates2 = write_candidates(tmp_path, [a_candidate(repo="new/two")])
+    assert tool.main([str(candidates2)]) == 0
+    payload = _json.loads((tmp_path / "catalog.json").read_text(encoding="utf-8"))
+    assert payload["updated"] == "2026-10-11", (
+        "a run without --today discarded the date the file already had")
+    assert payload["note"] == existing["note"], (
+        "the note about where the figures came from was replaced")
 
 
 def _tmp():
