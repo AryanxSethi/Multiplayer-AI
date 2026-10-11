@@ -83,9 +83,13 @@ CARD_PADDING = (20, 17, 20, 17)
 #
 # Eight, and then it says how many it is not showing. A repository with twenty
 # builds produced a card over a thousand pixels tall, which is the clustering
-# problem arriving from the other direction -- and the ones beyond the eighth
-# are the largest, which are the ones this device cannot run anyway. The table
-# is smallest first precisely so that the truncation drops what matters least.
+# problem arriving from the other direction.
+#
+# The table is smallest first, so what falls past the cap is the larger builds
+# -- which makes the truncation drop the ones that were going to be least
+# useful on this device anyway. That is a consequence of the ordering, not a
+# claim about what the device can run: on a machine with no graphics card and
+# memory to spare, a build past the eighth may run perfectly well.
 BUILDS_SHOWN = 8
 
 
@@ -132,9 +136,9 @@ class CookbookPanel(QWidget):
         self.window = window
         self._busy = False
         self._page = 0
-        # Set while a "Show every model" click is waiting for its turn of the
+        # Set while a change to "Looking for" is waiting for its turn of the
         # event loop, so repeated presses collapse into one rebuild.
-        self._widening = False
+        self._task_pending = False
         # The build each card is showing, by repository. Not by position, and
         # not reset on every rebuild: switching the filter to Coding and back
         # should not quietly put a reader back on the build they rejected.
@@ -158,6 +162,10 @@ class CookbookPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(page)
         page.setAccessibleName("Cookbook contents")
+        # Kept, because the page is rebuilt from scratch on any change and the
+        # scroll bar is the one thing a rebuild silently resets. Held as
+        # ``scroller`` rather than ``scroll``, which is QWidget's own method.
+        self.scroller = page
 
         # Everything below goes into ``layout`` -- the scroll area's own content
         # layout -- and not into ``outer``. ``outer`` holds the scroll area and
@@ -215,7 +223,7 @@ class CookbookPanel(QWidget):
         self.task_picker.addItem("Everything", None)
         for task, title in TASKS.items():
             self.task_picker.addItem(title, task)
-        self.task_picker.currentIndexChanged.connect(self.render_models)
+        self.task_picker.currentIndexChanged.connect(self.task_changed)
         filters.addWidget(self.task_picker, 1)
         layout.addLayout(filters)
 
@@ -612,46 +620,48 @@ class CookbookPanel(QWidget):
                 name="ghost"))
         self.results.addWidget(card)
 
+    def task_changed(self):
+        """A change to "Looking for", deferred to the next turn of the loop.
+
+        Every way of changing this list -- the picker, the "Show every model"
+        button, a refresh -- throws the whole page away and builds it again,
+        and doing that from inside the interaction that asked for it is what
+        puts windows on screen. Two paths reach it.
+
+        The button is drawn on the very card saying the catalogue has nothing to
+        show, so the rebuild tore down the widget still processing its own click:
+        parented, laid out, and still the widget under the cursor at the moment
+        the platform asks which window owns it. On Windows that question gets
+        answered by putting a window on screen.
+
+        The picker is being dismissed from its own dropdown when the signal
+        arrives, so the page was rebuilt underneath a popup that had not closed
+        yet, and the dropdown stayed up over a list it no longer described.
+
+        Deferring to the next turn settles both, and collapses a burst of
+        changes into one rebuild rather than one per press.
+        """
+        if self._task_pending:
+            return
+        self._task_pending = True
+        QTimer.singleShot(0, self._task_changed_now)
+
+    def _task_changed_now(self):
+        """The deferred half of task_changed."""
+        self._task_pending = False
+        self.render_models()
+
     def show_everything(self):
         """Put the filter back to Everything, which is where models are.
 
-        Deferred to the next turn of the event loop, and that is the whole fix.
-
-        The button being pressed lives inside the card this throws away --
-        "Show every model" is drawn on the very card saying the catalogue has
-        nothing to show. So whatever the filter change rebuilds has to wait
-        until the click has finished travelling: it is delivered by the button,
-        the signal runs this, and the card the button sits in is torn down while
-        its own click is still being processed. ``deleteLater`` keeps the object
-        alive until the loop returns, which is why the teardown itself was
-        enough to stop the stray windows; doing the rebuild here as well means
-        the card is still parented, still laid out and still the widget under
-        the cursor at the exact moment the platform is asking which window owns
-        it, and on Windows that question is answered by putting one on screen.
-
-        Waiting a turn also means a reader who mashes the button gets one
-        rebuild rather than one per press.
-
-        Only the picker's own signal does the rendering. Calling render_models
-        as well would draw the page twice, since setCurrentIndex already fires
-        currentIndexChanged, which is wired to the render.
+        Nothing is rendered here. The picker's own signal does that, through
+        task_changed, so there is exactly one rebuild per change and it happens
+        after the interaction that caused it has finished.
         """
         index = self.task_picker.findData(None)
         if index < 0:
             return
-        if self._widening:
-            return
-        self._widening = True
-        QTimer.singleShot(0, lambda: self._widen_now(index))
-
-    def _widen_now(self, index):
-        """The deferred half of show_everything."""
-        self._widening = False
-        if index == self.task_picker.currentIndex():
-            # Already on it, so no signal is coming.
-            self.render_models()
-        else:
-            self.task_picker.setCurrentIndex(index)
+        self.task_picker.setCurrentIndex(index)
 
     def _chosen_entry(self, row):
         """The build this card is showing: the reader's choice, or the best one.
@@ -669,14 +679,36 @@ class CookbookPanel(QWidget):
         return next((entry for entry in builds if entry["selected"]), None)
 
     def choose_build(self, repo, quantization):
-        """Show a different build of this model, and re-draw the card for it."""
+        """Show a different build of this model, and re-draw the card for it.
+
+        Deferred and scroll-preserving, for the same reason the filter change
+        is (see task_changed): the row that was pressed is inside the card this
+        throws away, so rebuilding from inside its own click is how a card ends
+        up on screen as a window of its own.
+
+        Keeping the reader where they were is the other half. The page is built
+        from scratch, which drops the scroll bar to the top, and somebody
+        choosing between eight quantisations has scrolled down a list to do it
+        -- the choices are the last thing on the card, not the first. Landing
+        back at the top after every one of them means choosing eight builds
+        involves scrolling down eight times.
+        """
         if self._chosen.get(repo) == quantization:
             return
         self._chosen[repo] = quantization
-        # render_page and not render_models: the choice is not a new list, it
-        # is a different build of one already on it, and sending the reader
-        # back to page one for choosing a quantisation would be absurd.
+        where = self.scroller.verticalScrollBar().value()
+        QTimer.singleShot(0, lambda: self._rebuild_at(where))
+
+    def _rebuild_at(self, where):
+        """The deferred half of choose_build, put the reader back where they were."""
         self.render_page()
+        bar = self.scroller.verticalScrollBar()
+        # The layout has to be told to measure before the bar will accept a
+        # value, or a scroll further down than the old content had is clamped
+        # to zero and silently discarded.
+        self.results.activate()
+        if where:
+            bar.setValue(where)
 
     def toggle_builds(self, repo, opened):
         """Remember which cards are open, so a re-render can leave them that way."""
@@ -746,9 +778,15 @@ class CookbookPanel(QWidget):
             listing.addWidget(self._build_row(row["model"], entry, chosen))
         hidden = len(builds) - len(shown)
         if hidden > 0:
+            # "not shown", and not "this device cannot run": the table is
+            # smallest first, so what is past the cap really is the larger
+            # builds, but nothing here has established that this device cannot
+            # run them. On a machine with no graphics card and memory to spare
+            # every one of them may be perfectly runnable, and the page would
+            # be telling a reader their hardware cannot do something it can.
             listing.addWidget(label(
-                f"and {hidden} larger build{'s' if hidden != 1 else ''} this "
-                "device cannot run", "muted", True))
+                f"and {hidden} larger build{'s' if hidden != 1 else ''} not "
+                "shown", "muted", True))
 
         detail.setVisible(toggle.isChecked())
         toggle.toggled.connect(detail.setVisible)

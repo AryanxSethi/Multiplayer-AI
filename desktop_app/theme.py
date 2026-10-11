@@ -481,7 +481,7 @@ THEME_CHOICES = (
     ("Follow system", None),
     ("Dark", DARK),
     ("Light", LIGHT),
-    ("Miku", MIKU),
+    ("39", MIKU),
 )
 
 

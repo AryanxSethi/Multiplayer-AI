@@ -401,7 +401,7 @@ An ordinary **Invite a device** invitation connects the workspace without sharin
 a chat. Shared chats are visible only to their invited devices.
 
 The dark theme uses black backgrounds and white text, with a workspace rail and
-navigation sidebar. **Settings → Theme** also offers Light, Miku, and Follow system.
+navigation sidebar. **Settings → Theme** also offers Light, 39, and Follow system.
 **Reduce animations** in Settings disables page fades. **Resources** shows local
 CPU, memory, and disk usage while that page is open.
 

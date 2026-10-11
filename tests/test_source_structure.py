@@ -174,8 +174,20 @@ def test_no_dialog_result_is_compared_with_is(path):
 # turned on rather than one that catches something.
 MOJIBAKE = (
     "\u00c2\u00b7",   # Â·  a middot
+    "\u00c2\u00b0",   # Â°  a degree sign
+    "\u00c2\u00ab",   # Â«  a left guillemet
+    "\u00c2\u00bb",   # Â»  a right guillemet
+    "\u00c3\u00a1",   # Ã¡  an a-acute
+    "\u00c3\u00a4",   # Ã¤  an a-umlaut
+    "\u00c3\u00a7",   # Ã§  a c-cedilla
+    "\u00c3\u00a8",   # Ã¨  an e-grave
     "\u00c3\u00a9",   # Ã©  an e-acute
-    "\u00c3\u00a8",   # Ã¨  a e-grave
+    "\u00c3\u00ad",   # Ã­  an i-acute
+    "\u00c3\u00b1",   # Ã±  an n-tilde
+    "\u00c3\u00b3",   # Ã³  an o-acute
+    "\u00c3\u00b6",   # Ã¶  an o-umlaut
+    "\u00c3\u00ba",   # Ãº  a u-acute
+    "\u00c3\u00bc",   # Ã¼  a u-umlaut
     "\u00e2\u20ac",   # â€  the start of every em-dash or curly quote
     "\u00e2\u0080",   # â\x80 the same, mid-sequence
     "\u00ef\u00bb\u00bf",  # ï»¿ a byte-order mark read as text

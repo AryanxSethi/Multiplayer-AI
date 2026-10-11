@@ -736,7 +736,7 @@ def test_a_partial_refresh_says_which_models_it_missed(window) -> None:
     note = panel.catalog_note.text()
     # The curated name survives, so the model that answered is still shown --
     # under the name the catalogue gave it, not the one the response carried.
-    assert "Fresh" not in text_of(panel), (
+    assert "Name From The Hub" not in text_of(panel), (
         "a response's name was adopted, which carrying over exists to prevent")
     assert model_first.display in text_of(panel), (
         "the model that answered is not on screen under its own name")
@@ -1389,8 +1389,14 @@ def test_a_long_build_list_is_capped_and_says_so(window) -> None:
     """Twenty-three builds made a card over a thousand pixels tall.
 
     Eight are shown and the rest are counted, not silently dropped. The ones
-    beyond are the largest, which are the ones this device cannot run anyway --
-    the table is smallest first so the truncation drops what matters least.
+    beyond are the largest, because the table is smallest first, which is what
+    makes the truncation drop the builds least likely to be wanted here.
+
+    It says they are not shown rather than that this device cannot run them.
+    The cap is a property of the table, and the two are not the same thing:
+    a machine with no graphics card and memory to spare can run a build well
+    past the eighth, and a page asserting otherwise is making a claim about
+    somebody's hardware that nothing here checked.
     """
     from dataclasses import replace
 
@@ -1422,6 +1428,12 @@ def test_a_long_build_list_is_capped_and_says_so(window) -> None:
     said = " ".join(label.text() for label in card.findChildren(QLabel))
     assert "and " in said and "larger build" in said, (
         f"the hidden builds are not counted: {said[-260:]!r}")
+    assert "not shown" in said, (
+        f"the note does not say the omitted builds are only not shown: "
+        f"{said[-260:]!r}")
+    assert "cannot run" not in said, (
+        f"the note claims this device cannot run the omitted builds, which "
+        f"nothing established: {said[-260:]!r}")
 
 
 def test_a_build_chosen_then_forgotten_falls_back_rather_than_breaking(window) -> None:
@@ -1647,6 +1659,97 @@ def test_the_page_title_is_not_followed_by_a_paragraph(window) -> None:
     assert "Cookbook" in texts, "the page lost its title"
     assert not any("Sized against this device" in text for text in texts), (
         "the subtitle under the title is still there")
+
+
+def test_changing_the_filter_does_not_rebuild_under_the_picker(window) -> None:
+    """A change to "Looking for" rebuilds the page after the picker has let go.
+
+    The picker is being dismissed from its own dropdown when ``currentIndex``
+    fires, so rebuilding inside the handler drew the new list underneath a popup
+    that had not closed yet -- and left that dropdown up, describing a list it
+    had just been replaced by. The same deferral the "Show every model" button
+    needs, for the same reason.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    index = panel.task_picker.findData("coding")
+    assert index >= 0, "there is no Coding filter to pick"
+
+    calls = []
+    original = panel.render_page
+    panel.render_page = lambda: (calls.append(1), original())
+    try:
+        panel.task_picker.setCurrentIndex(index)
+        assert not calls, (
+            "the page was rebuilt while the picker was still handling the change")
+        settle()
+        assert calls == [1], (
+            f"one filter change drew the page {len(calls)} times")
+    finally:
+        panel.render_page = original
+
+    assert panel.task_picker.currentData() == "coding", (
+        "the filter did not take")
+
+
+def test_choosing_a_build_waits_for_the_click_and_leaves_the_page_alone(
+        window) -> None:
+    """Picking a quantisation must not rebuild under the row, nor move the page.
+
+    The row that was pressed is inside the card the rebuild throws away, so
+    doing it inside the click is the same hazard as the "Show every model"
+    button: a widget still processing its own click is torn down underneath
+    itself. So the rebuild waits a turn, which is the part that bites -- an
+    earlier version of this rebuilt inside the click and this caught it.
+
+    The scroll assertion is a guard rather than a reproduction. Rebuilding from
+    scratch drops the scroll bar, and the builds are the last thing on a card,
+    so somebody choosing between eight quantisations has scrolled down to do it
+    and landing at the top again makes them scroll back for every one. Qt did
+    happen to preserve the value in practice, so this is pinning behaviour that
+    should not be left to Qt's discretion -- but it is not, on its own, a
+    demonstration that anything was broken.
+    """
+    panel = panel_of(window)
+    # Short enough that the list cannot all fit, which is the case that matters.
+    window.resize(1200, 420)
+    window.show()
+    settle()
+
+    toggles = build_toggles(panel)
+    assert toggles, "no card offers its builds"
+    toggles[0].click()
+    settle()
+
+    rows = [row for row in build_rows_of(toggles[0].parent())
+            if not row.isChecked()]
+    assert rows, "no build is offered as a choice"
+
+    bar = panel.scroller.verticalScrollBar()
+    assert bar.maximum() > 0, (
+        "the page fits entirely, so this proves nothing about scrolling")
+    bar.setValue(bar.maximum() // 2)
+    settle()
+    where = bar.value()
+    assert where > 0, "could not scroll away from the top to test this"
+
+    calls = []
+    original = panel.render_page
+    panel.render_page = lambda: (calls.append(1), original())
+    try:
+        rows[0].click()
+        assert not calls, (
+            "the page was rebuilt while the pressed row was still handling the "
+            "click that chose it")
+        settle()
+        assert calls == [1], f"one choice drew the page {len(calls)} times"
+    finally:
+        panel.render_page = original
+
+    assert bar.value() == where, (
+        f"choosing a build moved the page from {where} to {bar.value()}; the "
+        "reader has to scroll back down to try the next one")
 
 
 def test_pressing_show_every_model_does_not_rebuild_under_its_own_click(
