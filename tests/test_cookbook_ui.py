@@ -81,6 +81,27 @@ def text_of(panel):
     return " ".join(widget.text() for widget in panel.findChildren(QLabel))
 
 
+def use_a_stated_device(panel, vram_gb=4):
+    """Pin the panel to a device the test writes down, not the one it runs on.
+
+    Whether a model is recommended depends on how much memory was free when the
+    page was built, so a test that asserts a particular model is on screen passes
+    on an idle machine and fails on a busy one -- with "Nothing in the catalogue
+    fits this device" as the reason, which is about the runner's memory rather
+    than about the code.
+    """
+    from desktop_app.cookbook import Hardware
+    panel.hardware = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=16,
+        memory_total=32 * 1024 ** 3, memory_available=28 * 1024 ** 3,
+        disk_free=500 * 1024 ** 3,
+        vram=vram_gb * 1024 ** 3 if vram_gb else None,
+        unified_memory=False, sources={})
+    panel.render_models()
+    settle()
+    return panel.hardware
+
+
 def settle():
     """Let queued deletions and layout actually happen before reading the tree."""
     QApplication.processEvents()
@@ -450,7 +471,7 @@ def test_every_recommendation_says_why_and_what_it_would_take(window) -> None:
     nothing else is the thing this feature exists to stop being.
     """
     panel = panel_of(window)
-    settle()
+    use_a_stated_device(panel)
     said = text_of(panel)
     assert "Qwen2.5" in said, f"nothing was recommended: {said[:300]!r}"
     assert "GB" in said or "MB" in said, f"no size is shown: {said[:300]!r}"
@@ -468,7 +489,7 @@ def test_the_cookbook_shows_a_command_that_names_a_real_repository(window) -> No
     quantised build is the quantiser's and not the model's publisher.
     """
     panel = panel_of(window)
-    settle()
+    use_a_stated_device(panel)
     said = text_of(panel)
     assert "ollama run hf.co/" in said, f"no runnable command: {said[:400]!r}"
     assert "bartowski/" in said, (
@@ -583,8 +604,11 @@ def test_a_refreshed_model_goes_through_the_same_validation_as_a_bundled_one(win
     # record is supposed to change the line saying it was refused, and only
     # the list of models must be untouched.
     before = [model.repo for model in panel.catalog]
-    for record in ({"repo": "a/b", "tasks": ["teleport"]},
-                   {"repo": "a/b", "context": -8},
+    # "tasks" is deliberately absent from this list. A response's claim about
+    # what a model is for is not read any more -- those fields come from the
+    # catalogue -- so a response naming a task this build has never heard of is
+    # no longer a way in. Everything below is a field the Hub genuinely sends.
+    for record in ({"repo": "a/b", "context": -8},
                    {"repo": "not a repo id"},
                    {"repo": "a/b", "verified": "yes, definitely"},
                    {"repo": "a/b", "parameters": "lots"}):
@@ -633,11 +657,12 @@ def test_a_good_refresh_replaces_every_model_and_saves_it_for_next_time(window) 
         repo = request[0][0]
         request[1]["success"]({
             "repo": repo, "artifact_repo": "bartowski/Brand-New-Model-GGUF",
-            "name": f"Brand New Model {index}", "publisher": "someone",
+            # A name the response chose on purpose, to prove it is not the one
+            # that ends up on screen: the catalogue's is.
+            "name": f"Name From The Hub {index}", "publisher": "someone",
             "parameters": 700000000, "context": 8192, "layers": 16,
             "kv_heads": 4, "head_dim": 64, "license": "apache-2.0",
-            "languages": ("en",), "vision": False, "tasks": ("general",),
-            "verified": False,
+            "languages": ("en",), "vision": False,
             "variants": [{"name": "m-Q4_K_M.gguf", "quantization": "Q4_K_M",
                           "size": 500_000_000}],
             "last_verified": "2026-10-10 12:00 UTC"})
@@ -653,7 +678,12 @@ def test_a_good_refresh_replaces_every_model_and_saves_it_for_next_time(window) 
     said = text_of(panel)
     assert index == len(panel.catalog), (
         f"the press answered {index} requests for {len(panel.catalog)} models")
-    assert "Brand New Model" in said, f"the refreshed models are not shown: {said[:300]!r}"
+    assert "Name From The Hub" not in said, (
+        "a response's name replaced the curated one, so the heading changed to "
+        f"whatever the repository happened to be called: {said[:300]!r}")
+    for model in panel.catalog:
+        assert model.display in said, (
+            f"{model.display} is no longer on screen after its refresh")
 
     saved = load_cache(panel.directory)
     assert saved is not None, "the refresh was not saved, so the next launch forgets it"
@@ -662,6 +692,9 @@ def test_a_good_refresh_replaces_every_model_and_saves_it_for_next_time(window) 
         f"the saved catalogue has {len(saved)} models, not {len(panel.catalog)}")
     assert all(model.last_verified == "2026-10-10 12:00 UTC" for model in saved), (
         "the saved catalogue kept the old figures, so nothing was refreshed")
+    assert all(model.tasks for model in saved), (
+        "a refreshed model came back with no tasks, so it would vanish from "
+        "every filter")
 
 
 def test_a_partial_refresh_says_which_models_it_missed(window) -> None:
@@ -673,15 +706,19 @@ def test_a_partial_refresh_says_which_models_it_missed(window) -> None:
     """
     panel = panel_of(window)
     settle()
+    model_first = panel.catalog[0]
     pending = []
     window.command = lambda name, *args, **kwargs: pending.append(kwargs)
     panel.do_refresh()
 
-    good = {"repo": "someone/Fresh", "artifact_repo": "bartowski/Fresh-GGUF",
-            "name": "Fresh", "publisher": "someone", "parameters": 700000000,
-            "context": 8192, "layers": 16, "kv_heads": 4, "head_dim": 64,
-            "license": "apache-2.0", "languages": ("en",), "vision": False,
-            "tasks": ("general",), "verified": False,
+    # Answered for the first model's own repository, so the merged record is a
+    # real refresh of something already in the catalogue rather than a stranger.
+    good = {"repo": model_first.repo,
+            "artifact_repo": model_first.artifact_repo,
+            "name": "Name From The Hub", "publisher": "someone",
+            "parameters": 700000000, "context": 8192, "layers": 16,
+            "kv_heads": 4, "head_dim": 64, "license": "apache-2.0",
+            "languages": ("en",), "vision": False,
             "variants": [{"name": "m-Q4_K_M.gguf", "quantization": "Q4_K_M",
                           "size": 500_000_000}],
             "last_verified": "2026-10-10 12:00 UTC"}
@@ -697,7 +734,12 @@ def test_a_partial_refresh_says_which_models_it_missed(window) -> None:
     settle()
 
     note = panel.catalog_note.text()
-    assert "Fresh" in text_of(panel), "the model that did answer is not shown"
+    # The curated name survives, so the model that answered is still shown --
+    # under the name the catalogue gave it, not the one the response carried.
+    assert "Fresh" not in text_of(panel), (
+        "a response's name was adopted, which carrying over exists to prevent")
+    assert model_first.display in text_of(panel), (
+        "the model that answered is not on screen under its own name")
     assert "could not be" in note.lower(), (
         f"a partial refresh reported itself as a whole one: {note!r}")
     assert "timed out" in note, f"the note does not say what went wrong: {note!r}"
@@ -750,7 +792,10 @@ def test_the_restore_button_only_works_once_there_is_something_behind_it(window)
     """
     from desktop_app.cookbook import PREVIOUS_NAME, save_catalog
     panel = panel_of(window)
-    settle()
+    # Stated device, because a restored 4GB model stops being recommended when
+    # the runner happens to be short of memory, and this test is about the
+    # rollback rather than about whether the model fits.
+    use_a_stated_device(panel)
     assert not panel.restore.isEnabled(), (
         "restoring is offered before anything has been replaced")
 
@@ -1256,13 +1301,30 @@ def test_a_build_that_spills_is_marked_as_such_and_not_counted_as_on_the_card(wi
     Calling those builds "fits" claimed six of seven ran on the graphics card
     when one did -- which is the difference between a fast model and one running
     on the processor.
+
+    Measured against a stated device rather than the one the test happens to
+    run on. It used to use the panel's detected hardware, so which builds came
+    out as spilling depended on how much memory was free when the page was
+    built: when the machine was busier the budget fell, the big builds stopped
+    merely spilling and went over budget altogether, and the fixture that was
+    supposed to have spilling builds quietly had none.
     """
-    from desktop_app.cookbook import build_rows, load_catalog
+    from desktop_app.cookbook import Hardware, build_rows, load_catalog
     import re
 
     panel = panel_of(window)
     window.show()
     settle()
+    # 4GiB card, plenty of RAM: so builds above the card's size fit system
+    # memory and spill rather than being ruled out, which is the case here.
+    panel.hardware = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=16,
+        memory_total=32 * 1024 ** 3, memory_available=28 * 1024 ** 3,
+        disk_free=500 * 1024 ** 3, vram=4 * 1024 ** 3, unified_memory=False,
+        sources={})
+    panel.render_models()
+    settle()
+
     coder = next(model for model in load_catalog() if "Coder" in model.name)
     entries = build_rows(coder, panel.hardware)
     spilling = [entry for entry in entries if entry["spills"]]
@@ -1590,14 +1652,115 @@ def test_the_card_says_which_lines_are_the_figures_it_exists_for(window) -> None
                 f"the {theme} sheet has no QLabel#{style} rule")
 
 
+def test_a_refresh_keeps_what_a_person_curated_about_a_model(window) -> None:
+    """The Hub carries every figure, and none of the judgement.
+
+    ``fetch_entry`` returns parameter counts, geometry, licences and file
+    sizes. It returns nothing about what a model is *for*, so ``parse_model``
+    defaulted those fields and a refresh silently undid each one: the model's
+    tasks emptied (so it vanished from every task filter while still appearing
+    under "Everything"), its curated name was replaced by the repository's last
+    path segment, and ``deprecated`` went back to False -- which brought a
+    model its publisher had withdrawn back as recommendable.
+
+    The stub responses in these tests all carried a "tasks" key, which is why
+    this survived: nothing had ever run the Hub's actual shape through it.
+    """
+    from desktop_app.cookbook import parse_model
+    from desktop_app.cookbook_panel import carry_over
+
+    panel = panel_of(window)
+    settle()
+    model = panel.catalog[0]
+
+    # Exactly what fetch_entry produces: no tasks, no vision, no deprecation,
+    # and a name derived from the repository rather than chosen.
+    hub = {
+        "repo": model.repo, "name": model.repo.split("/")[-1],
+        "publisher": "someone", "license": "apache-2.0",
+        "languages": ("en",), "parameters": 999999,
+        "context": model.context, "layers": model.layers,
+        "kv_heads": model.kv_heads, "head_dim": model.head_dim,
+        "artifact_repo": model.artifact_repo,
+        "variants": [{"name": "m-Q4_K_M.gguf", "quantization": "Q4_K_M",
+                      "size": 123456789}],
+        "source": "Hugging Face", "last_verified": "2026-10-11 00:00 UTC",
+        "verified": False,
+    }
+
+    plain = parse_model(hub, 0)
+    assert plain.tasks == (), (
+        "this fixture no longer matches what the Hub returns")
+    assert plain.name != model.display
+
+    kept = parse_model(carry_over(model, hub), 0)
+    assert kept.tasks == model.tasks, (
+        f"a refresh emptied the tasks, so the model drops out of every "
+        f"filter: {kept.tasks}")
+    assert kept.display == model.display, (
+        f"the curated name was replaced by {kept.display!r}")
+    assert kept.vision == model.vision
+
+    # And the figures the Hub does carry still update, or carrying over would
+    # have fixed the naming and broken the point of refreshing.
+    assert kept.parameters == 999999, "the parameter count did not update"
+    assert kept.last_verified == "2026-10-11 00:00 UTC", (
+        "the read date did not update")
+    assert kept.variants[0].size == 123456789, "the build size did not update"
+
+
+def test_refreshing_never_un_withdraws_a_model(window) -> None:
+    """A publisher's withdrawal is not something a fetch gets to reverse.
+
+    The worst of the four: with ``deprecated`` defaulting to False, refreshing
+    a withdrawn model made it recommendable again, which is sending somebody
+    to download something their publisher has asked people to stop using.
+    """
+    from dataclasses import replace
+
+    from desktop_app.cookbook import parse_model
+    from desktop_app.cookbook_panel import carry_over
+
+    panel = panel_of(window)
+    settle()
+    withdrawn = replace(panel.catalog[0], deprecated=True,
+                        deprecated_reason="withdrawn by its publisher")
+    hub = {"repo": withdrawn.repo, "name": withdrawn.repo.split("/")[-1],
+           "parameters": 1, "context": 4096, "layers": 1, "kv_heads": 1,
+           "head_dim": 64, "variants": [], "last_verified": "now"}
+
+    after = parse_model(carry_over(withdrawn, hub), 0)
+    assert after.deprecated is True, (
+        "a refresh brought a withdrawn model back as recommendable")
+    assert after.deprecated_reason == "withdrawn by its publisher"
+
+
+def test_a_refresh_of_something_not_in_the_catalogue_carries_nothing_over(window) -> None:
+    """Still only merges for a model already here.
+
+    Otherwise a response could hand the page fields for a repository it never
+    asked about, which is not a refresh.
+    """
+    from desktop_app.cookbook_panel import carry_over
+
+    panel = panel_of(window)
+    settle()
+    hub = {"repo": "someone/Unknown", "name": "Unknown", "parameters": 1}
+    merged = carry_over(None, hub)
+    assert merged == hub, f"something was merged in: {merged}"
+
+
 def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(window) -> None:
     """The page holds no models of its own.
 
     A list written into the view would drift from the catalogue the engine
     checks, and the drift would be invisible until a figure was wrong.
+
+    Stated device, or a runner with less free memory than the 7B model needs
+    would leave that model off screen and the test would report a catalogue gap.
     """
     panel = panel_of(window)
-    settle()
+    use_a_stated_device(panel)
     said = text_of(panel)
     for model in load_catalog():
         assert model.display in said, (

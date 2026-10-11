@@ -80,6 +80,41 @@ PAGE_SIZE = 10
 CARD_PADDING = (20, 17, 20, 17)
 
 
+# What a refresh may not overwrite, because the Hub does not carry it.
+#
+# fetch_entry returns parameter counts, geometry, licences and file sizes --
+# every figure this page does its arithmetic on. It returns nothing at all
+# about what a model is *for*, and parse_model then defaults those fields,
+# which meant a refresh silently undid every one of them:
+#
+#   tasks      -> empty, so the model vanished from every task filter while
+#                 still appearing under "Everything"
+#   name       -> the repository's last path segment, "Qwen2.5-0.5B-Instruct"
+#                 in place of the curated "Qwen2.5 0.5B"
+#   deprecated -> False, so a model its publisher had withdrawn came back
+#                 as recommendable
+#
+# The tests missed it because their stub responses carried a "tasks" key. The
+# Hub's own shape does not, and running one through is what the check below
+# does.
+CURATED_FIELDS = ("tasks", "name", "vision", "deprecated", "deprecated_reason")
+
+
+def carry_over(model, result):
+    """A refreshed record with the curated fields put back on top.
+
+    Only for a model already in the catalogue. A response naming something
+    nobody asked about still merges nothing, so what gets refreshed is what
+    was requested.
+    """
+    merged = dict(result) if isinstance(result, dict) else {}
+    if model is None:
+        return merged
+    for field in CURATED_FIELDS:
+        merged[field] = getattr(model, field)
+    return merged
+
+
 class CookbookPanel(QWidget):
     """A list of models sized against the machine they are being read on."""
 
@@ -935,7 +970,7 @@ class CookbookPanel(QWidget):
 
         def landed(result):
             try:
-                record = parse_model(result, 0)
+                record = parse_model(carry_over(model, result), 0)
             except CatalogError as error:
                 refused[repo] = (f"{self.host_name()} sent something unusable: "
                                  f"{error}")
