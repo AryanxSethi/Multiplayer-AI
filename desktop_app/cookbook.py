@@ -807,6 +807,41 @@ def classify(model, variant, hardware, context=DEFAULT_CONTEXT):
                        f"{human_bytes(headroom)} to spare.")}
 
 
+def build_rows(model, hardware, context=DEFAULT_CONTEXT):
+    """Every downloadable build of one model, with what this device makes of each.
+
+    The card shows one build, because one build is the one to start with. The
+    rest are not redundant and were previously unreachable: a machine with a
+    4GiB card was told a 7B model "possible with compromises" at four-bit while
+    the two-bit build of the same model fitted outright, and there was no way
+    to see that from anywhere in the interface.
+
+    Attributes on each row:
+        variant: The build itself.
+        verdict: What :func:`classify` makes of it on this device.
+        figures: Its cost, or ``None`` when it cannot be estimated.
+        selected: Whether this is the build :func:`best_variant` chose.
+        spills: Whether it fits system memory but overruns the graphics card,
+            which is the case the verdict words as "spills onto the CPU".
+    """
+    chosen = best_variant(model, hardware, context)
+    budget = hardware.budget()
+    accelerator = hardware.vram or budget
+    rows = []
+    for variant in sorted(model.variants, key=lambda item: item.size or 0):
+        figures = estimate(model, variant, hardware, context)
+        verdict = classify(model, variant, hardware, context)
+        total = (figures or {}).get("total")
+        rows.append({
+            "variant": variant,
+            "verdict": verdict,
+            "figures": figures,
+            "selected": variant is chosen,
+            "spills": bool(total and hardware.vram and budget >= total > accelerator),
+        })
+    return rows
+
+
 def best_variant(model, hardware, context=DEFAULT_CONTEXT):
     """The variant to suggest, which is a balance and not merely the smallest.
 
@@ -825,15 +860,34 @@ def best_variant(model, hardware, context=DEFAULT_CONTEXT):
     Quantisation is not ranked by quality here and no such ranking is claimed.
     This is an order of preference for *what to try first*, chosen because it
     is a convention rather than because it was measured.
+
+    One limit on that preference, and it is the important one: it is only
+    allowed to choose between builds that this device likes equally well.
+    Previously any build in :data:`FITTING` was acceptable, and "fits with
+    compromises" is in that set -- so a 4GiB card was offered the 5.1GB
+    four-bit build of a 7B model at "possible with compromises", spilling onto
+    the CPU, while the 3.6GB two-bit build of the same model sat in the same
+    catalogue rated "likely to run". The preference order justified that by
+    trading quality for "memory the reader already has", which is not what is
+    happening: the reason that build spills is precisely that the card does
+    not have it to spare. Paying a margin in output quality is the trade; paying
+    an order of magnitude in speed is a different thing entirely.
     """
-    ranked = sorted(model.variants, key=lambda item: item.size or 0)
+    fitting = []
+    for variant in sorted(model.variants, key=lambda item: item.size or 0):
+        verdict = classify(model, variant, hardware, context)
+        if verdict["result"] in FITTING:
+            fitting.append((ORDER.index(verdict["result"]), variant))
+    if not fitting:
+        return None
+
+    best = min(rank for rank, _ in fitting)
     for wanted in PREFERRED_VARIANTS:
-        for variant in ranked:
-            if (variant.quantization or "").upper() == wanted:
-                if classify(model, variant, hardware, context)["result"] in FITTING:
-                    return variant
-    for variant in ranked:
-        if classify(model, variant, hardware, context)["result"] in FITTING:
+        for rank, variant in fitting:
+            if rank == best and (variant.quantization or "").upper() == wanted:
+                return variant
+    for rank, variant in fitting:
+        if rank == best:
             return variant
     return None
 
@@ -867,7 +921,8 @@ def recommend(catalog, hardware, task=None, context=DEFAULT_CONTEXT, limit=None,
         verdict = classify(model, variant, hardware, context)
         scored.append((ORDER.index(verdict["result"]), -model.parameters, model, variant, verdict))
     scored.sort(key=lambda row: (row[0], row[1]))
-    rows = [{"model": model, "variant": variant, "verdict": verdict}
+    rows = [{"model": model, "variant": variant, "verdict": verdict,
+             "builds": build_rows(model, hardware, context)}
             for _, _, model, variant, verdict in scored]
     return rows[:limit] if limit else rows
 

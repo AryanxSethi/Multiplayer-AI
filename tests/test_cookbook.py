@@ -15,11 +15,11 @@ from desktop_app.cookbook import (CATALOG_VERSION, LIKELY, NOT_ENOUGH_PUBLISHED,
                                   NO_MODELS_FOR_TASK, NOTHING_FITS, POSSIBLE,
                                   TASKS, UNKNOWN, VERIFIED, CatalogError,
                                   GpuAdapter, Model, Variant, _vram_from_registry,
-                                  classify, detect_hardware, empty_reason,
-                                  estimate, human_bytes, kv_cache_bytes,
-                                  load_catalog, ollama_commands, parse_catalog,
-                                  parse_model, pick_graphics_adapter, recommend,
-                                  vendor_of)
+                                  best_variant, build_rows, classify,
+                                  detect_hardware, empty_reason, estimate,
+                                  human_bytes, kv_cache_bytes, load_catalog,
+                                  ollama_commands, parse_catalog, parse_model,
+                                  pick_graphics_adapter, recommend, vendor_of)
 
 
 def device(total_gb=32, available_gb=24, vram=None, disk_gb=100, cores=16):
@@ -273,6 +273,119 @@ def test_a_recommendation_prefers_the_usual_build_over_the_smallest_one():
     assert rows, "nothing was recommended"
     assert rows[0]["variant"].quantization == "Q4_K_M"
     assert rows[0]["variant"].size == 4683074336
+
+
+def test_a_build_that_spills_onto_the_cpu_is_not_chosen_over_one_that_fits():
+    """The preference order may not trade a working answer for a slow one.
+
+    On a 4GiB card the four-bit build of a 7B model needs 5.1GB, so it spills
+    onto the CPU and is rated "possible with compromises" -- which was in the
+    acceptable set, so it was recommended anyway. The two-bit build of the same
+    model, in the same catalogue, needed 3.6GB and was rated "likely to run".
+
+    Both were one preference-list entry apart. Paying a margin in output
+    quality for memory the reader already has is a sensible trade; the reader
+    did not have it spare, which is the entire reason that build spills.
+    """
+    card = device(total_gb=32, available_gb=28, vram=4 * 1024 ** 3)
+    sizes = {variant.quantization: variant.size
+             for variant in CODER.variants}
+    four_bit = Variant(name="a.gguf", quantization="Q4_K_M", size=sizes["Q4_K_M"])
+    two_bit = Variant(name="b.gguf", quantization="Q2_K", size=sizes["Q2_K"])
+
+    assert classify(CODER, four_bit, card)["result"] == POSSIBLE, (
+        "this fixture needs the usual build to spill")
+    assert classify(CODER, two_bit, card)["result"] == LIKELY, (
+        "this fixture needs a smaller build to fit outright")
+
+    chosen = best_variant(CODER, card)
+    chosen_verdict = classify(CODER, chosen, card)
+    assert chosen_verdict["result"] == LIKELY, (
+        f"it recommended {chosen.quantization}, rated "
+        f"{chosen_verdict['result']!r}, over a build of the same model rated "
+        f"{LIKELY!r}")
+    assert chosen.quantization != "Q4_K_M", (
+        "it recommended the build that spills onto the CPU")
+    # Q2_K is not the answer either: Q3_K_S is rated the same and is the
+    # better build, so the preference order should still reach past it. What is
+    # being checked is that the order is bounded by the verdict, not removed.
+    assert chosen.quantization in ("Q2_K", "Q3_K_S"), (
+        f"unexpected build {chosen.quantization!r}")
+
+
+def test_the_preferred_build_is_still_chosen_when_it_is_the_better_answer():
+    """The fix is a limit on the preference order, not its removal.
+
+    Where several builds are equally good on this device, the usual four-bit
+    is still the one to try first. Only a strictly worse answer is passed over.
+    """
+    generous = device(total_gb=256, available_gb=250, vram=24 * 1024 ** 3)
+    sizes = {variant.quantization: variant.size for variant in CODER.variants}
+    ranked = {quantization: classify(
+        CODER, Variant(name="a.gguf", quantization=quantization, size=size),
+        generous)["result"] for quantization, size in sizes.items()}
+
+    assert ranked["Q4_K_M"] == LIKELY, "the fixture no longer fits its purpose"
+    assert len(set(ranked.values())) == 1, (
+        f"the fixture needs every build rated alike, got {ranked}")
+
+    assert best_variant(CODER, generous).quantization == "Q4_K_M", (
+        "among equally good builds the usual one is no longer preferred")
+
+
+def test_a_model_with_nothing_that_fits_still_offers_no_build():
+    """Exhausting the preference order must not invent a recommendation."""
+    tiny = device(total_gb=2, available_gb=0.4)
+    assert best_variant(CODER, tiny) is None, (
+        "a model that cannot run here was given a build anyway")
+    assert recommend([CODER], tiny) == [], (
+        "and it reached the recommendations")
+
+
+def test_every_build_is_listed_so_none_of_them_is_unreachable():
+    """The card shows one build. The rest have to be visible somewhere.
+
+    Thirty-one builds sat behind four cards with no control anywhere that
+    reached the other twenty-seven, so a machine that would have run a model
+    comfortably at two-bit was told it could only manage it slowly at four-bit.
+    """
+    card = device(total_gb=32, available_gb=28, vram=4 * 1024 ** 3)
+    rows = build_rows(CODER, card)
+
+    assert len(rows) == len(CODER.variants), (
+        f"{len(rows)} rows for {len(CODER.variants)} builds, so some are "
+        "unreachable")
+    assert {row["variant"].quantization for row in rows} == {
+        variant.quantization for variant in CODER.variants}
+
+    selected = [row for row in rows if row["selected"]]
+    assert len(selected) == 1, (
+        f"{len(selected)} builds marked as the one to start with")
+    assert selected[0]["variant"] is best_variant(CODER, card), (
+        "the list and best_variant disagree about which build to start with")
+
+    # Smallest first, so the page reads as a ladder rather than a scramble.
+    sizes = [row["figures"]["total"] for row in rows]
+    assert sizes == sorted(sizes), "the builds are not ordered by size"
+
+    # And the ones that spill are marked, which is what tells a reader why the
+    # smaller one below them is the one to take.
+    spilling = [row for row in rows if row["spills"]]
+    assert spilling, "this fixture needs builds that overrun the card"
+    for row in spilling:
+        assert row["verdict"]["result"] == POSSIBLE, (
+            "a build marked as spilling is not rated as spilling")
+
+
+def test_a_build_is_marked_as_spilling_only_when_it_really_does():
+    """Without a graphics card there is nothing to spill off, so nothing does."""
+    without_card = device(total_gb=32, available_gb=28, vram=None)
+    assert not any(row["spills"] for row in build_rows(CODER, without_card)), (
+        "builds were marked as spilling on a machine with no graphics card")
+
+    with_card = device(total_gb=32, available_gb=28, vram=4 * 1024 ** 3)
+    assert any(row["spills"] for row in build_rows(CODER, with_card)), (
+        "a 4GiB card marked nothing as spilling, so the flag never fires")
 
 
 def test_a_recommendation_degrades_towards_what_a_small_device_can_hold():
