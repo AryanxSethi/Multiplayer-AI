@@ -423,12 +423,16 @@ class CookbookPanel(QWidget):
             widget = item.widget() if item is not None else None
             if widget is None:
                 continue
-            # Detached before being scheduled for deletion, not just deleted.
-            # deleteLater() alone leaves the card parented to the panel until
-            # the event loop next runs, so the previous page's widgets are
-            # still findable, still painted over, and still holding memory --
-            # which is how a list grows on every page turn.
-            widget.setParent(None)
+            # hidden() then deleteLater(), which is what window.clear_layout
+            # does everywhere else in this app and is the only recipe here that
+            # does not put a stray window on screen.
+            #
+            # setParent(None) was here instead, to detach cards before the event
+            # loop got round to them. It does that, and it also promotes the
+            # card to a top-level window -- measured: isWindow() goes from
+            # False to True -- which is what a small white rectangle appearing
+            # over the app is. Each re-render did it for every card on screen.
+            widget.hide()
             widget.deleteLater()
 
         entries = self.page_entries()
@@ -529,11 +533,24 @@ class CookbookPanel(QWidget):
         self.results.addWidget(card)
 
     def show_everything(self):
-        """Put the filter back to Everything, which is where models are."""
+        """Put the filter back to Everything, which is where models are.
+
+        Only the picker's own signal does the rendering. Calling render_models
+        as well drew the whole page twice -- setCurrentIndex fires
+        currentIndexChanged, which is already connected to it -- so every card
+        was torn down and rebuilt twice over, which is where the stray windows
+        were coming from. It also means the button this was pressed from is
+        inside the first of those teardowns, so the click destroyed the control
+        that was handling it.
+        """
         index = self.task_picker.findData(None)
-        if index >= 0:
+        if index < 0:
+            return
+        if index == self.task_picker.currentIndex():
+            # Already on it, so no signal is coming.
+            self.render_models()
+        else:
             self.task_picker.setCurrentIndex(index)
-        self.render_models()
 
     def _other_builds(self, column, row):
         """Every build of this model except the recommended one, behind a toggle.

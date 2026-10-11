@@ -1313,6 +1313,101 @@ def test_the_builds_section_closes_when_the_list_is_rebuilt(window) -> None:
             "the section stayed open across a change of catalogue")
 
 
+def test_rebuilding_the_page_never_puts_a_window_on_screen(window) -> None:
+    """Tearing a card down must not promote it to a top-level window.
+
+    It did. The teardown called ``setParent(None)`` before scheduling the
+    deletion, which detaches a card from the panel -- and also makes it a
+    window. Measured, ``isWindow()`` goes from False to True across a rebuild.
+    A window is a rectangle with a title bar, which is what a small white box
+    appearing over the app is, and every card on screen did it on every
+    re-render.
+
+    ``window.clear_layout`` hides and then schedules the deletion instead, and
+    that is the only recipe used anywhere else in this app.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    old = cards_on_page(panel)
+    assert old, "no cards to tear down"
+    assert any(card.isVisible() for card in old), (
+        "a check found no visible card, so this proves nothing")
+    assert not any(card.isWindow() for card in old), (
+        "the cards are already windows before anything is torn down")
+
+    panel.render_page()
+
+    promoted = [card.objectName() or type(card).__name__ for card in old
+                if card.isWindow()]
+    assert not promoted, (
+        f"re-rendering promoted {promoted} to top-level windows")
+    assert all(not card.isVisible() for card in old), (
+        "a torn-down card is still on screen")
+
+
+def test_emptying_the_filter_draws_the_page_once(window) -> None:
+    """Widening the filter used to draw everything twice over.
+
+    ``setCurrentIndex`` already fires ``currentIndexChanged``, which is wired
+    to the render. Calling it as well meant every card was built and torn down
+    twice per click, which is what multiplied the stray windows into more than
+    one at a time.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    panel.task_picker.setCurrentIndex(panel.task_picker.findData("vision"))
+    settle()
+
+    calls = []
+    original = panel.render_page
+    panel.render_page = lambda: (calls.append(1), original())
+    try:
+        panel.show_everything()
+        settle()
+    finally:
+        panel.render_page = original
+
+    assert len(calls) == 1, (
+        f"one press of Show every model drew the page {len(calls)} times")
+    assert panel.task_picker.currentData() is None, (
+        f"the filter is still {panel.task_picker.currentText()!r}")
+    assert cards_on_page(panel), "widening the filter left the page empty"
+
+
+def test_the_button_that_widens_the_filter_is_not_destroyed_by_its_own_click(window) -> None:
+    """The control being pressed is inside the card that press tears down.
+
+    Nothing is visibly wrong while it happens, because the click has already
+    been delivered -- but it means the handler is running inside a widget that
+    no longer exists, which is the kind of thing that works until it does not.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    panel.task_picker.setCurrentIndex(panel.task_picker.findData("vision"))
+    settle()
+
+    button = next(b for card in cards_on_page(panel)
+                  for b in card.findChildren(QPushButton)
+                  if "every model" in b.text().lower())
+
+    survivors = []
+    original = panel.render_page
+    panel.render_page = lambda: (survivors.append(button), original())
+    try:
+        button.click()
+        settle()
+    finally:
+        panel.render_page = original
+
+    assert len(survivors) == 1, (
+        f"the page was drawn {len(survivors)} times; the first teardown "
+        "removes the button handling the click")
+
+
 def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(window) -> None:
     """The page holds no models of its own.
 
