@@ -705,9 +705,19 @@ class CookbookPanel(QWidget):
         return block
 
     def _model_card(self, row):
+        """One model, in four groups: who it is, what it costs, how to run it,
+        and where the figures came from.
+
+        The groups are separated by more space than the lines inside them are,
+        which is the whole change. Every child used to sit exactly 6px from the
+        next, and six of them were the same grey at the same size, so a card
+        read as one undifferentiated block: the verdict's own explanation was
+        indistinguishable from the disclaimer three lines below it.
+        """
         model, variant, verdict = row["model"], row["variant"], row["verdict"]
         card, column = self._card(CARD[verdict["result"]])
 
+        # Group one: what this is.
         column.addWidget(label(model.display, "heading", True))
         # The verdict sits under the name as its own line rather than floating
         # at the far right of the heading row. Beside a 19px heading it read as
@@ -726,10 +736,17 @@ class CookbookPanel(QWidget):
             badge.setAccessibleName(f"Assessment: {verdict['result']}")
         column.addWidget(badge)
 
+        # Group two: what it costs here.
+        column.addSpacing(14)
         facts = (f"{model.size_class} · {human_bytes(variant.size)} download "
                  f"· {variant.quantization} · {model.license or 'licence unstated'}")
-        column.addWidget(label(facts, "muted", True))
-        reason = label(verdict["reason"], "muted", True)
+        # #meta rather than #muted: these are the figures the card exists to
+        # give, and they were the same grey as the disclaimer.
+        column.addWidget(label(facts, "meta", True))
+        # And the reason is body text, because it is the sentence the reader
+        # came for. It was muted, which is the style every quiet line on the
+        # card also used.
+        reason = label(verdict["reason"], None, True)
         reason.setWordWrap(True)
         column.addWidget(reason)
 
@@ -739,9 +756,10 @@ class CookbookPanel(QWidget):
             warning.setWordWrap(True)
             column.addWidget(warning)
 
+        # Group three: how to run it.
         commands = ollama_commands(model, variant)
         if commands:
-            column.addSpacing(6)
+            column.addSpacing(16)
             column.addWidget(label("Run it", "muted"))
             # One block holding all of them, monospaced. In the proportional
             # face these were in, a repository path is an unbroken run of
@@ -758,17 +776,23 @@ class CookbookPanel(QWidget):
                 "it can be copied rather than typed.")
             column.addWidget(block)
 
+        # Group four: where these numbers came from. Both lines in #footer, at a
+        # size and colour meant to be read last rather than scanned, and set
+        # close together so they read as one quiet footer instead of two more
+        # things competing with the figures above.
+        column.addSpacing(16)
         provenance = label(
             f"From {model.repo} on {model.source} · builds by "
             f"{model.artifact_repo} · read {model.last_verified or 'unknown'}",
-            "muted", True)
+            "footer", True)
         provenance.setWordWrap(True)
         column.addWidget(provenance)
 
         self._other_builds(column, row)
 
         disclaimer = label(
-            "Sized from published figures, not measured on this device.", "muted", True)
+            "Sized from published figures, not measured on this device.",
+            "footer", True)
         disclaimer.setWordWrap(True)
         column.addWidget(disclaimer)
         return card

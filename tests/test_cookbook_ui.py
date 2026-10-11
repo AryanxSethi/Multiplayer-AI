@@ -1516,6 +1516,80 @@ def test_a_build_name_is_not_a_heading(window) -> None:
         assert rule, f"the {theme} sheet has no QLabel#buildName rule"
 
 
+def test_a_model_card_groups_its_lines_instead_of_stacking_them_at_one_gap(window) -> None:
+    """The gaps between groups are wider than the gaps inside them.
+
+    Every child of the card used to sit exactly 6px from the next, and six of
+    them were the same grey at the same size, so the card read as one block:
+    the verdict's own explanation was indistinguishable from the disclaimer
+    three lines below it. Grouping is what separates "what it costs" from "how
+    to run it" from "where these numbers came from".
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    card = cards_on_page(panel)[0]
+    column = card.layout()
+    inside = column.spacing()
+
+    groups, current = [], None
+    for index in range(column.count()):
+        item = column.itemAt(index)
+        if item is None:
+            continue
+        widget = item.widget()
+        if widget is None:
+            # A spacer is how a group is declared.
+            groups.append(current)
+            current = []
+            continue
+        if current is None:
+            current = []
+        current.append(widget)
+
+    assert len(groups) > 1, (
+        "the card has no groups, so every line still sits the same distance "
+        "from the next")
+
+    for group in groups:
+        assert group, "an empty group was left in the card"
+
+
+def test_the_card_says_which_lines_are_the_figures_it_exists_for(window) -> None:
+    """The reason is the sentence the reader came for.
+
+    It was styled muted, which is the same rule as the disclaimer three lines
+    below it and as every other quiet line on the card. The facts line -- the
+    sizes the whole page is for -- was muted too.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    card = cards_on_page(panel)[0]
+
+    styles = {}
+    for label in card.findChildren(QLabel):
+        if label.objectName() == "command" or label.objectName() == "buildName":
+            continue
+        if label.text():
+            styles.setdefault(label.objectName() or "body", []).append(
+                label.text())
+
+    assert "meta" in styles, (
+        f"the facts line is not distinguished: {sorted(styles)}")
+    assert "body" in styles, (
+        f"the verdict's own explanation is still muted: {sorted(styles)}")
+    assert "footer" in styles, (
+        f"the provenance is not set apart: {sorted(styles)}")
+    assert styles["footer"], "the footer group is empty"
+
+    for theme in (DARK, LIGHT, MIKU):
+        for style in ("meta", "footer"):
+            assert f"QLabel#{style}" in stylesheet(theme), (
+                f"the {theme} sheet has no QLabel#{style} rule")
+
+
 def test_the_cookbook_is_built_from_the_shipped_catalogue_not_a_hardcoded_list(window) -> None:
     """The page holds no models of its own.
 
