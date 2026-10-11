@@ -662,12 +662,27 @@ class WorkspaceRuntime:
     async def cookbook_refresh(self, repo, artifact_repo=None, base=None):
         """Read one model's details from the model catalogue, on request.
 
-        Reached only from the Cookbook's Refresh control, which says what the
-        request is before it is made. Nothing in this app calls it on a timer
-        or on open, because the Resources page tells the user that nothing is
-        sent anywhere and a background call would make that untrue. There is
+        Reached only from the Cookbook's Refresh control, which asks first and
+        says where it is about to read from. Nothing in this app calls it on a
+        timer or on open, because the Resources page tells the user that nothing
+        is sent anywhere and a background call would make that untrue. There is
         deliberately no scheduled refresh either: a timer that quietly phones
         home contradicts the promise the same page is making.
+
+        No ``self.mutation`` lock. It serialises writes to workspace state, and
+        this reads a third-party site and writes nothing here -- the panel saves
+        its result to the cache file itself. Taking the lock meant a refresh of
+        four models, three requests each, with a fifteen-second timeout per
+        request, could stand in front of every other mutation for minutes at a
+        time, for no state in common. Reads do not need it.
+
+        Always ``self.http``. ``relay_http()`` picks a client configured for
+        talking to a relay -- ``direct_http``, which ignores the environment --
+        when the relay is on a direct connection, and this request never goes to
+        a relay at all: ``fetch_entry`` reads huggingface.co, or the mirror.
+        The only thing the branch actually changed was whether a system proxy was
+        honoured, and a catalogue read should honour it in every case, since
+        that is what someone behind a corporate proxy is relying on.
 
         ``base`` selects the host. It defaults to the public catalogue, and a
         mirror serving the same three paths works identically -- which is the
@@ -686,9 +701,7 @@ class WorkspaceRuntime:
         """
         from .cookbook_hub import fetch_entry
 
-        async with self.mutation:
-            return await fetch_entry(self.relay_http() if self.remote else self.http,
-                                     repo, artifact_repo, base)
+        return await fetch_entry(self.http, repo, artifact_repo, base)
 
     async def set_coordinator(self, agent_id):
         """Save the owner's default model, retaining import order for Automatic."""

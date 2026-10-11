@@ -221,3 +221,56 @@ async def test_a_request_that_fails_says_so_rather_than_returning_nothing():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(httpx.HTTPError):
             await fetch_model(client, "Qwen/Qwen2.5-Coder-7B-Instruct")
+
+
+async def test_a_catalogue_read_does_not_lock_out_workspace_mutations():
+    """Reading a third-party site is not a write to workspace state.
+
+    ``cookbook_refresh`` used to hold ``self.mutation``, the lock that
+    serialises writes. A refresh is four models at three requests each with a
+    fifteen-second timeout apiece, so it could stand in front of every other
+    mutation for minutes -- for no state in common, since the panel writes its
+    result to the cache file itself and this request changes nothing here.
+    """
+    import asyncio
+    import pathlib
+    import tempfile
+
+    from desktop_app.storage import Storage
+    from desktop_app.workspace_runtime import WorkspaceRuntime
+    from tests.test_desktop_runtime import MemoryVault
+
+    with tempfile.TemporaryDirectory() as directory:
+        runtime = WorkspaceRuntime(Storage(pathlib.Path(directory),
+                                           MemoryVault()))
+        # start() is what builds the HTTP clients, and a runtime that has never
+        # been started has none -- which is itself a thing worth a real client
+        # rather than a stand-in, so the request really is handed one.
+        await runtime.start()
+        released = asyncio.Event()
+        holding = asyncio.Event()
+
+        async def slow_fetch(*args, **kwargs):
+            # Stands in for a host that takes its time. If the lock were still
+            # taken, the mutation below could not run until this returned.
+            holding.set()
+            await released.wait()
+            return {"repo": "a/b"}
+
+        import desktop_app.cookbook_hub as hub
+        original = hub.fetch_entry
+        hub.fetch_entry = slow_fetch
+        try:
+            refresh = asyncio.ensure_future(
+                runtime.cookbook_refresh("a/b", "c/d"))
+            await asyncio.wait_for(holding.wait(), timeout=5)
+            # While the catalogue read is in flight, a mutation must still be
+            # able to take the lock.
+            await asyncio.wait_for(runtime.mutation.acquire(), timeout=5)
+            runtime.mutation.release()
+        finally:
+            hub.fetch_entry = original
+            released.set()
+            await refresh
+            await runtime.http.aclose()
+            await runtime.direct_http.aclose()
