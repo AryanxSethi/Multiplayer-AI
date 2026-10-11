@@ -19,8 +19,6 @@ it sends before it is pressed.
 
 from __future__ import annotations
 
-import os
-
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
@@ -95,41 +93,28 @@ CARD_PADDING = (20, 17, 20, 17)
 BUILDS_SHOWN = 8
 
 
-# Off by default. Set COOKBOOK_DEBUG_WINDOWS=1 to have the page report any
-# top-level widget that is not the main window, at the moments a build is
-# chosen.
-#
-# It exists because the symptom is a window that lasts a few milliseconds, which
-# is too short for a screenshot and too short for a test to catch by polling. A
-# reader who sees one can turn this on and get the widget's class and geometry
-# printed instead of having it described again.
-#
-# The QComboBox popups every picker carries are excluded: they are windows by
-# design and have been since before any of this.
-DEBUG_WINDOWS = os.environ.get("COOKBOOK_DEBUG_WINDOWS") == "1"
+class _StillPainting:
+    """Hold a widget's painting still for the length of a rebuild.
 
+    Not a context manager on the panel, because two places need it and neither
+    owns the other. The ``finally`` matters more than the shape: a rebuild that
+    raised with updates switched off would leave the list unable to repaint for
+    the rest of the session, which is a far worse fault than a flash.
+    """
 
-def _report_stray_windows(tag):
-    """Name any top-level widget that should not be one. Debug builds only."""
-    if not DEBUG_WINDOWS:
-        return
-    from PySide6.QtWidgets import QApplication
+    def __init__(self, widget):
+        self.widget = widget
+        self.was = False
 
-    application = QApplication.instance()
-    if application is None:
-        return
-    for widget in application.topLevelWidgets():
-        try:
-            parent = widget.parent()
-            if parent is not None and type(parent).__name__ == "Select":
-                continue
-            if widget.isWidget() and widget.isWindow() and widget.isVisible():
-                print(f"[cookbook {tag}] {type(widget).__name__} "
-                      f"name={widget.objectName()!r} "
-                      f"parent={type(parent).__name__ if parent else None} "
-                      f"geom={widget.geometry().getRect()}", flush=True)
-        except RuntimeError:
-            continue
+    def __enter__(self):
+        self.was = self.widget.updatesEnabled()
+        self.widget.setUpdatesEnabled(False)
+        return self.widget
+
+    def __exit__(self, *exc):
+        if self.was:
+            self.widget.setUpdatesEnabled(True)
+        return False
 
 
 # What a refresh may not overwrite, because the Hub does not carry it.
@@ -244,8 +229,10 @@ class CookbookPanel(QWidget):
             if unknown else self.hardware.graphics_note(),
             "muted", True)
         self.unknown_label.setWordWrap(True)
-        self.unknown_label.setVisible(bool(unknown))
+        # Parented first, then shown, for the same reason the build table is:
+        # showing a widget that has no parent makes it a window of its own.
         column.addWidget(self.unknown_label)
+        self.unknown_label.setVisible(bool(unknown))
         layout.addWidget(card)
 
         self.catalog_note = label("", "muted", True)
@@ -562,7 +549,20 @@ class CookbookPanel(QWidget):
                                                       for model in withdrawn]
 
     def render_page(self):
-        """Draw one page of cards, and the controls that move between them."""
+        """Draw one page of cards, and the controls that move between them.
+
+        Painting is held still for the whole of it. This tears every card down
+        before building any, so for the length of the call the page genuinely is
+        empty -- measured: content 1984px down to the viewport's 827px, scroll
+        range 1157 down to 0, and 86% of the viewport showing nothing but
+        background. Qt normally merges the updates so no hole is ever presented,
+        which is why this reads as an occasional flash rather than a blank page
+        every time. Holding the painting still makes it not a race.
+        """
+        with self._still():
+            self._draw_page()
+
+    def _draw_page(self):
         while self.results.count():
             item = self.results.takeAt(0)
             widget = item.widget() if item is not None else None
@@ -685,21 +685,21 @@ class CookbookPanel(QWidget):
 
         Every way of changing this list -- the picker, the "Show every model"
         button, a refresh -- throws the whole page away and builds it again,
-        and doing that from inside the interaction that asked for it is what
-        puts windows on screen. Two paths reach it.
+        and the picker is being dismissed from its own dropdown at the moment
+        the signal arrives. So the rebuild used to happen underneath a popup
+        that had not closed yet, and the dropdown stayed up over a list it no
+        longer described.
 
-        The button is drawn on the very card saying the catalogue has nothing to
-        show, so the rebuild tore down the widget still processing its own click:
-        parented, laid out, and still the widget under the cursor at the moment
-        the platform asks which window owns it. On Windows that question gets
-        answered by putting a window on screen.
+        Deferring to the next turn lets the dismissal finish first, and
+        collapses a burst of changes into one rebuild rather than one per
+        press, which matters for a dropdown you can hold Enter on.
 
-        The picker is being dismissed from its own dropdown when the signal
-        arrives, so the page was rebuilt underneath a popup that had not closed
-        yet, and the dropdown stayed up over a list it no longer described.
-
-        Deferring to the next turn settles both, and collapses a burst of
-        changes into one rebuild rather than one per press.
+        This is not what stopped the stray windows. That was the build table
+        being shown before it had been put in a layout -- a widget with no
+        parent is a window -- and it happened on every rebuild of every card,
+        which is why the same window appeared here, on a build row, and on a
+        refresh. The deferral is kept because the dropdown teardown and the
+        coalescing are real problems of their own, not because it stopped that.
         """
         if self._task_pending:
             return
@@ -741,45 +741,48 @@ class CookbookPanel(QWidget):
     def choose_build(self, repo, quantization):
         """Show a different build of this model, and re-draw the card for it.
 
-        Deferred and scroll-preserving, for the same reason the filter change
-        is (see task_changed): the row that was pressed is inside the card this
-        throws away, so rebuilding from inside its own click is how a card ends
-        up on screen as a window of its own.
+        Deferred so the click finishes travelling before the card it sits in is
+        replaced, and so the scroll position can be put back once the new
+        layout has been measured.
 
-        Keeping the reader where they were is the other half. The page is built
-        from scratch, which drops the scroll bar to the top, and somebody
-        choosing between eight quantisations has scrolled down a list to do it
-        -- the choices are the last thing on the card, not the first. Landing
-        back at the top after every one of them means choosing eight builds
-        involves scrolling down eight times.
+        The deferral is not what stopped the stray windows -- that was the build
+        table being shown before it was parented, on every rebuild of every
+        card. This is kept because the swap changes the card's height, and the
+        scroll bar needs the layout to have run before it will honour a
+        setValue; restoring the position in the same turn as the swap clamps it
+        to zero, which is the page snapping back to the top.
         """
         if self._chosen.get(repo) == quantization:
             return
         self._chosen[repo] = quantization
         where = self.scroller.verticalScrollBar().value()
-        _report_stray_windows("before choosing a build")
         QTimer.singleShot(0, lambda: self._rebuild_at(where, repo))
 
     def _rebuild_at(self, where, repo):
         """The deferred half of choose_build: swap one card, keep the reader put.
 
-        Built and inserted *before* the old card is destroyed, rather than the
-        other way round. Rebuilding the page empties it first, so the list
-        collapses to nothing and refills on every click -- and the card being
-        destroyed is the one the pointer is resting on, which is how a widget
-        that should be a row on a card briefly becomes a window of its own. A
-        parentless widget is a window in Qt, complete with the app icon and the
-        minimise, maximise and close buttons.
+        Built and inserted *before* the old card is destroyed. Rebuilding the
+        page empties it first, so the list collapses to nothing and refills on
+        every click, rather than one card changing under the pointer.
 
         Falls back to a full rebuild for anything it cannot place, so a card
         that is not where it was thought to be costs a redraw rather than a
         page with a hole in it.
+
+        Painting is suppressed for the whole swap. Hiding the old card marks the
+        region it occupied as needing a repaint, and the replacement does not
+        paint into it until the loop next runs -- a gap in which that part of the
+        page has nothing to show. Qt coalesces the two updates into one frame
+        often enough that it is invisible; when it does not, the chosen card
+        flashes while every other card stays exactly where it was. Turning
+        updates off for the duration makes the gap impossible rather than
+        unlikely.
         """
-        self._swap_card(repo)
-        bar = self.scroller.verticalScrollBar()
-        if where:
-            bar.setValue(where)
-        _report_stray_windows("after choosing a build")
+        with self._still():
+            self._swap_card(repo)
+            bar = self.scroller.verticalScrollBar()
+            if where:
+                bar.setValue(where)
 
     def _swap_card(self, repo):
         """Put a freshly built card where the old one for this model was."""
@@ -797,6 +800,21 @@ class CookbookPanel(QWidget):
         # was.
         old.hide()
         old.deleteLater()
+
+    def _still(self):
+        """Repaint the list once at the end, rather than throughout.
+
+        A rebuild hides what was on screen before it puts anything in its place,
+        and between those two moments the compositor is free to present the hole.
+        It is a sub-millisecond window that Qt usually closes for us by merging
+        the updates, which is why this reads as an occasional flash rather than
+        as a blank page every time.
+
+        Suspending updates makes it not a race. ``body`` rather than the window,
+        so the catalogue note and the pager -- which is what says the refresh
+        worked -- still repaint as they change.
+        """
+        return _StillPainting(self.body)
 
     def toggle_builds(self, repo, opened):
         """Remember which cards are open, so a re-render can leave them that way."""
@@ -876,11 +894,18 @@ class CookbookPanel(QWidget):
                 f"and {hidden} larger build{'s' if hidden != 1 else ''} not "
                 "shown", "muted", True))
 
+        # Added to the layout *before* it is shown. A widget with no parent is
+        # a window in Qt: showing one hands it the app icon and the minimise,
+        # maximise and close buttons. This one was parentless for the few
+        # microseconds between here and column.addWidget below, which is why
+        # the stray window lasted milliseconds and why nothing that looked
+        # afterwards ever found it -- it was gone before the first repaint.
+        column.addWidget(detail)
+        # Now that it is a child widget, showing it just reveals it.
         detail.setVisible(toggle.isChecked())
         toggle.toggled.connect(detail.setVisible)
         toggle.toggled.connect(
             lambda opened, repo=row["model"].repo: self.toggle_builds(repo, opened))
-        column.addWidget(detail)
 
     def _build_row(self, model, entry, chosen):
         """One build, as a row you can choose.
@@ -899,6 +924,24 @@ class CookbookPanel(QWidget):
                                                    variant.quantization),
                      name="ghost")
         row.setCheckable(True)
+        # Auto-exclusive, and the rows are all children of this card's table, so
+        # the group is exactly one card's builds and no two cards interfere.
+        #
+        # This is what stops the card flickering. A checkable button toggles
+        # itself as part of the click, before this handler runs, and the state
+        # it toggles to is then overwritten by a rebuild a turn later -- so the
+        # card was drawn twice, milliseconds apart, showing two different
+        # choices: for a moment the build just clicked *and* the one it
+        # replaced both drawn as chosen.
+        #
+        # Exclusive, the same click unchecks the old row and checks the new one
+        # in a single step, so the picture the button draws is already the
+        # picture the rebuild is about to draw. And an exclusive button cannot
+        # be unchecked by clicking itself, which fixes the other half: without
+        # it, clicking the build that is already chosen cleared it off the card
+        # and left it cleared, because there was nothing to rebuild to correct
+        # it.
+        row.setAutoExclusive(True)
         row.setChecked(is_chosen)
         row.setProperty("buildRow", True)
         row.setProperty("buildVariant", variant.quantization)

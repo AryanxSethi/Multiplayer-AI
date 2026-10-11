@@ -1898,21 +1898,346 @@ def test_choosing_a_build_replaces_one_card_not_the_page(window) -> None:
         "the replacement card is not in the list")
 
 
+class _ShowSpy:
+    """Context manager collecting parentless ``setVisible(True)`` calls.
+
+    Patches the class rather than an instance, because the widget that was
+    doing it -- the build table's detail container -- is a bare ``QWidget()``
+    that exists only for the length of one call, so there is nothing to wrap.
+
+    Checked against the argument rather than the resulting state: a parentless
+    widget already reports ``isWindow()`` before it is ever shown, so the
+    question is not "is this a window" but "was this made visible before
+    anything adopted it".
+    """
+
+    def __init__(self):
+        self.hits = []
+
+    def __enter__(self):
+        from PySide6.QtWidgets import QWidget
+
+        self._original = QWidget.setVisible
+
+        def spy(widget, visible):
+            if visible and widget.parent() is None:
+                try:
+                    self.hits.append(type(widget).__name__)
+                except RuntimeError:
+                    pass
+            return self._original(widget, visible)
+
+        QWidget.setVisible = spy
+        return self
+
+    def __exit__(self, *exc):
+        from PySide6.QtWidgets import QWidget
+
+        QWidget.setVisible = self._original
+        return False
+
+
+def test_a_rebuild_never_shows_a_widget_that_has_no_parent(window) -> None:
+    """This is the stray window: the build table, shown before it had a parent.
+
+    ``detail`` is a bare ``QWidget()`` and it was shown before
+    ``column.addWidget(detail)`` put it in a layout. A widget with no parent
+    *is* a window in Qt, so showing one hands it the app icon and the
+    minimise, maximise and close buttons -- which is exactly what was being
+    reported, as a small window over the page for a few milliseconds every time
+    the list was redrawn.
+
+    It was unreproducible by looking, because the widget is parentless only
+    between the two calls and is gone before anything repaints. Polling
+    ``topLevelWidgets()`` afterwards finds nothing; the ``setVisible`` call
+    itself is the only place the mistake is visible.
+
+    It fires on every rebuild of every card, which is why the same window
+    appeared over the filter, over a build row, and on a refresh -- and why it
+    came only once per option: re-picking an option that is already active
+    rebuilds nothing, so there is nothing to show a window for.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    toggles = build_toggles(panel)
+    assert toggles, "no card offers its builds"
+
+    # With nothing expanded there is nothing to catch, and the spy must be
+    # trusted to say so.
+    with _ShowSpy() as spy:
+        panel.render_page()
+        settle()
+    assert spy.hits == [], (
+        f"a rebuild with no table open showed {spy.hits} while parentless")
+
+    toggles = build_toggles(panel)
+    toggles[0].click()
+    settle()
+    assert panel._open, "the table did not register as open"
+
+    with _ShowSpy() as spy:
+        panel.render_page()
+        settle()
+    assert spy.hits == [], (
+        "a rebuild showed these widgets before anything parented them, so "
+        f"each was briefly a window of its own: {spy.hits}")
+
+
+def test_a_rebuild_after_choosing_a_build_shows_no_window(window) -> None:
+    """The same, on the path that replaces one card rather than the page."""
+    panel = panel_of(window)
+    window.show()
+    settle()
+    toggles = build_toggles(panel)
+    assert toggles, "no card offers its builds"
+    toggles[0].click()
+    settle()
+
+    card = toggles[0].parent()
+    rows = [row for row in build_rows_of(card) if not row.isChecked()]
+    assert rows, "no build is offered as a choice"
+
+    with _ShowSpy() as spy:
+        rows[0].click()
+        settle()
+    assert spy.hits == [], (
+        "choosing a build showed these widgets while they had no parent: "
+        f"{spy.hits}")
+
+
+def test_a_change_of_filter_shows_no_window(window) -> None:
+    """And on the path that rebuilds the whole page, with a table open."""
+    panel = panel_of(window)
+    window.show()
+    settle()
+    toggles = build_toggles(panel)
+    toggles[0].click()
+    settle()
+
+    index = panel.task_picker.findData("coding")
+    assert index >= 0, "there is no Coding filter to pick"
+    with _ShowSpy() as spy:
+        panel.task_picker.setCurrentIndex(index)
+        settle()
+    assert spy.hits == [], (
+        "changing the filter showed these widgets while they had no parent: "
+        f"{spy.hits}")
+
+
+def test_choosing_a_build_never_draws_two_different_cards(window) -> None:
+    """The card flickered because it was drawn twice, showing two choices.
+
+    A checkable button toggles itself as part of the click, before the handler
+    that rebuilds the card gets to run. With the rows merely checkable, clicking
+    a new build checked it while the one it replaced was *still* checked, and a
+    turn later the rebuild drew the card with only the new one chosen. Two
+    pictures of one card, milliseconds apart -- and only that card, because
+    nothing else on the page was touched.
+
+    Exclusive rows settle it in one step: the click unchecks the old row and
+    checks the new one together, so what the button draws is already what the
+    rebuild is about to draw.
+
+    Checked by comparing the card as it stands immediately after the click
+    against the card after the rebuild, which is the comparison the flicker was.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    def card_with_rows():
+        # Re-fetched every time: choosing a build replaces the card, so any
+        # reference held across a click is a deleted widget.
+        for card in cards_on_page(panel):
+            if build_rows_of(card):
+                return card
+        return None
+
+    card = card_with_rows()
+    assert card, "no card shows a build table"
+    toggle = next(b for b in card.findChildren(QPushButton)
+                  if b.property("buildRow") is None)
+    toggle.click()
+    settle()
+
+    def chosen(wanted):
+        return [row.property("buildVariant") for row in build_rows_of(wanted)
+                if row.isChecked()]
+
+    for target in ("Q2_K", "Q8_0", "Q4_K_M"):
+        card = card_with_rows()
+        row = next((r for r in build_rows_of(card)
+                    if r.property("buildVariant") == target), None)
+        if row is None:
+            continue
+        row.click()
+        during = chosen(card)     # inside the click, before the rebuild runs
+        settle()
+        after = chosen(card_with_rows())
+        assert during == after, (
+            f"picking {target} drew {during} and then drew {after}, so the "
+            "card was painted twice showing two different choices")
+        assert during == [target], f"{during} is drawn after picking {target}"
+
+
+def test_choosing_the_build_already_shown_does_not_clear_it(window) -> None:
+    """Clicking the row that is already chosen must leave it chosen.
+
+    A checkable button clears itself when clicked, and this handler returns
+    without rebuilding because the build is already the one being shown -- so
+    the row went blank and stayed blank, with nothing to put it back. A reader
+    pressing the selected row again to be sure was told, silently, that nothing
+    was selected.
+
+    Exclusive buttons cannot be unchecked by clicking them, which is what stops
+    the button from contradicting the card it is drawn on.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    def card_with_rows():
+        for card in cards_on_page(panel):
+            if build_rows_of(card):
+                return card
+        return None
+
+    card = card_with_rows()
+    assert card, "no card shows a build table"
+    next(b for b in card.findChildren(QPushButton)
+         if b.property("buildRow") is None).click()
+    settle()
+
+    def chosen():
+        card = card_with_rows()
+        return [row.property("buildVariant") for row in build_rows_of(card)
+                if row.isChecked()]
+
+    start = chosen()
+    assert len(start) == 1, f"the card starts with {start} chosen, expected one"
+
+    for attempt in (1, 2, 3):
+        card = card_with_rows()
+        row = next(r for r in build_rows_of(card)
+                   if r.property("buildVariant") == start[0])
+        row.click()
+        settle()
+        assert chosen() == start, (
+            f"press {attempt} on the build already shown left {chosen()} "
+            f"chosen, so clicking it cleared the card")
+
+
+def test_a_card_is_never_hidden_while_the_list_can_still_paint(window) -> None:
+    """The chosen card flashed; nothing else on the page moved.
+
+    Replacing a card hides the old one, which marks the region it occupied as
+    needing a repaint, and the replacement does not paint into that region
+    until the loop next runs. In between, that part of the page has nothing to
+    show. Qt merges the two updates into one frame often enough to hide it --
+    which is why it reads as an occasional flicker rather than a blank card every
+    time -- and when it does not, the flash is confined to the card that was
+    chosen, because nothing else was touched and the replacement card is the
+    same height as the one it replaces.
+
+    So the check is not "did a paint happen", which cannot be observed here; it
+    is whether there is a gap left for one to happen in. Painting being held
+    still across the swap means there is not.
+
+    Asserted against both paths, since both hide a card: choosing a build, which
+    replaces one, and a full redraw, which replaces all of them.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    toggles = build_toggles(panel)
+    assert toggles, "no card offers its builds"
+    toggles[0].click()
+    settle()
+
+    card = toggles[0].parent()
+    rows = [row for row in build_rows_of(card) if not row.isChecked()]
+    assert rows, "no build is offered as a choice"
+
+    from PySide6.QtWidgets import QFrame
+
+    gaps = []
+    original = QFrame.hide
+
+    def spy(frame):
+        try:
+            if frame.updatesEnabled():
+                gaps.append(frame.objectName() or type(frame).__name__)
+        except RuntimeError:
+            pass
+        return original(frame)
+
+    QFrame.hide = spy
+    try:
+        rows[0].click()
+        settle()
+        first = len(gaps)
+
+        panel.render_page()
+        settle()
+    finally:
+        QFrame.hide = original
+
+    assert not gaps, (
+        "these cards were hidden while the list could still be painted, so "
+        f"there is a gap for the compositor to show: {gaps[:6]}")
+    assert first == 0, (
+        f"choosing a build alone left {first} gaps")
+
+
+def test_painting_is_held_still_and_always_given_back(window) -> None:
+    """Updates off across a rebuild, and on again whatever happens.
+
+    A list that cannot repaint is a far worse fault than a flash: the page is
+    frozen for the rest of the session and nothing about it says why. So the
+    restore is in a ``finally``, and this proves it -- an exception thrown
+    inside the rebuild still has to leave the list able to paint.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    assert panel.body.updatesEnabled(), (
+        "the list cannot repaint at all, before anything has been done to it")
+
+    with panel._still():
+        assert not panel.body.updatesEnabled(), (
+            "the rebuild did not hold painting still, so the gap it closes is "
+            "still there")
+    assert panel.body.updatesEnabled(), "painting was not given back"
+
+    with pytest.raises(RuntimeError):
+        with panel._still():
+            raise RuntimeError("the catalogue could not be drawn")
+    assert panel.body.updatesEnabled(), (
+        "the list is still unable to repaint after a failed redraw, which is a "
+        "far worse fault than the flicker it was meant to prevent")
+
+    panel.render_page()
+    settle()
+    assert cards_on_page(panel), "the list did not come back after a failed one"
+
+
 def test_pressing_show_every_model_does_not_rebuild_under_its_own_click(
         window) -> None:
     """The button that widens the filter is drawn on the card being thrown away.
 
     "Show every model" sits inside the very card saying the catalogue has
     nothing to show, so rebuilding the page inside the click handler tears down
-    the widget that is still processing that click -- parented, laid out, and
-    still the widget under the cursor at the moment the platform asks which
-    window owns it. On Windows that question gets answered by putting a window
-    on screen.
+    the widget that is still processing that click.
 
-    So the rebuild waits a turn of the event loop. ``deleteLater`` was already
-    keeping the card alive long enough to be drawn, which is why a widget-count
-    check passes and a person still sees the box; this asserts the rebuild has
-    not even been attempted by the time the click returns.
+    So the rebuild waits a turn of the event loop, and this asserts it has not
+    even been attempted by the time the click returns.
+
+    Not what stopped the stray windows -- that was a widget shown before it had
+    a parent, on every rebuild, which this defers past as well but does not
+    cause. See test_a_rebuild_never_shows_a_widget_that_has_no_parent, which is
+    the one that failed before the ordering was corrected.
     """
     panel = panel_of(window)
     window.show()
