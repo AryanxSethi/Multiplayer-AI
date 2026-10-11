@@ -117,6 +117,18 @@ class OrchestrationUITests(unittest.TestCase):
                     faded = enabled.grab().toImage().copy(rect)
                     dimmed = sum(faded.pixelColor(x, y).name() == tick
                                  for x in range(faded.width()) for y in range(faded.height()))
+                    # Asserted, not assumed. A tick painted through a
+                    # half-opacity pen blends with what is under it, so how many
+                    # of its pixels survive as exactly the tick colour depends
+                    # on the two colours meeting; it came out at one and two
+                    # here, and there is nothing in the comparison below that
+                    # would have noticed it being none. "0 < painted" is true
+                    # of a control drawn at full strength and of one drawn not
+                    # at all.
+                    self.assertGreater(dimmed, 0, (
+                        "a disabled switch draws none of the tick at all, so "
+                        "there is nothing to compare and the assertion below "
+                        "says nothing either way"))
                     self.assertLess(dimmed, painted, (
                         "a disabled switch is painted at full strength, so it "
                         "reads as though it could still be turned on"))

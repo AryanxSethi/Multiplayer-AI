@@ -105,7 +105,17 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
                 if not any(agent["online"] for agent in result.json()["agents"]):
                     return
                 if time.monotonic() >= deadline:
-                    return
+                    # Failed, not returned. The comment above this loop exists
+                    # because a peer still shown online when this gives up is
+                    # carried into the next test, and returning quietly made
+                    # that certain rather than possible: the loop would spin
+                    # out of time and report success every time.
+                    self.fail(
+                        f"a peer was still online {TEARDOWN_SETTLE_SECONDS:.0f}s "
+                        "after the test finished. It is carried into the next "
+                        "test, which will then fail for reasons that look "
+                        "unrelated. This usually means an agent the test "
+                        "started is still running.")
                 await asyncio.sleep(.02)
 
     async def wait_for_subprocess_agent(self, process, agent, what, budget=None):
@@ -121,6 +131,13 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         """
         budget = SUBPROCESS_STARTUP_SECONDS if budget is None else budget
         deadline = time.monotonic() + budget
+        # Asked before the loop, not inside it. With a budget of zero -- which
+        # is how the tests for this method prove it gives up -- the loop body
+        # never runs, and the one thing it would have said is that the process
+        # had already exited. That is a different fault from one that is merely
+        # slow and needs a different sentence.
+        if process.poll() is not None:
+            self.fail(f"{what} exited before connecting")
         async with httpx.AsyncClient() as http:
             while time.monotonic() < deadline:
                 listing = await http.get(self.http_url + "/agents", headers=self.headers("a"))

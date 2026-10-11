@@ -614,7 +614,14 @@ def test_detection_reports_what_it_read_and_what_it_did_not():
             "Apple Silicon shares one memory pool with the CPU"), (
             f"an unreadable VRAM figure must say why, not blame a missing "
             f"library: {hardware.sources['vram']!r}")
-        assert "no dedicated graphics memory" in hardware.describe()
+        # Two different answers, and which one is right depends on the machine.
+        # Unasserted, this fails on every Mac: Apple Silicon takes the branch
+        # above and describe() says "unified memory", which is the whole point
+        # of it, but was not what was being looked for here.
+        assert ("unified memory" in hardware.describe()
+                if hardware.unified_memory
+                else "no dedicated graphics memory" in hardware.describe()), (
+            f"describe() does not match the hardware: {hardware.describe()!r}")
 
 
 def test_an_integrated_adapter_is_not_reported_as_a_card_with_no_memory():
