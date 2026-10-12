@@ -84,7 +84,8 @@ the API root if needed, and enter its API key. Available models load into the
 **Connect agent**; the app launches the adapter in its own networking thread.
 There is no generated terminal command or separate agent process to start.
 
-For Ollama, start the Ollama application and install your chosen model first.
+For Ollama, install Ollama and your chosen model first. The app starts a stopped
+local Ollama server automatically when loading or restoring models.
 Its dropdown refreshes while the import form is open and clears when Ollama
 cannot be reached. Removed models are also dropped from the choices.
 **Find models** refreshes installed Ollama models or available models from the
@@ -138,8 +139,18 @@ The workspace owner sets this optional preference; invited members use the same
 default. The choice is saved per workspace. Only active models appear in this
 dropdown; when none are available it shows **No active models**. Ollama models
 are available only while their server can be reached and the model is installed.
-Stopping Ollama hides its models; starting it again restores running agents
-automatically. A saved default remains saved while unavailable.
+For a local Ollama HTTP API root (localhost, 127.0.0.1, or ::1), the app starts
+`ollama serve` automatically if the server is stopped, both during import and
+when restoring saved connections. Ollama must already be installed. Existing
+servers are reused, and all workspaces share servers started by the app. On exit,
+the app stops only the servers it started. Saved connections remain available for
+the next launch, without another import. This uses Ollama's documented
+[server command and Windows installation](https://docs.ollama.com/windows).
+Remote, HTTPS, and proxy-path endpoints must be started separately.
+Unavailable models are marked offline and excluded from chat choices. Installing
+a missing model in Ollama restores its saved connection automatically. New imports
+are accepted only when Ollama lists the model as installed. A saved default remains
+saved while unavailable.
 **Automatic · first available model** restores the original default and uses
 an available model while that default is offline. Specialist routing works best with a model that
 follows JSON planning instructions reliably. Basic chat does not require planning.

@@ -21,6 +21,7 @@ from network_a2a.web_search import create_search
 from network_a2a.orchestration import GENERAL_TARGET, ORCHESTRATION_TIMEOUT, routing_profile
 
 from .storage import UNAVAILABLE
+from .ollama_service import OllamaService, model_installed
 
 
 def relay_http_url(url, allow_insecure=False):
@@ -33,7 +34,7 @@ def relay_http_url(url, allow_insecure=False):
 
 
 class WorkspaceRuntime:
-    def __init__(self, storage, emit=lambda event, data: None, restore_remote=True):
+    def __init__(self, storage, emit=lambda event, data: None, restore_remote=True, ollama_service=None):
         self.storage = storage
         self.emit = emit
         self.restore_remote = restore_remote
@@ -57,6 +58,8 @@ class WorkspaceRuntime:
         self.generation = 0
         self._ollama_availability = {}
         self.mutation = asyncio.Lock()
+        self.ollama_service = ollama_service if ollama_service is not None else OllamaService()
+        self.owns_ollama_service = ollama_service is None
 
     async def start(self):
         """Recover unfinished model saves before loading credentials or starting the relay."""
@@ -437,16 +440,32 @@ class WorkspaceRuntime:
                 self.emit("notice", "Your model connected, but its details could not be published to the workspace.")
             return False
 
-    async def _launch_profile(self, profile, allow_insecure=False):
+    async def _launch_profile(self, profile, allow_insecure=False, ollama_available=None):
         """Load vault credentials and replace the profile's running model client."""
         key = self.storage.vault.get("provider:" + profile["id"])
         search_key = self.storage.vault.get("search:" + profile["id"]) if profile.get("search_provider") == "ollama" and profile.get("web_search", "off") != "off" else None
-        adapter = create_adapter(self._config(profile, key, search_key), self.http)
+        config = self._config(profile, key, search_key)
+        adapter = create_adapter(config, self.http)
+        if profile["provider"] == "ollama" and ollama_available is None:
+            try:
+                models = await self.ollama_service.models(self.http, config)
+                ollama_available = model_installed(profile["model"], models)
+                if not ollama_available:
+                    self.emit("notice", f"{profile['model']} is not installed in Ollama. Install it in Ollama; this saved connection will recover automatically.")
+            except (httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                ollama_available = False
+                self.emit("notice", f"{profile['id']} is unavailable. {exc} Its saved connection will recover automatically when Ollama is ready.")
         token = self.active_token if self.remote else self.credentials[profile["id"]]["token"]
         await self._remove_runner(profile["id"])
+        await self.publish_profile(profile, running=False)
         await self._attach(profile["id"], token, adapter, allow_insecure)
-        await self.publish_profile(profile)
-        self._ollama_availability.pop(profile["id"], None)
+        running = ollama_available if profile["provider"] == "ollama" else True
+        published = await self.publish_profile(profile, running=running)
+        if profile["provider"] == "ollama":
+            if published:
+                self._ollama_availability[profile["id"]] = running
+            else:
+                self._ollama_availability.pop(profile["id"], None)
         configured = self.storage.settings.get("coordinator")
         if not self.remote and (not configured or not self.app.state.relay.allowed(self.active_id, configured)
                                 or self.app.state.relay.agent_description(configured)["kind"] != "model"):
@@ -475,7 +494,12 @@ class WorkspaceRuntime:
                 raise ValueError("Choose a different name for your AI agent; the device identity stays available")
             saved_key = key if key else self.storage.vault.get("provider:" + agent_id)
             saved_search_key = search_key or (self.storage.vault.get("search:" + agent_id) if profile.get("search_provider") == "ollama" and profile.get("web_search", "off") != "off" else None)
-            create_adapter(self._config(profile, saved_key, saved_search_key), self.http)  # validate before mutating storage
+            config = self._config(profile, saved_key, saved_search_key)
+            create_adapter(config, self.http)  # validate before mutating storage
+            if profile["provider"] == "ollama":
+                models = await self.ollama_service.models(self.http, config)
+                if not model_installed(profile["model"], models):
+                    raise ValueError(f"{profile['model']} is not installed in Ollama. Install it in Ollama, then choose an available model.")
             updated = self.credentials
             if not self.remote:
                 if agent_id not in self.credentials:
@@ -489,7 +513,8 @@ class WorkspaceRuntime:
                 self.app.state.relay.workspace["models"] = [item["id"] for item in self.storage.settings.get("agents", [])]
             if not finalized:
                 self.emit("notice", "The model was saved, but its saved credentials need another check. Unlock your credential store and restart the app to finish it.")
-            await self._launch_profile(profile, self.storage.settings.get("remote", {}).get("allow_insecure", False))
+            await self._launch_profile(profile, self.storage.settings.get("remote", {}).get("allow_insecure", False),
+                                       ollama_available=True if profile["provider"] == "ollama" else None)
             self.emit("activity", {"title": f"{agent_id} connected", "detail": f"{profile['provider']} · {profile['model']}"})
             await self.refresh()
 
@@ -535,11 +560,8 @@ class WorkspaceRuntime:
             base, key, insecure = endpoint
             try:
                 config = ProviderConfig("ollama", "availability", base, api_key=key, allow_insecure=insecure)
-                response = await self.http.get(config.base_url.rstrip("/") + "/api/tags",
-                    headers={"Authorization": "Bearer " + key} if key else {}, timeout=2)
-                response.raise_for_status()
-                return {item["name"] for item in response.json()["models"]}
-            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                return await self.ollama_service.models(self.http, config)
+            except (httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError):
                 return set()
 
         results = await asyncio.gather(*(available(endpoint) for endpoint in endpoints))
@@ -550,9 +572,7 @@ class WorkspaceRuntime:
             for identity in identities:
                 if self.runners.get(identity) is not runners[identity]:
                     continue
-                model = active[identity]["model"]
-                tagged = model if ":" in model.rsplit("/", 1)[-1] else model + ":latest"
-                running = model in models or tagged in models
+                running = model_installed(active[identity]["model"], models)
                 availability[identity] = running
                 if self._ollama_availability.get(identity) != running:
                     if await self.publish_profile(active[identity], running=running):
@@ -654,10 +674,7 @@ class WorkspaceRuntime:
             raise RuntimeError("Could not reach the relay. Your request was not replayed.") from None
 
     async def ollama_models(self, base_url="http://127.0.0.1:11434"):
-        ProviderConfig("ollama", "validation", base_url)
-        response = await self.http.get(base_url.rstrip("/") + "/api/tags", timeout=5)
-        response.raise_for_status()
-        return [item["name"] for item in response.json()["models"]]
+        return await self.provider_models("ollama", base_url)
 
     async def cookbook_refresh(self, repo, artifact_repo=None, base=None):
         """Read one model's details from the model catalogue, on request.
@@ -733,7 +750,9 @@ class WorkspaceRuntime:
             if profile and profile["provider"] == provider and (profile.get("base_url") or PROVIDERS[provider].base_url) == base_url:
                 key = self.storage.vault.get("provider:" + agent_id)
         config = ProviderConfig(provider, "discovery", base_url, api_key=key, allow_insecure=allow_insecure)
-        path = "/api/tags" if provider == "ollama" else "/models"
+        if provider == "ollama":
+            return await self.ollama_service.models(self.http, config)
+        path = "/models"
         headers = {"Authorization": "Bearer " + key} if key else {}
         params = {}
         if provider in ("anthropic", "gemini") and not key:
@@ -751,9 +770,7 @@ class WorkspaceRuntime:
                     headers=headers, params=params, timeout=8, follow_redirects=False)
                 response.raise_for_status()
                 payload = response.json()
-                if provider == "ollama":
-                    models.extend(item["name"] for item in payload["models"])
-                elif provider == "gemini":
+                if provider == "gemini":
                     models.extend(item["name"].removeprefix("models/") for item in payload.get("models", [])
                                   if "generateContent" in item.get("supportedGenerationMethods", []))
                 else:
@@ -876,3 +893,5 @@ class WorkspaceRuntime:
             await self.http.aclose()
         if self.direct_http:
             await self.direct_http.aclose()
+        if self.owns_ollama_service:
+            await self.ollama_service.close()

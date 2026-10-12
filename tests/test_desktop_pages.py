@@ -69,9 +69,12 @@ def storage(tmp_path):
 
 
 @pytest.fixture
-def window(qt_app, storage):
+def window(qt_app, storage, monkeypatch):
     """A real MainWindow, torn down after the test."""
     instance = win.MainWindow(storage)
+    def unavailable(address):
+        raise RuntimeError("Ollama startup is mocked in UI tests")
+    monkeypatch.setattr(instance.network.runtime.ollama_service, "_start", unavailable)
     yield instance
     instance.network.shutdown()
     instance.network.wait(10000)
@@ -2678,6 +2681,19 @@ def test_ollama_catalog_failure_removes_stale_models_and_a_restart_restores_choi
     callbacks["success"](["returned-model"])
     assert window.model_id.currentText() == "returned-model"
     assert window.model_error_line.message.text() == ""
+
+
+def test_imported_ollama_row_reports_unavailability_and_automatic_reconnection(window) -> None:
+    window.agents = [{"id": "saved-model", "provider": "ollama", "model": "chat",
+                      "local": True, "online": False}]
+    window.render_imported_models()
+    card = window.imported_model_rows.itemAt(0).widget()
+    assert any("Unavailable" in child.text() and "Reconnects automatically" in child.text()
+               for child in card.findChildren(QLabel))
+    window.agents[0]["online"] = True
+    window.render_imported_models()
+    card = window.imported_model_rows.itemAt(0).widget()
+    assert any(child.text() == "Online" for child in card.findChildren(QLabel))
 
 
 def test_attachment_failure_returns_to_its_chat_and_preserves_the_draft(window) -> None:

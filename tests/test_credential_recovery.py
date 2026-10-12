@@ -13,6 +13,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from desktop_app.workspace_runtime import WorkspaceRuntime
 from desktop_app.storage import ABSENT, REMOVED, UNAVAILABLE, Storage
@@ -169,6 +170,10 @@ class LostCredentialTests(unittest.IsolatedAsyncioTestCase):
 class ResetIdentityTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.events = []
+        # Identity recovery must never start an installed model server on the test device.
+        models = patch("desktop_app.ollama_service.OllamaService.models", return_value=[])
+        models.start()
+        self.addCleanup(models.stop)
 
     def emit(self, kind, data):
         self.events.append((kind, data))
