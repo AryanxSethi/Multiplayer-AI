@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -30,6 +31,12 @@ from tests.test_desktop_runtime import MemoryVault
 
 
 class OrchestrationUITests(unittest.TestCase):
+    def setUp(self):
+        startup = patch("desktop_app.ollama_service.OllamaService._start",
+                        side_effect=RuntimeError("Ollama startup is mocked in UI tests"))
+        startup.start()
+        self.addCleanup(startup.stop)
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])

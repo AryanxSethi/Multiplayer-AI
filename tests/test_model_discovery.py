@@ -1,10 +1,12 @@
 """Provider model discovery uses each API's authentication and pagination."""
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import httpx
 
 from desktop_app.workspace_runtime import WorkspaceRuntime
+from desktop_app.ollama_service import OllamaService
 from tests.test_desktop_runtime import MemoryVault
 
 
@@ -14,6 +16,8 @@ class ModelDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         runtime.remote = False
         runtime.storage = SimpleNamespace(settings={"agents": list(profiles)}, vault=MemoryVault())
         runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        runtime.ollama_service = OllamaService()
+        runtime.ollama_service._start = Mock(side_effect=RuntimeError("Mock Ollama is unavailable"))
         self.addAsyncCleanup(runtime.http.aclose)
         return runtime
 

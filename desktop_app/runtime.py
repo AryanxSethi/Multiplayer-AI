@@ -12,6 +12,7 @@ from network_a2a.persistence import HistoryStore
 from .storage import (LOCAL_WORKSPACE, UNAVAILABLE, WORKSPACE_ID, Storage, WorkspaceVault,
                       write_json_durably)
 from .workspace_runtime import WorkspaceRuntime, relay_http_url
+from .ollama_service import OllamaService
 from network_a2a.content import content_summary
 
 
@@ -52,6 +53,7 @@ class DesktopRuntime:
         self.ready = False
         self.closed = False
         self.mutation = asyncio.Lock()
+        self.ollama_service = OllamaService()
 
     @property
     def engine(self):
@@ -199,7 +201,8 @@ class DesktopRuntime:
         scoped.settings["workspace_name"] = entry["name"]
         scoped.settings["workspace_id"] = entry["id"]
         scoped.save()
-        engine = WorkspaceRuntime(scoped, lambda event, data: self.forward(entry["id"], event, data), restore_remote=entry["kind"] == "remote")
+        engine = WorkspaceRuntime(scoped, lambda event, data: self.forward(entry["id"], event, data),
+                                  restore_remote=entry["kind"] == "remote", ollama_service=self.ollama_service)
         self.engines[entry["id"]] = engine
         try:
             await engine.start()
@@ -783,4 +786,7 @@ class DesktopRuntime:
             return
         self.closed = True
         self.ready = False
-        await asyncio.gather(*(engine.close() for engine in self.engines.values()))
+        try:
+            await asyncio.gather(*(engine.close() for engine in self.engines.values()))
+        finally:
+            await self.ollama_service.close()

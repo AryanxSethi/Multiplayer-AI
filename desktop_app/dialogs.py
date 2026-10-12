@@ -195,7 +195,9 @@ class AgentDialog(QDialog):
                 elif not models:
                     self.model.clearEditText()
                 if not models:
-                    self.error.setText("No models found. Pull a model in Ollama or enter your provider's model ID.")
+                    self.error.setText("No models found. Install a model in Ollama, then refresh the list."
+                                       if self.provider.currentData() == "ollama" else
+                                       "No models found. Enter your provider's model ID.")
         def fail(message):
             if self.isVisible():
                 self.models_button.setEnabled(True)
@@ -205,7 +207,9 @@ class AgentDialog(QDialog):
                     self.model.clearEditText()
                 else:
                     self.model.setCurrentText(selected)
-                self.error.setText("Could not list models. Check the API root and key, or enter the model ID directly.")
+                self.error.setText("Could not list models. Check the Ollama installation and API root."
+                                   if self.provider.currentData() == "ollama" else
+                                   "Could not list models. Check the API root and key, or enter the model ID directly.")
         self.window.command("provider_models", self.provider.currentData(), self.base.text().strip(),
                             self.key.text() or None, self.insecure.isChecked(),
                             self.profile["id"] if self.profile else None, success=success, failure=fail)

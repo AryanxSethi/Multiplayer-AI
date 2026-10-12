@@ -1420,6 +1420,12 @@ class MainWindow(QMainWindow):
             copy.addWidget(label(agent["id"], "heading"))
             copy.addWidget(label(f"{agent.get('provider') or 'Model'} · {agent.get('model') or 'Configured model'}", "muted", True))
             copy.addWidget(label(self.model_purpose_summary(agent), "muted", True))
+            if agent["online"]:
+                copy.addWidget(label("Online", "online"))
+            elif agent.get("provider") == "ollama" and agent.get("local"):
+                copy.addWidget(label("Unavailable · Reconnects automatically when Ollama and the model are ready.", "muted", True))
+            else:
+                copy.addWidget(label("Offline", "muted"))
             profile = agent.get("profile", {})
             search = profile.get("web_search", "off")
             if profile:
@@ -2923,7 +2929,9 @@ class MainWindow(QMainWindow):
             self.model_catalog_status.setText(f"{len(models)} models available · Select a model from the dropdown.")
             if not models:
                 self.model_catalog_status.setText("No models available from this endpoint.")
-                self._model_catalog_error = "No models found. Pull a model in Ollama or enter your provider's model ID directly."
+                self._model_catalog_error = ("No models found. Install a model in Ollama, then refresh the list."
+                                             if self.model_provider.currentData() == "ollama" else
+                                             "No models found. Enter your provider's model ID directly.")
                 self.set_card_message(self.model_error_line, self._model_catalog_error)
 
         def failure(message):
@@ -2937,12 +2945,12 @@ class MainWindow(QMainWindow):
             else:
                 self.model_id.setCurrentText(selected)
             ollama = self.model_provider.currentData() == "ollama"
-            self.model_catalog_status.setText("Ollama is unavailable. Start Ollama to load models." if ollama else
+            self.model_catalog_status.setText("Ollama is unavailable. Check its installation and API root." if ollama else
                                              "Model discovery failed. You can still enter a model ID directly.")
             if automatic and self.stack.currentIndex() != AGENTS_PAGE:
                 return
             self._model_catalog_error = "Could not list models. " + message + (
-                " Start Ollama and check the API root." if ollama else
+                " Check the Ollama installation and API root. Local Ollama starts automatically when available." if ollama else
                 " Check the API root and key, or enter the model ID directly.")
             self.set_card_message(self.model_error_line, self._model_catalog_error)
 
