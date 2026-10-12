@@ -1034,6 +1034,170 @@ def test_a_device_that_really_is_too_small_is_told_so_with_the_figures(window) -
         f"widening the filter is offered for a device limit: {buttons}")
 
 
+def test_a_page_with_a_withdrawn_model_actually_draws(window) -> None:
+    """Withdrawn models are still listed, and the list has to survive them.
+
+    The section header binds ``_card()``'s return -- a ``(frame, layout)`` pair
+    -- to a single name and then adds to it, so any page with a withdrawn model
+    on it raised AttributeError and drew no cards at all. Latent while the
+    bundled catalogue holds no withdrawn models, and live as soon as a refresh
+    brings one back.
+    """
+    from dataclasses import replace
+
+    panel = panel_of(window)
+    window.show()
+    settle()
+    base = panel.catalog[0]
+    withdrawn = replace(base, deprecated=True,
+                        deprecated_reason="superseded by a newer release")
+    panel.catalog = [withdrawn] + [m for m in panel.catalog
+                                   if m.repo != base.repo]
+    panel.render_models()
+    settle()
+
+    said = " ".join(text.text() for text in panel.findChildren(QLabel))
+    assert "Withdrawn by their publishers" in said, (
+        f"the withdrawn section is not on the page: {said[-220:]!r}")
+    assert withdrawn.display in said, (
+        "the withdrawn model is not on the page")
+
+
+def test_the_empty_state_refresh_asks_before_it_reaches_the_network(
+        window, monkeypatch) -> None:
+    """Every button that leaves the machine goes through the disclosure.
+
+    The empty card offered a "Refresh from <host>" of its own, and it was wired
+    straight to ``do_refresh`` -- the method the disclosure exists to sit in
+    front of. So a reader who filtered to a list with nothing in it could
+    trigger a dozen requests to a host they had never been told about, and
+    never be asked. The main button above it asked every time.
+
+    Put into the "This device's memory could not be read" state, which is one of
+    the three that offer the button and needs no catalogue surgery to reach.
+    """
+    from desktop_app.cookbook import Hardware
+    from desktop_app.dialogs import RefreshDisclosure
+
+    panel = panel_of(window)
+    window.show()
+    settle()
+    panel.hardware = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=4,
+        memory_total=0, memory_available=0, disk_free=100 * 1024 ** 3,
+        vram=None, unified_memory=False, sources={})
+    panel.render_models()
+    settle()
+
+    said = " ".join(text.text() for text in panel.findChildren(QLabel))
+    assert "memory could not be read" in said, (
+        f"the panel is not in the empty state this needs: {said[-200:]!r}")
+
+    pending = []
+    window.command = lambda name, *args, **kwargs: pending.append(kwargs)
+
+    # The card, not the panel: the footer has its own Refresh button, wired the
+    # right way, and finding that would make this pass for the wrong reason.
+    card = next((panel.results.itemAt(i).widget()
+                 for i in range(panel.results.count())
+                 if panel.results.itemAt(i) is not None
+                 and panel.results.itemAt(i).widget() is not None), None)
+    assert card is not None, "the empty state drew no card"
+    button = next(b for b in card.findChildren(QPushButton)
+                  if "Refresh from" in b.text())
+
+    # What had been sent by the time the dialog opened. That is the question:
+    # a control that asks afterwards has already asked the question.
+    on_open = []
+    monkeypatch.setattr(
+        RefreshDisclosure, "exec",
+        lambda self: (on_open.append((list(pending), self.host)),
+                      QDialog.DialogCode.Accepted)[1])
+
+    button.click()
+
+    assert len(on_open) == 1, "the empty state's refresh button did not ask"
+    sent, host = on_open[0]
+    assert not sent, (
+        f"{len(sent)} requests had gone out before it asked: "
+        f"{[c['repo'] for c in sent][:4]}")
+    assert host == "https://huggingface.co", (
+        f"the disclosure named the wrong host: {host!r}")
+
+
+def test_the_empty_state_refresh_respects_a_refusal(window, monkeypatch) -> None:
+    """Saying no means no requests, from this button as well as the main one."""
+    from desktop_app.cookbook import Hardware
+    from desktop_app.dialogs import RefreshDisclosure
+
+    panel = panel_of(window)
+    window.show()
+    settle()
+    panel.hardware = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=4,
+        memory_total=0, memory_available=0, disk_free=100 * 1024 ** 3,
+        vram=None, unified_memory=False, sources={})
+    panel.render_models()
+    settle()
+
+    monkeypatch.setattr(
+        RefreshDisclosure, "exec", lambda self: QDialog.DialogCode.Rejected)
+    pending = []
+    window.command = lambda name, *args, **kwargs: pending.append(kwargs)
+
+    card = next((panel.results.itemAt(i).widget()
+                 for i in range(panel.results.count())
+                 if panel.results.itemAt(i) is not None
+                 and panel.results.itemAt(i).widget() is not None), None)
+    assert card is not None, "the empty state drew no card"
+    next(b for b in card.findChildren(QPushButton)
+         if "Refresh from" in b.text()).click()
+    settle()
+
+    assert not pending, "refusing the disclosure still sent requests"
+
+
+def test_a_missing_catalogue_offers_no_refresh_button(window) -> None:
+    """With nothing to refresh, a button labelled Refresh is a lie.
+
+    Routed through ``ask_to_refresh``, which returns at once when the
+    catalogue is empty, the button would have done nothing at all -- and a
+    control that always works is worse than one that does not. The card says
+    what is wrong and the footer offers Restore previous catalogue, which is
+    the thing that can help.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    panel.catalog = []
+    panel.render_models()
+    settle()
+
+    said = " ".join(text.text() for text in panel.findChildren(QLabel))
+    assert "No models are available" in said, (
+        f"the panel is not in the no-catalogue state: {said[-200:]!r}")
+
+    # The card, not the panel. The footer's own Refresh button stays: it is the
+    # control that asks, and it is correct for it to exist whether or not the
+    # list has anything in it. It is the *card* that must not offer a refresh
+    # it cannot carry out.
+    card = next((panel.results.itemAt(i).widget()
+                 for i in range(panel.results.count())
+                 if panel.results.itemAt(i) is not None
+                 and panel.results.itemAt(i).widget() is not None), None)
+    assert card is not None, "the empty state drew no card"
+    offered = [b.text() for b in card.findChildren(QPushButton)
+               if "Refresh from" in b.text()]
+    assert not offered, (
+        f"there is nothing to refresh, but the card offers {offered}")
+
+    # And what the page does offer instead is the thing that can help.
+    restore = [b.text() for b in panel.findChildren(QPushButton)
+               if "Restore previous" in b.text()]
+    assert restore, (
+        "the card stopped offering a refresh and offers no way back either")
+
+
 def test_pressing_refresh_asks_before_it_reaches_the_network(window, monkeypatch) -> None:
     """The disclosure is asked for at the moment of the action, not found earlier.
 
@@ -1737,6 +1901,9 @@ def test_choosing_a_build_waits_for_the_click_and_leaves_the_page_alone(
     card = toggles[0].parent()
     repo = next(row["model"].repo
                 for row in recommend(panel.catalog, panel.hardware))
+    # Read before the click: the row is expected to survive it, and if it does
+    # not we want a plain assertion saying so rather than a dead widget.
+    wanted = rows[0].property("buildVariant")
 
     rows[0].click()
     # Still inside the click's own call stack: nothing has been touched yet.
@@ -1750,8 +1917,14 @@ def test_choosing_a_build_waits_for_the_click_and_leaves_the_page_alone(
         "the card holding the pressed row became a window mid-click")
     settle()
 
-    assert panel._cards.get(repo) is not card, (
-        "the card was never replaced, so the choice did not take")
+    # And it is the same card afterwards, because the card does not change --
+    # only the three lines of it that follow the build. Replacing it would
+    # repaint all thirty-five labels to move three of them.
+    assert panel._cards.get(repo) is card, (
+        "the card was replaced, so the whole thing repaints")
+    assert panel._chosen.get(repo) == wanted, (
+        "the card still points at the build it was showing, so the choice did "
+        f"not take: {panel._chosen}")
     assert bar.value() == where, (
         f"choosing a build moved the page from {where} to {bar.value()}; the "
         "reader has to scroll back down to try the next one")
@@ -1850,7 +2023,7 @@ def test_the_empty_page_is_not_wider_than_a_scrolling_one(window) -> None:
         "page before keeping it")
 
 
-def test_choosing_a_build_replaces_one_card_not_the_page(window) -> None:
+def test_choosing_a_build_changes_one_card_not_the_page(window) -> None:
     """Choosing a build must not empty the list and refill it.
 
     Rebuilding the page destroys every card before building any, so the list
@@ -1874,7 +2047,7 @@ def test_choosing_a_build_replaces_one_card_not_the_page(window) -> None:
     repo = next(row["model"].repo
                 for row in recommend(panel.catalog, panel.hardware))
     assert panel._cards.get(repo) is card, (
-        "the panel is not tracking the card it drew, so it cannot replace it")
+        "the panel is not tracking the card it drew, so it cannot change it")
 
     rows = [row for row in build_rows_of(card) if not row.isChecked()]
     assert rows, "no build is offered as a choice"
@@ -1891,11 +2064,184 @@ def test_choosing_a_build_replaces_one_card_not_the_page(window) -> None:
     assert not calls, (
         "choosing a build rebuilt the whole page, which empties the list before "
         "refilling it and destroys the card the pointer is resting on")
-    replaced = panel._cards.get(repo)
-    assert replaced is not None and replaced is not card, (
-        "the card was not replaced at all")
-    assert panel.results.indexOf(replaced) >= 0, (
-        "the replacement card is not in the list")
+    kept = panel._cards.get(repo)
+    assert kept is not None and kept is card, (
+        "the card was replaced, so every label on it is a new widget and the "
+        "whole thing repaints to show a change in three lines of text")
+    assert panel.results.indexOf(kept) >= 0, "the card is not in the list"
+
+
+def test_choosing_a_build_never_draws_two_different_cards(window) -> None:
+    """The card flickered because it was drawn twice, showing two choices.
+
+    A checkable button toggles itself as part of the click, before the handler
+    that rebuilds the card gets to run. With the rows merely checkable, clicking
+    a new build checked it while the one it replaced was *still* checked, and a
+    turn later the card was redrawn with only the new one chosen. Two pictures
+    of one card, milliseconds apart -- and only that card, because nothing else
+    on the page was touched.
+
+    Exclusive rows settle it in one step: the click unchecks the old row and
+    checks the new one together, so what the button draws is already what the
+    card is about to say.
+
+    Checked by comparing the card as it stands immediately after the click
+    against the card once it has settled, which is the comparison the flicker
+    was.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    def card_with_rows():
+        # Re-fetched every time: choosing a build may fall back to replacing the
+        # card, and a reference held across a click would be a deleted widget.
+        for card in cards_on_page(panel):
+            if build_rows_of(card):
+                return card
+        return None
+
+    card = card_with_rows()
+    assert card, "no card shows a build table"
+    next(b for b in card.findChildren(QPushButton)
+         if b.property("buildRow") is None).click()
+    settle()
+
+    def chosen(wanted):
+        return [row.property("buildVariant") for row in build_rows_of(wanted)
+                if row.isChecked()]
+
+    for target in ("Q2_K", "Q8_0", "Q4_K_M"):
+        card = card_with_rows()
+        row = next((r for r in build_rows_of(card)
+                    if r.property("buildVariant") == target), None)
+        if row is None:
+            continue
+        row.click()
+        during = chosen(card)       # inside the click, before the card settles
+        settle()
+        assert during == chosen(card_with_rows()), (
+            f"picking {target} drew {during} and then drew {chosen(card_with_rows())}"
+            ", so the card was painted twice showing two different choices")
+        assert during == [target], f"{during} is drawn after picking {target}"
+
+
+def test_only_the_labels_that_changed_are_touched(window) -> None:
+    """Three labels of thirty-five, and the other thirty-two are the same objects.
+
+    The card used to be destroyed and rebuilt for a choice that alters three
+    lines of it, so every label was a new widget and the whole card repainted.
+    Measured on this catalogue: the figures line, the reason and the command
+    change; the badge joins them when the verdict moves; the title, "Run it",
+    the provenance, the disclaimer and all eight build rows do not.
+
+    Checked by identity as well as by text, because identical text in a
+    rebuilt card is not what the reader was spared.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    def card_with_rows():
+        for card in cards_on_page(panel):
+            if build_rows_of(card):
+                return card
+        return None
+
+    card = card_with_rows()
+    assert card, "no card shows a build table"
+    next(b for b in card.findChildren(QPushButton)
+         if b.property("buildRow") is None).click()
+    settle()
+
+    def snapshot(wanted):
+        return [(l, l.objectName(), l.text())
+                for l in wanted.findChildren(QLabel)]
+
+    # Two builds of different sizes, so the figures really do move.
+    targets = [r.property("buildVariant") for r in build_rows_of(card)]
+    first, second = targets[0], targets[-1]
+
+    card = card_with_rows()
+    before = snapshot(card)
+    next(r for r in build_rows_of(card)
+         if r.property("buildVariant") == first).click()
+    settle()
+    card = card_with_rows()
+    assert snapshot(card)[0][0] is before[0][0], "the card itself was replaced"
+
+    settled = snapshot(card)
+    next(r for r in build_rows_of(card)
+         if r.property("buildVariant") == second).click()
+    settle()
+    after = snapshot(card_with_rows())
+
+    assert [a[0] for a in settled] == [a[0] for a in after], (
+        "the labels were replaced rather than re-set, so the card repainted "
+        "in full")
+    changed = [i for i in range(len(settled))
+               if settled[i][1:] != after[i][1:]]
+    assert len(changed) <= 4, (
+        f"{len(changed)} of {len(settled)} labels changed for a change of "
+        f"build; only the figures, reason and command should: "
+        f"{[settled[i][1] or '(reason)' for i in changed]}")
+    assert changed, "nothing changed at all, so this proves nothing"
+
+
+def test_the_card_border_moves_only_when_the_verdict_does(window) -> None:
+    """The border colour is the card's object name, and it is not cheap.
+
+    Changing it re-polishes the card, which repaints all of it -- so it is only
+    worth doing when the reader's assessment has genuinely moved. Two builds in
+    the same verdict class must leave it alone; one in a different class must
+    change it, because that is a real difference the reader needs to see.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    def card_with_rows():
+        for card in cards_on_page(panel):
+            if build_rows_of(card):
+                return card
+        return None
+
+    card = card_with_rows()
+    assert card, "no card shows a build table"
+    repo = next(row["model"].repo for row in recommend(panel.catalog, panel.hardware))
+    next(b for b in card.findChildren(QPushButton)
+         if b.property("buildRow") is None).click()
+    settle()
+
+    entries = {entry["variant"].quantization: entry["verdict"]["result"]
+               for row in recommend(panel.catalog, panel.hardware)
+               if row["model"].repo == repo
+               for entry in row["builds"]}
+    same = next((q for q, v in entries.items()
+                 if v == entries[[k for k in entries][0]]), None)
+    other = next((q for q, v in entries.items() if v != entries[same]), None)
+    assert same and other, (
+        f"this catalogue cannot move the verdict, so it proves nothing: "
+        f"{entries}")
+
+    def choose(name):
+        card = card_with_rows()
+        next(r for r in build_rows_of(card)
+             if r.property("buildVariant") == name).click()
+        settle()
+        return card_with_rows()
+
+    first = choose(same)
+    name_before = first.objectName()
+    second = choose(other)
+    assert second.objectName() != name_before, (
+        f"the verdict moved to {entries[other]} but the card border stayed "
+        f"{name_before}")
+
+    back = choose(same)
+    assert back.objectName() == name_before, (
+        f"moving back to {entries[same]} left the border at "
+        f"{back.objectName()}")
 
 
 class _ShowSpy:
@@ -1986,7 +2332,13 @@ def test_a_rebuild_never_shows_a_widget_that_has_no_parent(window) -> None:
 
 
 def test_a_rebuild_after_choosing_a_build_shows_no_window(window) -> None:
-    """The same, on the path that replaces one card rather than the page."""
+    """The build path builds nothing now, so this can only ever be empty.
+
+    Kept as a cheap standing check that choosing a build has not quietly gone
+    back to constructing a card: the card is updated in place, so no widget on
+    it is ever parentless. If the optimisation is undone, this catches it
+    alongside the card-identity test rather than on its own.
+    """
     panel = panel_of(window)
     window.show()
     settle()
@@ -1996,6 +2348,7 @@ def test_a_rebuild_after_choosing_a_build_shows_no_window(window) -> None:
     settle()
 
     card = toggles[0].parent()
+    repo = next(row["model"].repo for row in recommend(panel.catalog, panel.hardware))
     rows = [row for row in build_rows_of(card) if not row.isChecked()]
     assert rows, "no build is offered as a choice"
 
@@ -2003,8 +2356,10 @@ def test_a_rebuild_after_choosing_a_build_shows_no_window(window) -> None:
         rows[0].click()
         settle()
     assert spy.hits == [], (
-        "choosing a build showed these widgets while they had no parent: "
-        f"{spy.hits}")
+        "choosing a build built widgets that had no parent, so it is not "
+        f"updating the card after all: {spy.hits}")
+    assert panel._cards.get(repo) is card, (
+        "the card was replaced, so the in-place update did not happen")
 
 
 def test_a_change_of_filter_shows_no_window(window) -> None:

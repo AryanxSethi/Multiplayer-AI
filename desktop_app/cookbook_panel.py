@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
 
 from .cookbook import (EXPLANATIONS, FITTING, LIKELY, NOT_ENOUGH_PUBLISHED,
-                       NO_CATALOGUE, POSSIBLE, PREVIOUS_NAME, VERIFIED,
+                       POSSIBLE, PREVIOUS_NAME, VERIFIED,
                        CatalogError, TASKS, describe_changes, detect_hardware,
                        empty_reason, human_bytes, kv_cache_bytes, load_cache,
                        load_catalog, ollama_commands, parse_model, recommend,
@@ -176,8 +176,16 @@ class CookbookPanel(QWidget):
         # is used is a table people stop trusting.
         self._open = set()
         # The model card currently on screen for each repository, so choosing a
-        # build can replace that one card instead of rebuilding the page.
+        # build can change that one card instead of rebuilding the page.
         self._cards = {}
+        # The parts of each card that change when the reader picks a different
+        # build, by repository. The card itself does not change: of its 35
+        # labels, three do -- the figures, the reason and the command -- and
+        # the badge joins them when the verdict moves. The rest, the title and
+        # all eight build rows among them, say the same thing whichever build
+        # is being shown, and rebuilding the card to redraw three lines meant
+        # repainting thirty-two that had not moved.
+        self._parts = {}
         # Where a cached catalogue lives, and the host a refresh reads from.
         # Both are per workspace: two workspaces can be looking at different
         # catalogues, and a shared cache would have them overwrite each other.
@@ -588,6 +596,10 @@ class CookbookPanel(QWidget):
 
         withdrawn_header_drawn = False
         self._cards = {}
+        # With them, so parts never outlive the cards they describe -- a
+        # deleted card holding a live label would leave _update_card writing
+        # into something no longer on the page.
+        self._parts = {}
         for kind, entry in window:
             if kind == "model":
                 card = self._model_card(entry)
@@ -600,12 +612,16 @@ class CookbookPanel(QWidget):
                     # Only separated from the recommended models when it is not
                     # already the top of the page.
                     self.results.addSpacing(6)
-                column = self._card()
+                # Unpacked, because _card returns the frame and its layout and
+                # this used to bind the pair to one name and add to the tuple.
+                # Any page with a withdrawn model on it raised
+                # AttributeError and drew nothing at all.
+                header, column = self._card()
                 column.addWidget(label("Withdrawn by their publishers", "heading"))
                 column.addWidget(label(
                     "Still listed so you can tell what happened to one you have. "
                     "They are not recommended for download.", "muted", True))
-                self.results.addWidget(column)
+                self.results.addWidget(header)
             self.results.addWidget(self._withdrawn_card(entry))
 
         if window:
@@ -673,10 +689,23 @@ class CookbookPanel(QWidget):
             column.addSpacing(4)
             column.addWidget(action("Show every model", self.show_everything,
                                     name="ghost"))
-        elif reason.kind in (NO_CATALOGUE, NOT_ENOUGH_PUBLISHED):
+        elif reason.kind == NOT_ENOUGH_PUBLISHED:
             column.addSpacing(4)
+            # ask_to_refresh, not do_refresh. Every button on this page that
+            # leaves the machine goes through the disclosure, and this one did
+            # not: it was wired straight to the method the disclosure exists to
+            # sit in front of. A reader who filtered to an empty list could
+            # therefore trigger a dozen requests to a host they had never been
+            # told about, without being asked.
+            #
+            # No catalogue means no button, rather than one routed through the
+            # gate -- ask_to_refresh returns at once when there is nothing to
+            # refresh, and a control that always works is worse than one that
+            # does not. The card already says what is wrong, and the footer
+            # already offers Restore previous catalogue, which is the thing
+            # that can actually help when the catalogue is missing.
             column.addWidget(action(
-                f"Refresh from {self.host_name()}", self.do_refresh,
+                f"Refresh from {self.host_name()}", self.ask_to_refresh,
                 name="ghost"))
         self.results.addWidget(card)
 
@@ -761,31 +790,32 @@ class CookbookPanel(QWidget):
     def _rebuild_at(self, where, repo):
         """The deferred half of choose_build: swap one card, keep the reader put.
 
-        Built and inserted *before* the old card is destroyed. Rebuilding the
-        page empties it first, so the list collapses to nothing and refills on
-        every click, rather than one card changing under the pointer.
+        Built and inserted *before* the old card is destroyed, for the fallback
+        path only. The usual path updates the card in place and destroys
+        nothing.
 
-        Falls back to a full rebuild for anything it cannot place, so a card
-        that is not where it was thought to be costs a redraw rather than a
-        page with a hole in it.
-
-        Painting is suppressed for the whole swap. Hiding the old card marks the
-        region it occupied as needing a repaint, and the replacement does not
-        paint into it until the loop next runs -- a gap in which that part of the
-        page has nothing to show. Qt coalesces the two updates into one frame
-        often enough that it is invisible; when it does not, the chosen card
-        flashes while every other card stays exactly where it was. Turning
-        updates off for the duration makes the gap impossible rather than
-        unlikely.
+        Falls back to a full rebuild for anything it cannot place or update, so
+        a card that is not where it was thought to be costs a redraw rather
+        than a page describing the wrong build.
         """
-        with self._still():
-            self._swap_card(repo)
-            bar = self.scroller.verticalScrollBar()
-            if where:
-                bar.setValue(where)
+        # No painting guard here any more. It existed because the swap hid the
+        # old card and left a gap before the replacement painted into it, and
+        # the card is no longer replaced: nothing is hidden, nothing is built,
+        # and four labels are re-set. render_page still tears the page down, so
+        # it keeps its own.
+        self._swap_card(repo)
+        bar = self.scroller.verticalScrollBar()
+        if where:
+            bar.setValue(where)
 
     def _swap_card(self, repo):
-        """Put a freshly built card where the old one for this model was."""
+        """Point this card at a different build, or rebuild it if we cannot.
+
+        The update is the whole point: the card and every label on it stay put,
+        and only the four that move are re-set. Rebuilding is the fallback for a
+        card whose parts are missing or whose place in the layout we cannot
+        find -- better a fresh card than one left describing the wrong build.
+        """
         old = self._cards.get(repo)
         index = self.results.indexOf(old) if old is not None else -1
         entry = next((item for kind, item in self.page_entries()
@@ -793,11 +823,11 @@ class CookbookPanel(QWidget):
         if old is None or index < 0 or entry is None:
             self.render_page()
             return
+        if self._update_card(repo, entry):
+            return
         fresh = self._model_card(entry)
         self.results.insertWidget(index, fresh)
         self._cards[repo] = fresh
-        # Only now, with the replacement sitting in the layout where the old one
-        # was.
         old.hide()
         old.deleteLater()
 
@@ -1015,6 +1045,7 @@ class CookbookPanel(QWidget):
         variant = (entry or {}).get("variant", row["variant"])
         verdict = (entry or {}).get("verdict", row["verdict"])
         card, column = self._card(CARD[verdict["result"]])
+        parts = {"verdict": verdict["result"]}
 
         # Group one: what this is.
         column.addWidget(label(model.display, "heading", True))
@@ -1024,15 +1055,8 @@ class CookbookPanel(QWidget):
         # characters of prose competing with the model's name for attention.
         # The card's own left border carries the signal now; this says which.
         badge = label(verdict["result"], TONE.get(verdict["result"], "muted"))
-        gloss = EXPLANATIONS.get(verdict["result"])
-        if gloss:
-            # Written out in EXPLANATIONS and never rendered until now: the
-            # verdict is an internal phrase, and a reader who cannot see the
-            # colour has nothing to go on.
-            badge.setToolTip(gloss)
-            badge.setAccessibleName(f"{verdict['result']}: {gloss}")
-        else:
-            badge.setAccessibleName(f"Assessment: {verdict['result']}")
+        parts["badge"] = badge
+        self._style_badge(badge, verdict["result"])
         column.addWidget(badge)
 
         # Group two: what it costs here.
@@ -1041,12 +1065,14 @@ class CookbookPanel(QWidget):
                  f"· {variant.quantization} · {model.license or 'licence unstated'}")
         # #meta rather than #muted: these are the figures the card exists to
         # give, and they were the same grey as the disclaimer.
-        column.addWidget(label(facts, "meta", True))
+        parts["facts"] = label(facts, "meta", True)
+        column.addWidget(parts["facts"])
         # And the reason is body text, because it is the sentence the reader
         # came for. It was muted, which is the style every quiet line on the
         # card also used.
         reason = label(verdict["reason"], None, True)
         reason.setWordWrap(True)
+        parts["reason"] = reason
         column.addWidget(reason)
 
         longer = self._longer_context_warning(model)
@@ -1073,6 +1099,7 @@ class CookbookPanel(QWidget):
             block.setAccessibleName(
                 f"{len(commands)} commands to run this model. Selectable, so "
                 "it can be copied rather than typed.")
+            parts["commands"] = block
             column.addWidget(block)
 
         # Group four: where these numbers came from. Both lines in #footer, at a
@@ -1094,7 +1121,67 @@ class CookbookPanel(QWidget):
             "footer", True)
         disclaimer.setWordWrap(True)
         column.addWidget(disclaimer)
+        self._parts[model.repo] = parts
         return card
+
+    def _style_badge(self, badge, result):
+        """Say what the verdict is, in words as well as colour.
+
+        Written out in EXPLANATIONS and never rendered until the badges were
+        given one: the verdict is an internal phrase, and a reader who cannot
+        see the colour has nothing to go on.
+        """
+        badge.setObjectName(TONE.get(result, "muted"))
+        badge.setStyleSheet("")
+        gloss = EXPLANATIONS.get(result)
+        if gloss:
+            badge.setToolTip(gloss)
+            badge.setAccessibleName(f"{result}: {gloss}")
+        else:
+            badge.setToolTip("")
+            badge.setAccessibleName(f"Assessment: {result}")
+
+    def _update_card(self, repo, row):
+        """Change which build this card is describing, without rebuilding it.
+
+        Everything on a card is worked out per build, and _model_card drew the
+        one being shown. Only four things move when the reader picks another:
+        the figures, the reason, the command, and the badge when the verdict
+        itself changes. Rebuilding the card to move them repainted thirty-two
+        labels that had not changed, which is the whole of what the reader saw
+        as a flash.
+
+        The card's border colour is left alone unless the verdict moved. The
+        object name is what the stylesheet keys the border off, and changing it
+        re-polishes the card -- so it is only worth doing when there is
+        genuinely a new verdict to show.
+        """
+        card = self._cards.get(repo)
+        parts = self._parts.get(repo)
+        if card is None or parts is None:
+            return False
+
+        model = row["model"]
+        entry = self._chosen_entry(row)
+        variant = (entry or {}).get("variant", row["variant"])
+        verdict = (entry or {}).get("verdict", row["verdict"])
+
+        parts["facts"].setText(
+            f"{model.size_class} · {human_bytes(variant.size)} download · "
+            f"{variant.quantization} · "
+            f"{model.license or 'licence unstated'}")
+        parts["reason"].setText(verdict["reason"])
+        commands = ollama_commands(model, variant)
+        if commands:
+            parts["commands"].setText(
+                "\n".join(item["command"] for item in commands))
+
+        if verdict["result"] != parts.get("verdict"):
+            self._style_badge(parts["badge"], verdict["result"])
+            parts["badge"].setText(verdict["result"])
+            card.setObjectName(CARD[verdict["result"]])
+            parts["verdict"] = verdict["result"]
+        return True
 
     def _longer_context_warning(self, model):
         """Say what a longer conversation costs, when it would not fit.

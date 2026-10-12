@@ -243,3 +243,52 @@ def test_every_source_file_is_valid_utf8(path):
     wrong characters, which is precisely why it passed everything.
     """
     path.read_bytes().decode("utf-8")
+
+
+def test_the_cookbook_has_exactly_one_ungated_path_to_the_network():
+    """Only ``ask_to_refresh`` may call ``do_refresh``; no control may be wired
+    to it.
+
+    ``do_refresh`` is the method the disclosure exists to sit in front of. It is
+    left ungated so that tests can drive a refresh without a dialog, which is
+    only safe while nothing else calls it -- the docstring on the gated method
+    says exactly that.
+
+    It was not true. The empty-state card offered its own "Refresh from <host>"
+    and wired it straight to the ungated method, so a reader who filtered to a
+    list with nothing in it could put a dozen requests out to a host they had
+    never been told about and never be asked. The main button asked every time,
+    which is what made it look like the page was covered.
+
+    Checked on the syntax rather than at runtime because a second caller is
+    easy to add and hard to notice: it works, it just works without asking.
+    """
+    panel = ROOT / "desktop_app" / "cookbook_panel.py"
+    tree = ast.parse(panel.read_text(encoding="utf-8"))
+
+    gate = [node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "ask_to_refresh"]
+    assert gate, "ask_to_refresh has gone; this check is looking in the wrong place"
+    gate = gate[0]
+    gate_lines = range(gate.lineno, gate.end_lineno + 1)
+
+    called, handed = [], []
+    nodes = list(ast.walk(tree))
+    for node in nodes:
+        if not (isinstance(node, ast.Attribute) and node.attr == "do_refresh"):
+            continue
+        invoked = any(parent.func is node for parent in nodes
+                      if isinstance(parent, ast.Call))
+        # Invoked is ``self.do_refresh()``. Not invoked is the method being
+        # handed to something as a value -- which is what a button callback is,
+        # and what lets a reader press past the disclosure.
+        (called if invoked else handed).append(node.lineno)
+
+    assert not handed, (
+        f"cookbook_panel.py hands do_refresh to a control on lines {handed}, "
+        "so a reader can press it without the disclosure being asked for")
+    stray = [line for line in called if line not in gate_lines]
+    assert not stray, (
+        f"cookbook_panel.py calls do_refresh outside ask_to_refresh, on lines "
+        f"{stray}; it is meant to be reachable only from there")

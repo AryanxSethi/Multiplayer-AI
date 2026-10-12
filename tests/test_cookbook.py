@@ -1081,3 +1081,39 @@ def test_an_empty_list_never_blames_the_hardware_without_evidence():
                     f"{reason.heading!r}")
             assert reason.heading and reason.detail, (
                 f"{reason.kind} has an empty sentence")
+
+
+def test_a_catalogue_of_withdrawn_models_is_still_explained():
+    """The heading is built from the task title, and there may not be one.
+
+    ``titled`` is None when nothing is filtered, so an unguarded
+    ``titled.lower()`` raised AttributeError. Every model being withdrawn is
+    exactly that case, and it is the case the sentence was written for.
+
+    Only reachable once the catalogue holds a withdrawn model, which is why
+    nothing had caught it: the bundled one has none.
+    """
+    generous = device(total_gb=64, available_gb=60, vram=24 * 1024 ** 3)
+    withdrawn = [replace(model, deprecated=True,
+                         deprecated_reason="superseded by a newer release")
+                for model in load_catalog()]
+
+    reason = empty_reason(withdrawn, generous, task=None)
+    assert reason.kind == NOT_ENOUGH_PUBLISHED, reason.kind
+    assert "withdrawn" in reason.heading.lower(), reason.heading
+    assert reason.detail, "the reader is told nothing about what to do"
+    assert reason.can_widen is False, (
+        "there is no filter to widen, so nothing on the page can change this")
+
+
+def test_withdrawn_models_under_a_filter_still_name_the_filter():
+    """The filtered case still says which kind of work ran out."""
+    generous = device(total_gb=64, available_gb=60, vram=24 * 1024 ** 3)
+    withdrawn = [replace(model, deprecated=True,
+                         deprecated_reason="superseded by a newer release")
+                for model in load_catalog()]
+    task = next(iter(TASKS))
+
+    reason = empty_reason(withdrawn, generous, task=task)
+    assert reason.kind == NOT_ENOUGH_PUBLISHED, reason.kind
+    assert TASKS[task].lower() in reason.heading.lower(), reason.heading

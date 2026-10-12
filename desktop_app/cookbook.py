@@ -1005,7 +1005,12 @@ def empty_reason(catalog, hardware, task=None, context=DEFAULT_CONTEXT):
     if not considered:
         return EmptyList(
             kind=NOT_ENOUGH_PUBLISHED,
-            heading=f"Every {titled.lower()} model here has been withdrawn.",
+            # Guarded on task, because titled is None when there is no filter
+            # and every model is withdrawn is exactly that case. Unguarded it
+            # raised AttributeError, so a catalogue that had acquired a
+            # withdrawn model took the whole page down with it.
+            heading=("Every model here has been withdrawn." if not task else
+                     f"Every {titled.lower()} model here has been withdrawn."),
             detail=("Nothing is left to recommend for this, and a withdrawn "
                     "model is not one to download. Refresh to read whether a "
                     "publisher has replaced it."),
