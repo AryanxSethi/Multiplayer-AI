@@ -2231,17 +2231,44 @@ def test_the_card_border_moves_only_when_the_verdict_does(window) -> None:
         settle()
         return card_with_rows()
 
+    def border(card):
+        """The colour the card actually draws, not the name it was given.
+
+        The two came apart for a while: setObjectName changed the name and Qt
+        never re-matched the selector against it, so the card was called
+        modelCardBad and still drew a green border. Asserting on the name alone
+        passed the whole time the reader was being told the opposite.
+        """
+        image = card.grab().toImage()
+        return [image.pixelColor(x, image.height() // 2).name() for x in range(4)]
+
+    def badge_colour(card):
+        return [label.palette().color(label.foregroundRole()).name()
+                for label in card.findChildren(QLabel)
+                if label.objectName().startswith("verdict")]
+
     first = choose(same)
     name_before = first.objectName()
+    colour_before = border(first)
+    badge_before = badge_colour(first)
     second = choose(other)
     assert second.objectName() != name_before, (
         f"the verdict moved to {entries[other]} but the card border stayed "
         f"{name_before}")
+    assert border(second) != colour_before, (
+        f"the card is now named {second.objectName()} and still draws the "
+        f"border of {name_before}: {colour_before} -> {border(second)}")
+    assert badge_colour(second) != badge_before, (
+        f"the badge kept the colour of the verdict it had just been told had "
+        f"changed: {badge_before} -> {badge_colour(second)}")
 
     back = choose(same)
     assert back.objectName() == name_before, (
         f"moving back to {entries[same]} left the border at "
         f"{back.objectName()}")
+    assert border(back) == colour_before, (
+        f"moving back to {entries[same]} left the border drawing {border(back)} "
+        f"where it started at {colour_before}")
 
 
 class _ShowSpy:

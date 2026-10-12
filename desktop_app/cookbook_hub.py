@@ -86,6 +86,22 @@ def _number(value):
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
+def _languages(value):
+    """A card's languages as one per entry, however the host spelled it.
+
+    ``language`` is a list on most cards and a bare string on some, and
+    ``tuple("en")`` is ``('e', 'n')`` -- a language count that matches neither
+    the record nor anything a reader would recognise. A string is therefore one
+    language, and an iterable keeps only its strings, so a card carrying
+    ``["en", 7, None]`` does not put two non-languages in the catalogue.
+    """
+    if isinstance(value, str):
+        return (value,) if value else ()
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, str) and item)
+
+
 async def fetch_model(client, repo, base=None):
     """One model's published details, as the Cookbook can check them.
 
@@ -111,7 +127,7 @@ async def fetch_model(client, repo, base=None):
         "name": repo.split("/")[-1],
         "publisher": repo.split("/")[0],
         "license": card.get("license") or "",
-        "languages": tuple(card.get("language") or ()),
+        "languages": _languages(card.get("language")),
         "parameters": _number(weights.get("total")),
         "gated": payload.get("gated") or False,
     }
@@ -148,10 +164,21 @@ async def _geometry(client, config_url):
         "layers": _number(config.get("num_hidden_layers")),
         "kv_heads": _number(config.get("num_key_value_heads")),
     }
-    # Derived rather than published, so it is computed here from the two
-    # fields that are. Both must be present: guessing the remainder of a
-    # division is how a cache estimate ends up confidently wrong.
-    result["head_dim"] = hidden // heads if heads and hidden and hidden % heads == 0 else 0
+    # A published head_dim is taken as given: the model says what its attention
+    # head is, and deriving it instead can divide evenly by accident and be
+    # wrong anyway. Only when the publisher does not carry one is it worked out
+    # from the two fields that are.
+    #
+    # Both have to be present for the derivation, and the division has to come
+    # out whole: guessing the remainder is how a cache estimate ends up
+    # confidently wrong.
+    published = _number(config.get("head_dim"))
+    if published > 0:
+        result["head_dim"] = published
+    else:
+        result["head_dim"] = (hidden // heads
+                              if heads and hidden and hidden % heads == 0
+                              else 0)
     return result
 
 

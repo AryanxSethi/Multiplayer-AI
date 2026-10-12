@@ -274,3 +274,74 @@ async def test_a_catalogue_read_does_not_lock_out_workspace_mutations():
             await refresh
             await runtime.http.aclose()
             await runtime.direct_http.aclose()
+
+
+async def test_a_language_written_as_a_bare_string_is_one_language() -> None:
+    """``tuple("en")`` is ``('e', 'n')``, and both letters reach the catalogue.
+
+    Most cards carry a list of languages and some carry a bare string. The
+    second kind used to be spread into its characters, which is a language count
+    matching neither the record nor anything a reader would recognise -- and it
+    passed every check downstream, because two strings are two languages as far
+    as anything here can tell.
+    """
+    for written, expected in (("en", ("en",)),
+                              (["en", "zh"], ("en", "zh")),
+                              (["en", 7, None], ("en",)),
+                              ([], ()),
+                              ("", ()),
+                              (None, ())):
+        model = {**CODER_MODEL, "cardData": {"license": "apache-2.0",
+                                             "language": written}}
+        async with transport({"api/models/Qwen/": model,
+                              "raw/main/config.json": CODER_CONFIG}) as client:
+            result = await fetch_model(client, "Qwen/Qwen2.5-Coder-7B-Instruct")
+        assert result["languages"] == expected, written
+
+
+async def test_a_published_head_dim_is_taken_rather_than_derived() -> None:
+    """The publisher's number wins, and this one deliberately disagrees.
+
+    96 against a division of 3584 / 28, which is 128 -- because a test where the
+    two agree proves nothing about which of them was read. Dividing is a guess
+    wearing arithmetic's clothes: it is correct whenever it lands on a whole
+    number and says nothing about whether it should. A config that publishes
+    head_dim knows its own geometry, and deriving over the top of it replaces a
+    stated fact with a coincidence.
+    """
+    stated = {**CODER_CONFIG, "head_dim": 96}
+    async with transport({"api/models/Qwen/": CODER_MODEL,
+                          "raw/main/config.json": stated}) as client:
+        result = await fetch_model(client, "Qwen/Qwen2.5-Coder-7B-Instruct")
+    assert result["head_dim"] == 96, (
+        f"the config publishes 96 and the derivation gives 128, so 128 means "
+        f"the publisher was overridden")
+
+    # Published but not a usable figure: back to the derivation, which is the
+    # only case where division is honest.
+    for unusable in (0, -4, None, "128", True):
+        config = {**CODER_CONFIG, "head_dim": unusable}
+        async with transport({"api/models/Qwen/": CODER_MODEL,
+                              "raw/main/config.json": config}) as client:
+            result = await fetch_model(client, "Qwen/Qwen2.5-Coder-7B-Instruct")
+        assert result["head_dim"] == 128, f"head_dim={unusable!r}"
+
+
+async def test_a_geometry_that_will_not_divide_reports_no_head_dim() -> None:
+    """Zero stays zero, because zero is how estimate() knows it cannot say.
+
+    ``kv_cache_bytes`` treats a head_dim of zero as unknown and declines to
+    produce a cache size from it. Any value invented here would instead be
+    multiplied by layers and kv_heads and turned into a confident number, and
+    the cache is the figure that decides whether a long context fits at all.
+
+    This one passes before and after the change: it is a guard on the fallback
+    being left alone, not a claim that anything was wrong with it.
+    """
+    async with transport({"api/models/Qwen/": CODER_MODEL,
+                          "raw/main/config.json": {**CODER_CONFIG,
+                                                   "hidden_size": 3583}}) as client:
+        result = await fetch_model(client, "Qwen/Qwen2.5-Coder-7B-Instruct")
+    assert result["head_dim"] == 0, (
+        "3583 does not divide by 28, and a guessed remainder becomes a cache "
+        "size that nobody checked")

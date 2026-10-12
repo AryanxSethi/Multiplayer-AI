@@ -549,7 +549,14 @@ def _read_linux_adapters():
             continue
         if total <= 0:
             continue
-        card = Path(path).parts[-4]
+        # The adapter is the card the counter belongs to, which is the
+        # component the glob above matched. Counting back three from the end
+        # gave "drm" -- one component too shallow -- so the device was named
+        # after the directory it sat in instead of the card inside it, and two
+        # cards in one machine were indistinguishable.
+        card = next((part for part in reversed(Path(path).parts)
+                     if part.startswith("card")),
+                    Path(path).parts[-3])
         name = card
         for label_path in (Path(path).parent / "label",):
             try:
@@ -1113,6 +1120,27 @@ def _require(mapping, key, kind, where):
     return value
 
 
+def _measure(value, where, key, default):
+    """A real number, or ``default``. Never a guess and never a coercion.
+
+    ``int()`` is not a validator. It turns ``True`` into 1 and ``"397808192"``
+    into 397808192, so a variant carrying a boolean size loaded as a one-byte
+    build and one carrying a quoted size loaded without complaint -- and both
+    then went into a memory estimate as though the catalogue had said so.
+
+    These are the same mistake, a field that does not mean what it looks like
+    being read as though it does, so both are refused rather than coerced. The
+    error names the variant and the field, because a catalogue author needs to
+    know which entry to fix and there is no other way to tell from the number
+    of records in a file.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CatalogError(f"{where} has {key!r} as {type(value).__name__}, not a number")
+    return int(value)
+
+
 def parse_model(record, index):
     """One catalogue record, validated.
 
@@ -1156,13 +1184,15 @@ def parse_model(record, index):
             raise CatalogError(f"{where} variant {position} is not an object")
         name = _require(item, "name", str, f"{where} variant {position}")
         label = item.get("quantization") or bits_from_label(name)
-        size = int(item.get("size", 0) or 0)
+        size = _measure(item.get("size"), f"{where} variant {name}", "size", 0)
         if size < 0:
             raise CatalogError(f"{where} variant {name} has a negative size")
+        bits = _measure(item.get("bits_per_weight"),
+                        f"{where} variant {name}", "bits_per_weight", None)
         variants.append(Variant(
             name=name,
             quantization=str(label or ""),
-            bits_per_weight=item.get("bits_per_weight") or bits_from_label(label or name),
+            bits_per_weight=bits if bits is not None else bits_from_label(label or name),
             size=size,
             quant_source=str(item.get("source") or "publisher")))
 

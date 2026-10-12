@@ -1132,6 +1132,11 @@ class CookbookPanel(QWidget):
         see the colour has nothing to go on.
         """
         badge.setObjectName(TONE.get(result, "muted"))
+        # Load-bearing, and it looks like noise. Setting a stylesheet is what
+        # makes Qt re-evaluate the selector, and an object name on its own does
+        # not -- so without this line the badge would keep the colour of the
+        # verdict it had just been told had changed. The card needs the explicit
+        # unpolish/polish instead, in _update_card, because it has no such line.
         badge.setStyleSheet("")
         gloss = EXPLANATIONS.get(result)
         if gloss:
@@ -1180,6 +1185,19 @@ class CookbookPanel(QWidget):
             self._style_badge(parts["badge"], verdict["result"])
             parts["badge"].setText(verdict["result"])
             card.setObjectName(CARD[verdict["result"]])
+            # Qt does not re-match a stylesheet selector when only the object
+            # name changes, so the card kept the border colour of the verdict it
+            # had just been told was wrong -- green while named modelCardBad.
+            # Measured before this: the border stayed #3ba55d across a move to
+            # a build that classified as not recommended.
+            #
+            # Same three lines MainWindow.set_field_error uses for the same
+            # reason. The badge needs none of this: _style_badge's empty
+            # setStyleSheet already forces it to re-evaluate, which is why its
+            # colour moved when this one did not.
+            card.style().unpolish(card)
+            card.style().polish(card)
+            card.update()
             parts["verdict"] = verdict["result"]
         return True
 

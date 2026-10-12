@@ -9,7 +9,8 @@ were read from the Hugging Face Hub rather than estimated.
 |---|---|
 | `parameters` | `https://huggingface.co/api/models/<repo>` → `safetensors.parameters.total`. A count of the tensors the publisher actually shipped, not a name-derived guess. |
 | `context` | `<repo>/raw/main/config.json` → `max_position_embeddings`. |
-| `layers`, `kv_heads`, `head_dim` | `<repo>/raw/main/config.json` → `num_hidden_layers`, `num_key_value_heads`, and `hidden_size / num_attention_heads`. |
+| `layers`, `kv_heads` | `<repo>/raw/main/config.json` → `num_hidden_layers`, `num_key_value_heads`. |
+| `head_dim` | `<repo>/raw/main/config.json` → `head_dim` where the publisher states one, otherwise `hidden_size / num_attention_heads`. A published figure is preferred over the division: the model says what its attention head is, and dividing is only correct when it happens to land on a whole number. Where neither is usable this stays 0, which is how the cache estimate knows not to produce a number. |
 | `license`, `languages` | the same API call → `cardData`. |
 | `variants[].size` | `https://huggingface.co/api/models/<artifact_repo>/tree/main` → each file's `size`. |
 | `variants[].quantization` | the label in that same file name. |

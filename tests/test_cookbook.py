@@ -10,6 +10,7 @@ import pytest
 
 from dataclasses import replace
 
+from desktop_app import cookbook
 from desktop_app.cookbook import (CATALOG_VERSION, LIKELY, NOT_ENOUGH_PUBLISHED,
                                   NOT_RECOMMENDED, NO_CATALOGUE,
                                   NO_MODELS_FOR_TASK, NOTHING_FITS, POSSIBLE,
@@ -1117,3 +1118,78 @@ def test_withdrawn_models_under_a_filter_still_name_the_filter():
     reason = empty_reason(withdrawn, generous, task=task)
     assert reason.kind == NOT_ENOUGH_PUBLISHED, reason.kind
     assert TASKS[task].lower() in reason.heading.lower(), reason.heading
+
+
+def _variant_record(**variant):
+    """One record carrying one variant, with that variant's fields to hand."""
+    from desktop_app.cookbook import catalog_from_payload
+    record = catalog_from_payload({"repo": "a/b", "name": "B"}, "2026-10-10")
+    record["variants"] = [dict({"name": "v.gguf", "quantization": "Q4_K_M",
+                                "size": 397808192}, **variant)]
+    return record
+
+
+@pytest.mark.parametrize("field,value", [
+    ("size", True), ("size", "397808192"), ("size", []), ("size", {"bytes": 1}),
+    ("bits_per_weight", True), ("bits_per_weight", "4.8"), ("bits_per_weight", []),
+])
+def test_a_variant_measure_that_is_not_a_number_is_refused(field, value):
+    """A boolean and a quoted number are both read by int(), and both are wrong.
+
+    ``int(True)`` is 1, so the variant loaded as a one-byte build and was then
+    recommended as fitting any model at all. ``"397808192"`` is coerced without
+    a sound, which is the same mistake wearing a disguise: a field that does not
+    mean what it looks like being read as though it did. The top-level numbers
+    have refused both ever since they were written; the variants were the gap.
+
+    The error has to name the variant and the field, because a catalogue author
+    is told how many records are wrong and nothing about which.
+    """
+    with pytest.raises(CatalogError) as caught:
+        parse_model(_variant_record(**{field: value}), 0)
+    message = str(caught.value)
+    assert field in message and "v.gguf" in message, (
+        f"the error does not say which variant or which field, so it cannot be "
+        f"acted on: {message}")
+
+
+def test_absent_variant_measures_are_filled_in_rather_than_refused():
+    """Absent is not the same as wrong.
+
+    Omitting a size is normal and omitting a bit depth is normal too -- that one
+    is worked out from the quantisation label -- so refusing either would refuse
+    most of the catalogue rather than the mistakes in it.
+    """
+    model = parse_model(_variant_record(), 0)
+    assert model.variants[0].size == 397808192
+    assert model.variants[0].bits_per_weight == 4.0, "Q4_K_M is four bits"
+
+    model = parse_model(_variant_record(size=None, bits_per_weight=None), 0)
+    assert model.variants[0].size == 0
+    assert model.variants[0].bits_per_weight == 4.0
+
+
+def test_a_linux_card_is_named_for_the_card_and_not_the_directory_holding_it(monkeypatch):
+    """The adapter is ``card0``, not ``drm``.
+
+    Counting three components back from the end of
+    ``/sys/class/drm/card0/device/mem_info_vram_total`` lands on ``drm``, which
+    is the one directory every card shares. So two cards in the same machine
+    came back named identically, and the second silently replaced the first --
+    two adapters of one video budget, reported as one.
+    """
+    from pathlib import Path
+    counter = "/sys/class/drm/card0/device/mem_info_vram_total"
+    # glob is imported inside _read_linux_adapters, so the module's attribute
+    # is what has to be replaced rather than a name in cookbook.
+    monkeypatch.setattr("glob.glob", lambda pattern: [counter])
+
+    def read_text(self, *args, **kwargs):
+        if self.name == "mem_info_vram_total":
+            return "8589934592\n"
+        raise OSError(2, "No such file or directory", str(self))
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    adapters = cookbook._read_linux_adapters()
+    assert [adapter.name for adapter in adapters] == ["card0"], (
+        f"the adapter is named after its directory: {adapters}")

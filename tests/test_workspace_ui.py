@@ -158,6 +158,50 @@ class WorkspaceUITests(unittest.TestCase):
         # chat archive go with it rather than being emptied in place.
         self.assertFalse(deleted_directory.exists())
 
+    def test_leaving_says_what_only_happens_on_this_device(self):
+        """What leaving a shared workspace does is three things, and only one is certain.
+
+        The local half always happens: the conversations saved for that workspace
+        are deleted from this device. What the relay does with this device's
+        membership is not certain, and two ordinary cases are not either -- an
+        offline host cannot revoke anything, because delete_workspace catches
+        the transport error and forgets the token locally, and a relay whose
+        operator manages membership accepts the leave while the device stays a
+        member.
+
+        The wording said "the host will remove this device", which is true in
+        neither case and is the single fact a reader deciding to leave would
+        most want. Answered No throughout, so the workspaces are untouched.
+        """
+        asked = []
+
+        def question(parent, title, message, *args, **kwargs):
+            asked.append(message)
+            return QMessageBox.StandardButton.No
+
+        self.host.remote = True
+        leaving = WorkspaceDialog(self.host)
+        with patch("desktop_app.workspace_dialog.QMessageBox.question", question):
+            leaving.delete()
+        leaving.close()
+        self.host.remote = False
+
+        self.assertEqual(len(asked), 1, "leaving must ask exactly once")
+        self.assertIn("deleted from this device", asked[0])
+        self.assertIn("only forgotten here", asked[0])
+        self.assertIn("manages membership", asked[0])
+
+        asked.clear()
+        deleting = WorkspaceDialog(self.host)
+        with patch("desktop_app.workspace_dialog.QMessageBox.question", question):
+            deleting.delete()
+        deleting.close()
+
+        self.assertEqual(len(asked), 1, "deleting must ask exactly once")
+        self.assertIn("All members will be disconnected", asked[0])
+        self.assertNotIn("only forgotten here", asked[0],
+                         "deleting your own workspace does not need the relay caveat")
+
     def test_repeated_last_workspace_deletion_keeps_window_open_and_stops_closed_dialogs(self):
         dialogs = []
         for _ in range(3):

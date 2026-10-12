@@ -104,36 +104,6 @@ async def test_a_record_is_read_from_the_chosen_host_and_nowhere_else() -> None:
     assert record["variants"][0]["size"] == 397808192
 
 
-async def test_a_record_is_read_from_the_chosen_host_and_nowhere_else() -> None:
-    """The three paths are built on the mirror, not appended to the public one.
-
-    A mirror serving a different catalogue would otherwise be ignored and the
-    public one read instead, which is the opposite of the point and invisible
-    to the reader.
-    """
-    seen = []
-
-    def handle(request):
-        seen.append(str(request.url))
-        url = str(request.url)
-        for fragment, payload in (("raw/main/config.json", CONFIG),
-                                  ("/tree/main", TREE),
-                                  ("api/models/", MODEL)):
-            if fragment in url:
-                return httpx.Response(200, json=payload)
-        return httpx.Response(404, json={})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        record = await fetch_entry(client, "Qwen/Qwen2.5-0.5B-Instruct",
-                                   "someone/Builds-GGUF", "https://models.internal")
-
-    assert seen, "nothing was requested at all"
-    assert all(url.startswith("https://models.internal/") for url in seen), (
-        f"a request went somewhere other than the mirror: {seen}")
-    assert record["parameters"] == 494032768
-    assert record["artifact_repo"] == "someone/Builds-GGUF"
-    assert record["variants"][0]["size"] == 397808192
-
 
 async def test_no_host_means_the_public_catalogue() -> None:
     """And the default is what a caller that says nothing gets."""
