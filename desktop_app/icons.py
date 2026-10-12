@@ -62,6 +62,23 @@ def navigation_icon(name, ink):
             line((4, y), (x - 2, y))
             line((x + 2, y), (21, y))
             painter.drawEllipse(QPointF(x, y), 2, 2)
+    elif name == "cookbook":
+        # An open book: two leaves hinged on a spine. Drawn rather than
+        # borrowed, because a glyph here would come out of whatever font
+        # resolved and would not match the weight of the marks either side of
+        # it. The spine is drawn first and the leaves over it, so the join
+        # reads as a fold rather than as two shapes that happen to touch.
+        line((12, 6.5), (12, 19))
+        path = QPainterPath(QPointF(12, 7.5))
+        path.cubicTo(10, 6.2, 7.6, 5.8, 5, 5.8)
+        path.lineTo(5, 16.4)
+        path.cubicTo(7.6, 16.4, 10, 16.9, 12, 18.2)
+        painter.drawPath(path)
+        path = QPainterPath(QPointF(12, 7.5))
+        path.cubicTo(14, 6.2, 16.4, 5.8, 19, 5.8)
+        path.lineTo(19, 16.4)
+        path.cubicTo(16.4, 16.4, 14, 16.9, 12, 18.2)
+        painter.drawPath(path)
     else:
         line((7, 8), (12, 16), (17, 8))
         for x, y in ((6, 6), (18, 6), (12, 18)):

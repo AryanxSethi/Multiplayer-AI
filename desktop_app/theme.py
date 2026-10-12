@@ -88,6 +88,7 @@ _DARK = {
     "scrollbar_thumb": "#4e5058",
     "danger_bg": "#3a1f22",
     "success": "#3ba55d",
+    "warning": "#e0a33e",
     "error": "#f76f74",
     "agent_title": "#9d90f7",
     "toast_bg": "#232428",
@@ -149,6 +150,7 @@ _LIGHT = {
     "scrollbar_thumb": "#b8bdc7",
     "danger_bg": "#fbe4e2",
     "success": "#1e7d43",
+    "warning": "#8a5a00",
     "error": "#c0392b",
     "agent_title": "#3b3f9e",
     "toast_bg": "#d8f0e2",
@@ -248,6 +250,9 @@ _MIKU = {
     "scrollbar_thumb": "#5a6469",
     "danger_bg": "#4a2f3a",
     "success": "#55d1d0",
+    # Carries verdict text on a card as well as the left border, so it is held
+    # to the same 4.5:1 as "error" rather than picked as a decorative accent.
+    "warning": "#ffc95c",
     # The supplied pink is 2.69:1 on these surfaces. This is the most
     # saturated tint of the same hue that still clears 4.5:1.
     "error": "#ffb0b0",
@@ -476,7 +481,7 @@ THEME_CHOICES = (
     ("Follow system", None),
     ("Dark", DARK),
     ("Light", LIGHT),
-    ("Miku", MIKU),
+    ("39", MIKU),
 )
 
 
@@ -511,6 +516,10 @@ QFrame#hero { background: @@surface_hero@@; border: 1px solid @@border_hero@@; b
 QFrame#createCard { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@accent@@; border-radius: 12px; }
 QFrame#joinCard { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@success@@; border-radius: 12px; }
 QFrame#inviteCard { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@eyebrow@@; border-radius: 12px; }
+QFrame#modelCardOk { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@success@@; border-radius: 12px; }
+QFrame#modelCardWarn { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@warning@@; border-radius: 12px; }
+QFrame#modelCardBad { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@error@@; border-radius: 12px; }
+QFrame#modelCardUnknown { background: @@surface@@; border: 1px solid @@border@@; border-left: 3px solid @@text_muted@@; border-radius: 12px; }
 QLabel { background: transparent; }
     QWidget#messageRow { background: transparent; border-radius: 8px; }
     QWidget#messageRow:hover { background: transparent; }
@@ -531,6 +540,14 @@ QLabel#statValue { font-size: 30px; color: @@text_strong@@; font-weight: 650; }
 QPushButton#statValue { background: transparent; font-size: 30px; color: @@text_strong@@; font-weight: 650; text-align: left; padding: 0; border: none; }
 QPushButton#statValue:hover, QPushButton#statValue:pressed, QPushButton#statValue:focus { background: transparent; border: none; text-decoration: none; }
 QLabel#online { color: @@success@@; }
+QLabel#verdictOk { color: @@success@@; font-size: 11px; font-weight: 700; }
+QLabel#verdictWarn { color: @@warning@@; font-size: 11px; font-weight: 700; }
+QLabel#verdictBad { color: @@error@@; font-size: 11px; font-weight: 700; }
+QLabel#verdictUnknown { color: @@text_muted@@; font-size: 11px; font-weight: 700; }
+QLabel#command { font-family: 'Cascadia Mono', 'Consolas', monospace; font-size: 12px; color: @@text_strong@@; background: @@surface_base@@; border: 1px solid @@border@@; border-radius: 7px; padding: 8px 10px; }
+QLabel#buildName { color: @@text_strong@@; font-size: 13px; font-weight: 650; }
+QLabel#meta { color: @@text@@; font-size: 12px; }
+QLabel#footer { color: @@text_muted@@; font-size: 11px; }
 QPushButton { background: @@button@@; border: 1px solid @@button_border@@; border-radius: 7px; padding: 10px 16px; color: @@text@@; font-weight: 550; }
 QPushButton:hover { background: @@button_hover@@; color: @@text_strong@@; }
 QPushButton:pressed { background: @@button_press@@; }
@@ -547,6 +564,11 @@ QPushButton#workspace { background: @@workspace_btn_bg@@; border: 1px solid @@wo
     QPushButton#workspace:hover, QPushButton#workspace:checked { background: @@accent@@; border-radius: 16px; color: @@on_accent@@; }
 QPushButton#ghost { background: transparent; color: @@text_nav@@; padding: 7px 10px; border: 1px solid @@ghost_border@@; }
 QPushButton#ghost:hover { background: @@surface_hover@@; }
+/* The selected state a nav button gets, for the one navigation control that
+   lives in the top bar rather than the rail. Without it the Cookbook could be
+   the page you were on with nothing on screen saying so, which for a
+   checkable button is the whole point of making it checkable. */
+QPushButton#ghost:checked { background: @@nav_checked_bg@@; color: @@text_strong@@; }
 QPushButton#danger { background: @@danger_bg@@; color: @@error@@; }
 QLineEdit, QPlainTextEdit, QComboBox { background: @@input_bg@@; color: @@text@@; border: 1px solid @@border_strong@@; border-radius: 7px; padding: 10px; selection-background-color: @@accent@@; selection-color: @@on_accent@@; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid @@accent@@; }

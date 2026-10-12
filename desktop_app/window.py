@@ -69,6 +69,7 @@ PAGES = (
     ("Conversations", "conversations"),
     ("Providers", "providers"),
     ("Resources", "resources"),
+    ("Cookbook", "cookbook"),
     ("Settings", "settings"),
 )
 PAGE_TITLES = tuple(f"#  {key}" for _, key in PAGES)
@@ -88,6 +89,7 @@ PAGE_HELP = {
     "conversations": "Shared conversations and the messages in them",
     "providers": "Where models come from: local, hosted, or your own endpoint",
     "resources": "Disk, memory and what this device is using",
+    "cookbook": "Which AI models this device's memory can hold, and how to run them",
     "settings": "Appearance, privacy and resetting this device's identity",
 }
 RESOURCES_PAGE = PAGE_INDEX["resources"]
@@ -100,6 +102,7 @@ AGENTS_PAGE = PAGE_INDEX["agents"]
 # focused sat on a page that was not showing.
 CONVERSATIONS_PAGE = PAGE_INDEX["conversations"]
 OVERVIEW_PAGE = PAGE_INDEX["overview"]
+COOKBOOK_PAGE = PAGE_INDEX["cookbook"]
 # The mark beside a message, and the width a grouped message is indented by
 # when it follows its own speaker's earlier message.
 SPEAKER_AVATAR = 34
@@ -324,7 +327,14 @@ class MainWindow(QMainWindow):
             button.setCheckable(True)
             button.setToolTip(PAGE_HELP[key])
             self.nav_buttons.append(button)
-            side.addWidget(button)
+            # The Cookbook's button is built here and appended above, so the
+            # nav list stays one-per-page and navigate() can check it, but it is
+            # not laid out in the rail. It is put in the top bar instead, next
+            # to the two actions somebody is most likely to take first, and it
+            # behaves identically: same icon, same help text, same selected
+            # state, same Ctrl+N.
+            if key != "cookbook":
+                side.addWidget(button)
         side.addStretch(1)
         self.connection_status = label("●  Starting your network…", "online", True)
         self.connection_status.setToolTip(
@@ -372,8 +382,18 @@ class MainWindow(QMainWindow):
             "Create an invitation that another device can use to join this workspace")
         self.add_button.setToolTip(
             "Connect a model agent to this workspace")
+        # The Cookbook's navigation button, moved here from the rail. It is the
+        # same object the rail loop built, so it checks and unchecks with the
+        # rest of them; only its position differs. Restyled because it is a
+        # 34px square beside two text buttons rather than a full-width row.
+        self.cookbook_button = self.nav_buttons[COOKBOOK_PAGE]
+        self.cookbook_button.setObjectName("ghost")
+        self.cookbook_button.setText("")
+        self.cookbook_button.setFixedSize(40, 34)
+        self.cookbook_button.setAccessibleName("Cookbook")
         self.invite_button.setEnabled(False)
         self.add_button.setEnabled(False)
+        top_layout.addWidget(self.cookbook_button)
         top_layout.addWidget(self.invite_button)
         top_layout.addWidget(self.add_button)
         body_layout.addWidget(top)
@@ -407,6 +427,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.chat_page())
         self.stack.addWidget(self.providers_page())
         self.stack.addWidget(self.resources_page())
+        self.stack.addWidget(self.cookbook_page())
         self.stack.addWidget(self.settings_page())
         body_layout.addWidget(self.stack, 1)
         shell.addWidget(body, 1)
@@ -1002,6 +1023,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(action("Refresh now", self.refresh_resources))
         layout.addStretch()
         return page
+
+    def cookbook_page(self):
+        """Which models this device's memory can hold.
+
+        The panel owns its own scroll area, because it is long enough to need
+        one and short enough that measuring it first would only delay the
+        first paint. Built once and then left alone: every page here is built
+        at start-up and re-read on demand, and a catalogue does not change
+        under the user.
+        """
+        from .cookbook_panel import CookbookPanel
+        panel = CookbookPanel(self, self.scroll_page)
+        self.cookbook_panel = panel
+        return panel
 
     def settings_page(self):
         """Appearance, motion, and where preferences live."""
@@ -3227,7 +3262,24 @@ class MainWindow(QMainWindow):
         column.addWidget(self.workspace_members_label)
         column.addSpacing(10)
         self.workspace_invite_button = action("Invite a device", self.invite_device)
-        column.addWidget(self.workspace_invite_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.workspace_invite_button.setToolTip(
+            "Create an invitation another device can use to join this workspace")
+        # Leaving lives here, on the page, rather than only behind Workspace
+        # settings. It was there and worked, but a member looking at this card
+        # had no way out and no sign that one existed: the only way to find it
+        # was a danger button in a dialog whose wording led with the loss of
+        # saved history. Next to the invitation it says what it does, and it is
+        # shown only when there is somewhere to leave to.
+        self.workspace_leave_button = action("Leave workspace", self.leave_workspace, name="danger")
+        self.workspace_leave_button.setToolTip(
+            "Stop being a member of this workspace and remove it from this device")
+        self.workspace_leave_button.hide()
+        current_actions = QHBoxLayout()
+        current_actions.setSpacing(10)
+        current_actions.addWidget(self.workspace_invite_button)
+        current_actions.addWidget(self.workspace_leave_button)
+        current_actions.addStretch()
+        column.addLayout(current_actions)
         layout.addWidget(current)
 
         # The invitation generator, on the page rather than in a dialog.
@@ -3415,6 +3467,8 @@ class MainWindow(QMainWindow):
             summary += " · joined from another device"
         self.workspace_members_label.setText(summary)
         self.workspace_invite_button.setEnabled(self.ready and not self.remote)
+        self.workspace_leave_button.setVisible(self.remote)
+        self.workspace_leave_button.setEnabled(self.ready)
         self.workspace_invite_create_button.setEnabled(
             self.ready and bool(self.workspace_invite_name.text().strip())
             and not self.workspace_busy["invite"])
@@ -3429,8 +3483,41 @@ class MainWindow(QMainWindow):
         # 30 seconds. The poll used to re-enable this within three, so a join
         # could be submitted twice and the second attempt's failure could land
         # on top of the first attempt's success.
+        #
+        # One shared workspace at a time, so this is refused while this device
+        # is a member of another one. The line says which and why rather than
+        # leaving a greyed button to be puzzled at: a control that is off with
+        # no reason reads as broken, and this one is off for a decision the
+        # reader can go and reverse.
+        joined = next((entry["name"] for entry in self.workspace_list
+                    if entry.get("kind") == "remote"), None)
         self.workspace_join_button.setEnabled(
-            self.ready and not self.workspace_busy["join"])
+            self.ready and not self.workspace_busy["join"] and not joined)
+        # Where to leave it depends on whether this device is in that
+        # workspace right now. The Leave control sits on the current
+        # workspace's card and is shown only when this device is a member of
+        # the one it is looking at, so "the card above" is only true while
+        # that is the case. Hosting your own workspace while holding a
+        # membership elsewhere is the other half, and there the card above is
+        # yours and has no Leave on it at all -- the way out is to switch to
+        # that workspace first.
+        #
+        # Cleared when there is nothing joined any more, but only when what the
+        # line is holding is the hint that was put there. It used to be written
+        # only when there was, so the line outlived the workspace and went on
+        # naming one this device had already left; but this line also carries
+        # the error from a join that actually failed, and clearing that because
+        # some unrelated workspace was left would throw away the only account
+        # of what went wrong.
+        if joined:
+            hint = f"You are in '{joined}'. " + (
+                "Leave it from the card above before joining another."
+                if self.remote else
+                "Switch to it in the rail to leave it, before joining another.")
+            self._join_derived = hint
+            self.set_card_message(self.workspace_join_line, hint)
+        elif self.workspace_join_line.message.text() == getattr(self, "_join_derived", ""):
+            self.set_card_message(self.workspace_join_line, "")
         # The relay's port is not known when this card is built, so the
         # address it generated first carried port 0 and the invitation would
         # have advertised it. Harmless to repeat here: a typed address is
@@ -3676,14 +3763,78 @@ class MainWindow(QMainWindow):
         """The rail's plus goes to the page, where both routes are offered."""
         self.navigate(WORKSPACES_PAGE)
 
+    def open_cookbook(self):
+        """Go to the Cookbook page, the same as pressing its button.
+
+        Kept as a name of its own because it reads better at the two places
+        that call it, and because the top-bar button is wired to navigate
+        directly -- this is here for anything that reaches it as an action
+        rather than as navigation.
+        """
+        self.navigate(COOKBOOK_PAGE)
+
+    def leave_workspace(self):
+        """Leave a workspace this device joined, from the page that shows it.
+
+        The same ``delete_workspace`` the Workspace dialog uses, asked with
+        different words. That wording is the whole difference and it matters:
+        the dialog leads with the loss of saved history, which is true, and
+        reads to somebody trying to get out of a workspace they were added to
+        as though the cost of leaving were the messages. The messages do go,
+        so this says so, but after saying what is about to happen to the
+        membership rather than before.
+
+        The host is told first and this device's copy goes only once it has
+        agreed, so the row does not come back on the next poll.
+        """
+        if not self.ready or not self.remote:
+            return
+        title = self.workspace_label.text() or "this workspace"
+        message = (f"Leave '{title}'? The host will remove this device, so you will no "
+                   f"longer be a member and will not see its conversations.\n\n"
+                   f"Saved messages for this workspace are also deleted from this "
+                   f"device. If the host is offline, only this device forgets it.")
+        if not self.answered_yes(QMessageBox.question(
+                self, "Leave workspace", message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)):
+            return
+        self.workspace_leave_button.setEnabled(False)
+
+        def failed(reason):
+            # Put the button back rather than leaving a control that cannot be
+            # pressed and no line saying why. The host refusing is the likely
+            # case: it may be gone, or it may never have granted this device.
+            self.workspace_leave_button.setEnabled(True)
+            self.notice(reason, error=True)
+
+        def done(result):
+            self.notice(f"You have left '{title}'.")
+
+        self.command("delete_workspace", success=done, failure=failed)
+
     def manage_workspace(self):
         from .workspace_dialog import WorkspaceDialog
         if self.ready:
             WorkspaceDialog(self).exec()
 
     def invite_device(self):
-        if self.ready and not self.remote:
-            InviteDialog(self).exec()
+        """Go to the page's own invitation card, ready to fill in.
+
+        Mirrors add_agent(), which has done this for the model form since its
+        dialog went: navigate, then put the cursor in the first field. Opening
+        InviteDialog here was the last route to a window for a form that has a
+        home, and it meant the card on the Workspaces page -- the one carrying
+        the explanation of what an invitation is -- was not where the
+        invitation was made.
+        """
+        if not self.ready:
+            self.notice("Your network is still starting. Please wait a moment.")
+            return
+        if self.remote:
+            return
+        self.navigate(WORKSPACES_PAGE)
+        self.workspace_invite_name.setFocus()
 
     def invite_conversation(self):
         if not self.ready or self.remote or not self.selected:

@@ -88,8 +88,19 @@ class WorkspaceDialog(QDialog):
         self.window.command("remove_member", identity, success=lambda result: self.refresh(), failure=self.error.setText)
 
     def delete(self):
-        message = ("Leave this workspace and delete its saved history on this device? If the host is offline, the invitation will only be forgotten on this device." if self.window.remote else
-                   "Delete this workspace and its saved conversations on this device? All members will be disconnected.")
+        if self.window.remote:
+            # Only the local half is certain. What the relay does with this
+            # device's membership is not, and two ordinary cases are not
+            # either: an offline host cannot revoke anything -- delete_workspace
+            # catches the error and forgets the token locally -- and a relay
+            # whose operator manages membership accepts the leave while the
+            # device stays a member. Saying "the host will remove this device"
+            # promised away both of them.
+            message = ("Leave this workspace? The conversations saved here are deleted from this device. "
+                       "If the host is offline, the invitation is only forgotten here. "
+                       "On a relay where someone else manages membership, they may need to remove this device.")
+        else:
+            message = "Delete this workspace and its saved conversations on this device? All members will be disconnected."
         if QMessageBox.question(self, "Leave workspace" if self.window.remote else "Delete workspace", message,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
             return

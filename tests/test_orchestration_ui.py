@@ -1,6 +1,7 @@
 """Connect a model, define its purpose, choose a coordinator, and send through the native UI."""
 import json
 import os
+import re
 import tempfile
 import time
 import unittest
@@ -13,14 +14,15 @@ pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QPoint
+from PySide6.QtGui import QColor, QImage, QPainter, QRegion
 from PySide6.QtWidgets import QApplication, QLabel, QStyle, QStyleOptionButton
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from desktop_app.storage import Storage
 from desktop_app.model_purpose import ModelPurpose
-from desktop_app.theme import DARK, LIGHT, MIKU, color, stylesheet
+from desktop_app.theme import DARK, LIGHT, MIKU, THEME_NAMES, color, stylesheet
 from desktop_app.widgets import TickCheckBox
 from desktop_app.window import CONVERSATIONS_PAGE, MainWindow
 from network_a2a.orchestration import GENERAL_TARGET
@@ -76,6 +78,180 @@ class OrchestrationUITests(unittest.TestCase):
                     self.assertFalse(checkbox.isChecked())
         finally:
             form.close()
+
+    def test_the_enabled_box_draws_its_tick_too_and_fades_when_disabled(self):
+        """The delegation switch is the box a user is most likely to need to read.
+
+        It is the same widget as the task boxes, but it is the one that turns
+        the whole automatic behaviour on, and it sits on its own row where the
+        eye lands last. So its tick is painted and checked like the others, and
+        a disabled one is dimmed rather than left at full strength pretending
+        to be available.
+        """
+        form = ModelPurpose()
+        try:
+            enabled = form.enabled
+            self.assertIsInstance(enabled, TickCheckBox)
+            for theme in (DARK, LIGHT):
+                with self.subTest(theme=theme):
+                    form.setStyleSheet(stylesheet(theme))
+                    form.show()
+                    enabled.setChecked(False)
+                    self.app.processEvents()
+                    enabled.setChecked(True)
+                    self.app.processEvents()
+                    option = QStyleOptionButton()
+                    enabled.initStyleOption(option)
+                    rect = enabled.style().subElementRect(
+                        QStyle.SubElement.SE_CheckBoxIndicator, option, enabled)
+
+                    # Rendered rather than grabbed, and that is the whole fix.
+                    #
+                    # The indicator's background is transparent, so grab()
+                    # snapshots this widget over whatever is under it rather
+                    # than over a background, and the half-opacity pen
+                    # composites with a leftover tick instead: the disabled
+                    # grab came back with pixels of #3ba65c and #3aa55c, which
+                    # is the pure tick colour and not a blend of anything. The
+                    # old count of "pixels exactly the tick colour" was
+                    # therefore counting a rendering artefact, and comparing it
+                    # with the enabled count proved nothing -- a control drawn at
+                    # full strength and one drawn not at all both give zero.
+                    #
+                    # Rendering onto a chosen background makes the arithmetic
+                    # available. Half of the tick over half of what is behind it
+                    # is a colour that can be written down and checked for, and
+                    # that is the only thing that can tell a half-faded tick
+                    # from an absent one.
+                    background = QColor("#101010")
+                    tick = color(theme, "success")
+
+                    def painted_at(strength):
+                        enabled.setEnabled(strength)
+                        self.app.processEvents()
+                        image = QImage(enabled.width(), enabled.height(),
+                                       QImage.Format.Format_RGB32)
+                        image.fill(background)
+                        painter = QPainter(image)
+                        # The source region is given explicitly. Rendering the
+                        # whole widget without one crashed this process outright
+                        # on the offscreen platform.
+                        enabled.render(painter, QPoint(0, 0),
+                                       QRegion(0, 0, enabled.width(),
+                                               enabled.height()))
+                        painter.end()
+                        return image
+
+                    def distance(image, other):
+                        return min(
+                            sum(abs(image.pixelColor(x, y).getRgb()[i]
+                                    - other.getRgb()[i]) for i in range(3)) / 3
+                            for x in range(image.width())
+                            for y in range(image.height()))
+
+                    solid = painted_at(True)
+                    exact = sum(solid.pixelColor(x, y).name() == tick
+                                for x in range(solid.width())
+                                for y in range(solid.height()))
+                    self.assertGreater(exact, 10, (
+                        "the delegation switch shows no tick when it is on"))
+
+                    faded = painted_at(False)
+                    self.assertEqual(
+                        sum(faded.pixelColor(x, y).name() == tick
+                            for x in range(faded.width())
+                            for y in range(faded.height())), 0, (
+                        "a disabled switch still paints some of the tick at "
+                        "full strength, so it reads as though it could be "
+                        "turned on"))
+                    # What the half-opacity pen should have produced.
+                    blend = QColor(*(round(0.5 * QColor(tick).getRgb()[i]
+                                            + 0.5 * background.getRgb()[i])
+                                     for i in range(3)))
+                    self.assertLessEqual(distance(faded, blend), 8, (
+                        f"the disabled tick is not half faded: the closest "
+                        f"pixel is {distance(faded, blend):.0f} from the blend "
+                        f"it should be"))
+                    # And it is genuinely faded, not merely gone: the same
+                    # pixel is nowhere near the full-strength colour.
+                    self.assertGreaterEqual(distance(faded, QColor(tick)), 15, (
+                        "the disabled tick is indistinguishable from a solid "
+                        "one, so fading it does nothing"))
+                    enabled.setEnabled(True)
+        finally:
+            form.close()
+
+    def test_the_tick_takes_its_colour_from_the_property_not_the_palette(self):
+        """A tick coloured once at construction goes wrong on a theme change.
+
+        The colour is read from the palette the widget was built with, which
+        is the default one, and so is invisible on a dark sheet where the
+        default highlighted text is light on light. It is exposed as a Qt
+        property so the stylesheet can set it per theme, and that is the only
+        thing keeping the ticks visible.
+        """
+        box = TickCheckBox("a box")
+        try:
+            box.set_tick_color(color(LIGHT, "success"))
+            self.assertEqual(box.tickColor.name(), color(LIGHT, "success"),
+                             "set_tick_color did not take")
+            box.setStyleSheet("TickCheckBox { qproperty-tickColor: %s; }" % color(DARK, "success"))
+            box.style().polish(box)
+            self.assertEqual(box.tickColor.name(), color(DARK, "success"),
+                             "the stylesheet could not set the tick colour, so a "
+                             "theme change leaves the ticks the old colour")
+        finally:
+            box.deleteLater()
+
+    def test_every_theme_sheet_sets_the_tick_colour_it_declares(self):
+        """Each theme has to name a tick colour, and it has to be a real one.
+
+        The tick is drawn by hand on top of the native indicator, so nothing
+        in the sheet reaches it except this property. A theme that omits the
+        rule leaves every tick on that theme at whatever colour the widget was
+        built with, which is the default palette's and is not guaranteed to
+        contrast with the sheet it is painted on. Checking the sheets against
+        each other would not catch it, because a missing rule is equally
+        missing from all three.
+        """
+        for theme in THEME_NAMES:
+            with self.subTest(theme=theme):
+                sheet = stylesheet(theme)
+                self.assertIn("qproperty-tickColor", sheet,
+                              f"the {theme} sheet never sets the tick colour")
+                declared = re.findall(r"qproperty-tickColor:\s*(#[0-9a-zA-Z]+)", sheet)
+                self.assertTrue(declared,
+                                f"the {theme} sheet never sets the tick colour")
+                for value in declared:
+                    self.assertRegex(value, r"^#[0-9a-fA-F]{6}$", (
+                        f"the {theme} sheet declares the tick colour as {value!r}, "
+                        "which is not a colour"))
+
+    def test_an_unchecked_box_is_left_to_the_style(self):
+        """No tick is drawn when there is nothing to tick.
+
+        The paint overrides the native indicator to add a visible tick, and
+        drawing one regardless would put a mark on every empty box in the
+        form, including the ones that are off. The native box has to show
+        through untouched, so an empty indicator keeps no painted pixels of
+        the tick colour.
+        """
+        box = TickCheckBox("a box")
+        try:
+            box.set_tick_color(color(DARK, "success"))
+            box.show()
+            box.setChecked(False)
+            self.app.processEvents()
+            option = QStyleOptionButton()
+            box.initStyleOption(option)
+            rect = box.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, box)
+            image = box.grab().toImage().copy(rect)
+            tick = color(DARK, "success")
+            painted = sum(image.pixelColor(x, y).name() == tick
+                          for x in range(image.width()) for y in range(image.height()))
+            self.assertEqual(painted, 0, "an unchecked box is painted as though it were on")
+        finally:
+            box.close()
 
     def test_editing_legacy_general_permissions_preserves_them_and_new_import_resets(self):
         form = ModelPurpose()

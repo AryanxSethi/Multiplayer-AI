@@ -848,6 +848,47 @@ def test_a_failure_is_not_painted_in_a_providers_colour(window) -> None:
         "your own messages carry a provider tint")
 
 
+def test_a_reply_is_named_after_the_model_that_wrote_it(window) -> None:
+    """A delegated answer is credited to its writer, not to the coordinator.
+
+    One conversation can be answered by several models in turn, so the role
+    alone does not say who is speaking and the responder recorded with the
+    reply has to. The subtitle carries the agent's own id only when that
+    differs from the model name, since printing "llama3 llama3" under every
+    reply says nothing. The provider comes along too, because it is what tints
+    the bubble and what tells two Ollama agents apart.
+    """
+    window.agents = [{"id": "coder", "online": True, "provider": "ollama", "model": "code-model-v1"}]
+    responder = {"agent_id": "coder", "model": "code-model-v1", "provider": "ollama"}
+
+    name, subtitle, provider, kind = window.speaker_identity("assistant", None, responder)
+    assert (name, subtitle, provider, kind) == ("code-model-v1", "coder", "ollama", "agent"), (
+        f"a delegated reply was labelled {name!r}/{subtitle!r}")
+
+    # An agent whose id is its model name gets no subtitle, because printing
+    # the same word twice under every reply says nothing.
+    same = window.speaker_identity("assistant", None,
+                                  {"agent_id": "solo", "model": "solo", "provider": "ollama"})
+    assert same[:2] == ("solo", ""), f"an id that is the model grew the subtitle {same[1]!r}"
+
+    # The agent is absent from the list, which is the normal case for a model
+    # on another device. The recorded responder still has to name it.
+    window.agents = []
+    name, subtitle, _, _ = window.speaker_identity("assistant", None, responder)
+    assert (name, subtitle) == ("code-model-v1", "coder"), (
+        f"an unknown responder was labelled {name!r}/{subtitle!r}")
+
+    # A responder with no recorded model falls back to the agent's, then to
+    # the agent id itself rather than to nothing at all.
+    name, subtitle, _, _ = window.speaker_identity("assistant", None, {"agent_id": "solo"})
+    assert name == "solo", f"a bare responder was labelled {name!r}"
+
+    # The responder only speaks for an assistant. A user's own message carries
+    # one by accident and must still read as the user's.
+    assert window.speaker_identity("user", None, responder)[0] == "You", (
+        "a responder overrode who the user's own message belongs to")
+
+
 def test_a_peer_message_is_named_as_a_peer(window) -> None:
     """It was labelled with the agent's name and rendered its markdown raw."""
     window.agents = [{"id": "local-llama", "online": True, "provider": "ollama",
@@ -2020,6 +2061,224 @@ def test_a_card_message_follows_a_theme_change(window) -> None:
     assert color(LIGHT, "error") in line.message.styleSheet(), (
         f"the message kept the old theme's colour: {line.message.styleSheet()!r}")
     assert color(DARK, "error") not in line.message.styleSheet()
+
+
+def test_a_member_is_offered_a_way_out_of_the_workspace_it_is_in(window, monkeypatch) -> None:
+    """A device joined to someone else's workspace could not leave it.
+
+    Leaving worked, and was tested, and was reachable only through Workspace
+    settings: a danger button in a dialog whose wording led with the loss of
+    saved messages. So on the page that shows which workspace you are in, the
+    only visible route out was one an invitation recipient had no reason to go
+    looking for. It belongs beside the invitation, and only when there is
+    somewhere to leave, since a device that owns its workspace has nothing to
+    leave.
+    """
+    window.ready = True
+    window.navigate(win.WORKSPACES_PAGE)
+    window.render_workspace_page()
+    assert window.workspace_leave_button.isHidden(), (
+        "leaving is offered on a workspace this device owns, where there is nothing to leave")
+
+    window.remote = True
+    window.render_workspace_page()
+    assert not window.workspace_leave_button.isHidden(), (
+        "a member of someone else's workspace has no way off this page")
+    assert window.workspace_leave_button.text() == "Leave workspace"
+    assert window.workspace_leave_button.toolTip(), "the leave button has no tooltip"
+    assert window.workspace_leave_button.toolTip() != window.workspace_leave_button.text()
+    assert window.workspace_leave_button.isEnabled(), "leaving cannot be started while the runtime is up"
+
+    asked = []
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: asked.append(args[2])
+                        or int(win.QMessageBox.StandardButton.Yes))
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, kwargs))
+
+    window.workspace_leave_button.click()
+
+    assert asked, "leaving happened without asking, which cannot be undone"
+    assert [name for name, _ in sent] == ["delete_workspace"], (
+        f"leaving did not reach the runtime: {sent!r}")
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.remote = False
+    window.render_workspace_page()
+    assert window.workspace_leave_button.isHidden(), (
+        "the button is still there after leaving")
+
+
+def test_leaving_asks_before_it_acts_and_says_when_the_host_refuses(window, monkeypatch) -> None:
+    """Both halves of a destructive answer, which is what the button is for.
+
+    Answering no must do nothing at all, and a host that will not release the
+    device must not leave the button dead on a page with no line saying why.
+    That second half is the one that loses people: the control stops working,
+    nothing says the host refused, and it reads as though leaving is simply
+    unavailable.
+    """
+    window.ready = True
+    window.remote = True
+    window.navigate(win.WORKSPACES_PAGE)
+    window.render_workspace_page()
+    sent = []
+    window.command = lambda name, *args, **kwargs: sent.append((name, kwargs))
+
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Cancel))
+    window.leave_workspace()
+    assert not sent, f"answering no still left the workspace: {sent!r}"
+
+    monkeypatch.setattr(win.QMessageBox, "question",
+                        lambda *args, **kwargs: int(win.QMessageBox.StandardButton.Yes))
+    window.leave_workspace()
+    assert [name for name, _ in sent] == ["delete_workspace"]
+    assert not window.workspace_leave_button.isEnabled(), (
+        "the button stayed live while the request was in flight, so it could be pressed twice")
+
+    sent[0][1]["failure"]("The host could not remove this membership.")
+    assert window.workspace_leave_button.isEnabled(), (
+        "the button stayed dead after the host refused, with nothing saying why")
+
+
+def test_the_join_card_says_where_leaving_is_possible(window) -> None:
+    """The card names a control that is only on screen in one of the two cases.
+
+    "Leave it from the card above" is true while this device is a member of
+    the workspace it is looking at, because that is when the current
+    workspace's card carries a Leave control. Hosting your own workspace while
+    holding a membership elsewhere is the other half: the card above is yours,
+    it has no Leave on it, and the way out is to switch to that workspace
+    first. Sending somebody to a button that is not there is worse than saying
+    nothing, because it reads as the control being broken.
+    """
+    window.ready = True
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.navigate(win.WORKSPACES_PAGE)
+    window.show()
+    window.remote = True
+    joined = {"id": "workspace-abc", "name": "Alex's studio", "kind": "remote",
+              "url": "wss://studio.example/connect"}
+
+    # A member looking at the workspace they joined: the card above is theirs.
+    window.workspace_list = [{"id": "local", "name": "Mine", "kind": "local"},
+                             joined]
+    window.remote = True
+    window.render_workspace_page()
+    assert window.workspace_leave_button.isVisible(), (
+        "this fixture needs the Leave control on the card for the instruction "
+        "to be true")
+    in_it = window.card_lines["workspace:join"].message.text()
+    assert "Alex's studio" in in_it, f"it does not name the workspace: {in_it!r}"
+    assert "card above" in in_it, (
+        f"it does not point at the control that works: {in_it!r}")
+
+    # Hosting our own, with a membership elsewhere: not the card above.
+    window.remote = False
+    window.render_workspace_page()
+    assert not window.workspace_leave_button.isVisible(), (
+        "this fixture needs no Leave control, or the instruction would be "
+        "right for the wrong reason")
+    hosted = window.card_lines["workspace:join"].message.text()
+    assert "Alex's studio" in hosted, f"it lost the name: {hosted!r}"
+    assert "rail" in hosted, (
+        f"it does not say how to leave while hosting another workspace: {hosted!r}")
+    assert "card above" not in hosted, (
+        f"it points at a button this device cannot see: {hosted!r}")
+
+
+def test_the_join_card_stops_naming_a_workspace_after_leaving_it(window) -> None:
+    """The message used to outlive the thing it described.
+
+    It was written only when there was a workspace joined and never cleared,
+    so after leaving, the card went on saying "You are in 'Alex's studio'" --
+    naming a workspace this device was no longer a member of, and pointing at
+    a button that was already enabled again.
+    """
+    window.ready = True
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.navigate(win.WORKSPACES_PAGE)
+    window.show()
+    window.remote = True
+    joined = {"id": "workspace-abc", "name": "Alex's studio", "kind": "remote",
+              "url": "wss://studio.example/connect"}
+
+    window.workspace_list = [{"id": "local", "name": "Mine", "kind": "local"},
+                             joined]
+    window.remote = True
+    window.render_workspace_page()
+    assert "Alex's studio" in window.card_lines["workspace:join"].message.text()
+
+    window.workspace_list = [{"id": "local", "name": "Mine", "kind": "local"}]
+    window.remote = False
+    window.render_workspace_page()
+
+    line = window.card_lines["workspace:join"].message
+    assert not line.text(), (
+        f"the card still names a workspace this device has left: {line.text()!r}")
+    assert not line.isVisible(), "the line is still on screen saying it"
+    assert window.workspace_join_button.isEnabled(), (
+        "joining is still refused after the only membership was left")
+
+
+def test_leaving_a_workspace_does_not_wipe_a_join_that_failed(window) -> None:
+    """The line carries an error and a standing hint, and they are not the same.
+
+    Clearing it unconditionally on leaving -- which is what a first attempt at
+    this did -- threw away the only account of a join that had actually failed,
+    because the message was on the same line as the explanation of which
+    workspace you are in. Only the hint is cleared.
+    """
+    window.ready = True
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.navigate(win.WORKSPACES_PAGE)
+    window.show()
+    window.remote = True
+
+    # A join is attempted and refused, and that is what the line says.
+    window.set_card_message(window.workspace_join_line, "the relay refused the token")
+    window.workspace_list = []
+    window.render_workspace_page()
+
+    assert "refused" in window.workspace_join_line.message.text(), (
+        "leaving a workspace cleared the error from a failed join: "
+        f"{window.workspace_join_line.message.text()!r}")
+
+
+def test_the_join_card_explains_itself_while_another_workspace_is_joined(window) -> None:
+    """One invitation at a time, and the page says so instead of going quiet.
+
+    The button simply stopped working when a second join was refused. A
+    disabled control with no reason is the same failure this file's other tests
+    describe: the user cannot tell a decision from a fault, and the obvious
+    next move is to conclude the app is broken. The card names the workspace to
+    be left and points at the control that does it.
+    """
+    window.ready = True
+    window.network_event("ready", {"port": 0, "device_id": "device-test"})
+    window.navigate(win.WORKSPACES_PAGE)
+    # Shown, because isVisible() is false for anything in a window that is not
+    # on screen, and whether the Leave control is there is the point.
+    window.show()
+    window.set_card_message(window.workspace_join_line, "")
+
+    assert window.workspace_join_button.isEnabled(), (
+        "joining is refused before any workspace has been joined")
+
+    joined = {"id": "workspace-abc", "name": "Alex's studio", "kind": "remote", "url": "wss://studio.example/connect"}
+    window.workspace_list = [{"id": "local", "name": "My workspace", "kind": "local"}, joined]
+    window.render_workspace_page()
+
+    assert not window.workspace_join_button.isEnabled(), (
+        "a second workspace can be joined while one is already joined")
+    line = window.card_lines["workspace:join"].message.text()
+    assert "Alex's studio" in line, f"the line does not say which workspace to leave: {line!r}"
+    # How to leave it depends on whether this device is looking at that
+    # workspace or at its own; either way the line has to say, rather than only
+    # naming a problem. Which of the two is checked properly alongside this,
+    # in the test that sets up both cases.
+    assert ("card above" in line) or ("rail" in line), (
+        f"the line does not say how to leave: {line!r}")
 
 
 def test_the_invite_card_is_on_the_workspaces_page(window) -> None:
@@ -4003,7 +4262,7 @@ def test_pages_and_titles_stay_in_step() -> None:
 
 
 def test_window_builds_every_page(window) -> None:
-    """All six pages are constructed, including the two new ones."""
+    """Every page declared in PAGES is one of the pages actually built."""
     assert len(window.nav_buttons) == len(win.PAGES)
     assert window.stack.count() == len(win.PAGES)
 
@@ -4486,3 +4745,149 @@ def test_general_chat_keeps_each_answering_model_after_routing_changes_and_resto
     assert "code-model-v1" in row_labels(rows[1])
     assert "review-model-v3" in row_labels(rows[3])
     assert all("planner-v2" not in row_labels(row) and "Jev" not in row_labels(row) for row in rows)
+
+
+def test_the_conversation_picker_is_not_rebuilt_when_nothing_changed(window) -> None:
+    """The agents poll runs every few seconds and must leave the combo alone.
+
+    It is rebuilt only when the workspace, the selection or the list of choices
+    actually differs. Rebuilding unconditionally throws away a dropdown the
+    user has open mid-poll, and a changed selection while their pointer is
+    still over it. So the same poll is run twice here and the widget is
+    expected to survive the second one untouched, which is the only way to
+    catch a signature that stops carrying the thing it is meant to carry.
+    """
+    window.selected = "alpha"
+    window.chats = {"alpha": {"messages": [("user", "hi")]}}
+    window.refresh_conversation_picker()
+    before = window.conversation_picker
+    index = window.conversation_picker.currentIndex()
+
+    window.refresh_conversation_picker()
+    assert window.conversation_picker is before, "the picker was replaced on an unchanged poll"
+    assert window.conversation_picker.currentIndex() == index, "the selection moved on an unchanged poll"
+
+    # A chat that gains messages is a real change and has to rebuild, or a
+    # conversation started on another page would never appear.
+    window.chats["beta"] = {"messages": [("user", "hi")]}
+    window.refresh_conversation_picker()
+    assert window.conversation_picker.findData("beta") >= 0, (
+        "a second conversation never reached the picker")
+
+
+def test_the_conversation_picker_says_how_much_is_unread(window) -> None:
+    """An unread count is the only thing telling a new conversation apart.
+
+    The row carries the count in its label, because the picker is the only
+    place a conversation is listed now that the sidebar has no list of its own.
+    Without it a conversation with new messages looks the same as one that has
+    been read, and the reason the user opened the app is invisible.
+    """
+    window.selected = "alpha"
+    window.chats = {"alpha": {"messages": [("user", "hi")], "unread": 3}}
+    window.refresh_conversation_picker()
+    index = window.conversation_picker.findData("alpha")
+    assert index >= 0, "the conversation is not in the picker to begin with"
+    assert "(3 new)" in window.conversation_picker.itemText(index), (
+        f"the unread count is missing from {window.conversation_picker.itemText(index)!r}")
+
+    # Reading it has to take the badge off, or it counts up forever.
+    window.chats["alpha"]["unread"] = 0
+    window.refresh_conversation_picker()
+    assert "(3 new)" not in window.conversation_picker.itemText(index), (
+        "the unread badge survived the conversation being read")
+
+
+def test_choosing_a_conversation_by_index_ignores_a_stale_one(window) -> None:
+    """A stale index must not silently switch conversations.
+
+    The agents poll can rebuild the combo between a click and the slot running,
+    so the index carries no guarantee that it still points at what the user
+    saw. An index that no longer names a conversation is dropped rather than
+    resolved to whatever now sits there, which would open the wrong thread.
+    """
+    window.agents = [{"id": "alpha", "online": True, "kind": "model", "provider": "ollama", "model": "m"}]
+    window.selected = "alpha"
+    window.chats = {"alpha": {"messages": [("user", "hi")]}}
+    window.refresh_conversation_picker()
+
+    window.choose_conversation(window.conversation_picker.count())
+    assert window.selected == "alpha", (
+        f"an out-of-range index moved the selection to {window.selected!r}")
+
+    empty = window.conversation_picker.count()
+    for index in range(empty):
+        window.conversation_picker.setItemData(index, None)
+    window.choose_conversation(0)
+    assert window.selected == "alpha", (
+        f"an index with no conversation behind it moved the selection to {window.selected!r}")
+
+
+def test_a_failure_in_another_workspace_reopens_that_conversation(window, tmp_path) -> None:
+    """A send that failed in the background is reported where it happened.
+
+    Attachment and size failures are found long after the user has moved on,
+    often into another workspace. Writing the message only to the conversation
+    on screen would put the explanation in the wrong thread, and losing it
+    means the user is told nothing about a request that did not send. So the
+    other workspace is switched to, its own saved chat is written, and the
+    conversation is opened there.
+    """
+    window.ready = True
+    other = win.HistoryStore(tmp_path / "other")
+    window.workspace_id = "here"
+    window.workspace_list = [{"id": "here"}, {"id": "there"}]
+    window.selected = "here-model"
+    window.chats = {"here-model": {"messages": [("user", "hi")]}}
+    window.history_store = win.HistoryStore(tmp_path / "here")
+    window.persist_history()
+    window.history_store = win.HistoryStore(tmp_path / "here")
+
+    # The background workspace's saved state, holding the conversation that failed.
+    other.save("ui", "state", {"chats": {"there-model": {"messages": [("user", "a draft")]}}})
+    switched = []
+    window.command = lambda name, *args, **kwargs: (
+        switched.append((name, args)), kwargs.get("success") and kwargs["success"]())
+
+    window.record_chat_error("there", other, "there-model", "Message too large")
+
+    assert [name for name, _ in switched] == ["switch_workspace"], (
+        f"the failing workspace was not opened: {switched!r}")
+    assert switched[0][1] == ("there",), f"it switched somewhere else: {switched[0][1]!r}"
+    assert "Message too large" in other.load("ui")["state"]["chats"]["there-model"]["send_error"], (
+        "the failure was not kept with the conversation it belongs to")
+    assert "send_error" not in window.chats["here-model"], (
+        "the failure was written into the workspace on screen instead")
+
+    # And the message survives a restart of that workspace. Compared as JSON,
+    # because the store round-trips through it and a saved role/text pair comes
+    # back as a list rather than the tuple it went in as.
+    reopened = other.load("ui")["state"]["chats"]["there-model"]
+    assert [list(message) for message in reopened["messages"]] == [["user", "a draft"]], (
+        f"the draft was lost while recording the failure: {reopened['messages']!r}")
+
+
+def test_a_failure_in_an_unknown_workspace_is_dropped_rather_than_guessed(window, tmp_path) -> None:
+    """A workspace that is no longer listed has nowhere to report to.
+
+    Writing into it anyway would recreate a workspace the user has left, and
+    switching to it would fail. Both are worse than saying nothing, so the
+    message is dropped and nothing is sent anywhere.
+    """
+    window.ready = True
+    window.workspace_id = "here"
+    window.workspace_list = [{"id": "here"}]
+    window.selected = "here-model"
+    window.chats = {"here-model": {"messages": [("user", "hi")]}}
+    store = win.HistoryStore(tmp_path)
+    store.save("ui", "state", {"chats": {"gone-model": {"messages": [("user", "hi")]}}})
+    switched = []
+    window.command = lambda name, *args, **kwargs: switched.append(name)
+
+    window.record_chat_error("somewhere-else", store, "gone-model", "Could not send")
+
+    assert not switched, f"it switched to a workspace that is not listed: {switched!r}"
+    assert "send_error" not in window.chats["here-model"], (
+        "the failure landed in the workspace on screen")
+    assert "send_error" not in store.load("ui")["state"]["chats"]["gone-model"], (
+        "the failure was written into a workspace the user has left")

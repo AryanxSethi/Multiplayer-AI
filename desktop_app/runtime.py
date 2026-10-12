@@ -337,6 +337,22 @@ class DesktopRuntime:
         async with self.mutation:
             existing = next((entry for entry in self.catalog["workspaces"] if entry["kind"] == "remote"
                 and entry.get("url") == url and self.scoped_storage(entry).vault.get("remote-token") == token), None)
+            # One shared workspace at a time. A second invitation is refused
+            # rather than accepted alongside the first, because the two would
+            # share this device's identity and each host would see the other's
+            # members as strangers it had never approved. Leaving is what makes
+            # room for the next one.
+            #
+            # The pair that matches is exempt, and deliberately so: this is also
+            # how a dropped connection is re-established, since _poll rejoins
+            # the saved workspace whenever the socket goes. Refusing that would
+            # turn one network blip into a workspace the user can never get
+            # back into.
+            joined = [entry for entry in self.catalog["workspaces"] if entry["kind"] == "remote"]
+            if not existing and joined:
+                entry = joined[0]
+                raise ValueError(
+                    f"You are in '{entry['name']}'. Leave that workspace before joining another.")
             entry = existing or {"id": "workspace-" + uuid4().hex, "name": "Shared workspace", "kind": "remote", "url": url}
             if not existing:
                 self.catalog["workspaces"].append(entry)

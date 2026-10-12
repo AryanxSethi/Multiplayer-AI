@@ -535,3 +535,96 @@ class InviteDialog(QDialog):
         from PySide6.QtWidgets import QApplication
         QApplication.clipboard().setText(self.result.toPlainText())
         self.window.notice("Private invitation copied. Send it only to the intended device.")
+
+
+# The three addresses one model's details are read from. Named here rather
+# than described in prose so the dialog cannot drift from what is actually
+# requested -- this list and cookbook_hub._urls have to be changed together.
+COOKBOOK_PATHS = (
+    "/api/models/<publisher>/<name>",
+    "/<publisher>/<name>/raw/main/config.json",
+    "/api/models/<builder>/<name>/tree/main",
+)
+
+
+class RefreshDisclosure(QDialog):
+    """What pressing Refresh sends, where, and how much of it.
+
+    The page used to carry this as one muted line above the list and a tooltip
+    on the button. That is a disclosure somebody has to go looking for, about
+    twelve HTTP requests they are agreeing to, and it is the only thing in the
+    app that leaves the machine under its own power.
+
+    So it is asked for at the moment of the action rather than stated in
+    advance somewhere else on the page. Every part of it is checkable before
+    the press: the exact origin, the exact paths, the count, and what is and
+    is not in the request.
+
+    The host is the one thing this cannot vouch for. A mirror is somebody
+    else's server, and the point of the dialog is that the reader gets to see
+    which one before agreeing -- not that this app has an opinion about it.
+    """
+
+    def __init__(self, window, host, models, mirror=False):
+        super().__init__(window)
+        self.window = window
+        self.host = host
+        self.models = list(models)
+        self.setWindowTitle("Request model details from " + host)
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 26, 28, 26)
+        layout.setSpacing(14)
+
+        layout.addWidget(label("ABOUT TO GO ONLINE", "eyebrow"))
+        layout.addWidget(label("Request details from " + host, "title"))
+
+        count = len(self.models)
+        plural = "s" if count != 1 else ""
+        layout.addWidget(label(
+            f"This will make {count * len(COOKBOOK_PATHS)} requests to "
+            f"{host} -- {len(COOKBOOK_PATHS)} for each of the {count} "
+            f"model{plural} in the catalogue, read one after another. Nothing "
+            "is sent until you continue.", "muted", True))
+
+        for entry in COOKBOOK_PATHS:
+            line = label(f"{host}{entry}", "command")
+            line.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            line.setAccessibleName(f"Address requested: {host}{entry}")
+            layout.addWidget(line)
+
+        sent = label(
+            "What this sends: your IP address, and the publisher and name of "
+            "every model being looked up.", "muted", True)
+        sent.setWordWrap(True)
+        layout.addWidget(sent)
+
+        not_sent = label(
+            "What this does not send: no account, no token, no workspace data, "
+            "no messages, and nothing about the machine it is running on beyond "
+            "the IP address every request carries.", "muted", True)
+        not_sent.setWordWrap(True)
+        layout.addWidget(not_sent)
+
+        if mirror:
+            note = label(
+                f"{host} is a mirror you set, not the public catalogue. "
+                "Whatever runs it can see the list of models you looked up.",
+                "muted", True)
+            note.setWordWrap(True)
+            layout.addWidget(note)
+
+        self.remember = TickCheckBox(f"Don't ask again for {host}")
+        self.remember.setAccessibleName(
+            f"Do not show this warning again for {host}")
+        self.remember.setToolTip(
+            "Remembered for this host only. Point the Cookbook at a "
+            "different host and you will be asked about that one too.")
+        layout.addWidget(self.remember, 0, Qt.AlignmentFlag.AlignLeft)
+
+        layout.addWidget(action("Continue", self.accept, True))
+        layout.addWidget(action("Cancel", self.reject))
+
+    def should_remember(self):
+        return self.remember.isChecked()
