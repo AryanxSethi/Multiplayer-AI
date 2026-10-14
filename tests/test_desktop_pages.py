@@ -5033,9 +5033,11 @@ def test_the_smallest_controls_are_still_wide_enough_to_hit(window) -> None:
     dismiss the message, and was small enough to miss with a pointer and hard
     to reach with one. The sidebar's close button was 26px on the same window.
     """
-    from desktop_app.widgets import ErrorLine
-
-    line = ErrorLine(window, "model:connect")
+    # Built by the window rather than by hand. ErrorLine takes a callable
+    # on_dismiss, so passing (window, "model:connect") bound the window as the
+    # callback and the key as the tone. The size assertions still passed, and
+    # clicking dismiss would have called the window object.
+    line = window.message_line("model:connect")
     assert line.dismiss.width() >= 28 and line.dismiss.height() >= 28, (
         f"the dismiss target is {line.dismiss.width()}x{line.dismiss.height()}")
     assert window.sidebar_close.width() >= 28 and window.sidebar_close.height() >= 28, (
