@@ -156,6 +156,11 @@ def test_every_theme_declares_the_interaction_states() -> None:
         "QPushButton#danger:hover",
         "QPushButton#danger:pressed",
         "QPushButton#danger:disabled",
+        # The one way to clear a card error is this button, and it is named, so
+        # its own border: none outranked the plain :focus rule and it was left
+        # with no visible focus like every other button was before the rules
+        # above.
+        "QPushButton#errorDismiss:focus",
         "QListWidget::item:selected",
         "QListWidget::item:hover",
         "QMenu::item:selected",

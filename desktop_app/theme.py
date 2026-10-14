@@ -622,6 +622,10 @@ QPushButton#ghost:focus { border: 1px solid @@accent@@; background: @@surface_ho
 QPushButton#primary:focus { border: 1px solid @@accent@@; }
 QPushButton#workspace:focus { border: 1px solid @@accent@@; }
 QPushButton#danger:focus { border: 1px solid @@error@@; }
+/* errorDismiss is named, and an ID selector outranks the plain :focus one, so
+   it kept its own border: none and this button alone was left with no visible
+   focus. Named rules are given here for the same reason. */
+QPushButton#errorDismiss:focus { border: 1px solid @@accent@@; }
 QToolButton:focus { border: 1px solid @@accent@@; }
 /* Deliberately no QCheckBox focus rule.
 
