@@ -1524,13 +1524,19 @@ class CookbookPanel(QWidget):
         some models and not others, and the reader would otherwise assume the
         whole list is current.
         """
-        if stopped:
-            return (f"Stopped after {len(updated)} of {total}. Read {read} from "
-                    f"{self.host_name()}. {note}{saved}")
-        if not refused:
-            return (f"Read {read} from {self.host_name()}. {note}{saved}")
         problems = "; ".join(f"{repo}: {reason}" for repo, reason
                              in sorted(refused.items()))
+        if stopped:
+            # The refusals happened before the reader pressed Stop, and a note
+            # that dropped them read the same whether a model had been refused
+            # or had never been asked about. They are part of what this press
+            # achieved, so they are reported however it ended.
+            also = (f", but {len(refused)} could not be: {problems}"
+                    if refused else "")
+            return (f"Stopped after {len(updated)} of {total}. Read {read} from "
+                    f"{self.host_name()}{also}. {note}{saved}")
+        if not refused:
+            return (f"Read {read} from {self.host_name()}. {note}{saved}")
         return (f"Read {read} from {self.host_name()}, but {len(refused)} of "
                 f"{total} could not be: {problems}. {note}{saved}")
 

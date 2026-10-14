@@ -3292,6 +3292,29 @@ def test_a_refresh_can_be_stopped_and_keeps_what_it_already_read(window) -> None
         f"{panel.catalog_note.text()!r}")
 
 
+def test_a_stopped_refresh_still_reports_what_the_host_refused(window) -> None:
+    """Pressing Stop does not make the refusals go away.
+
+    The note dropped refused when the run was stopped, so it read the same
+    whether a model had been refused or had simply never been asked about --
+    which is the one distinction that tells a reader whether to expect the
+    model back on a later press.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    targets = repopulate(panel, 3)
+
+    panel._busy = True
+    panel._cancelled = True
+    refused = {targets[0].repo: "the host said no"}
+    panel._refresh_step(1, targets, {targets[1].repo: targets[1]}, refused, targets)
+    note = panel.catalog_note.text()
+    assert "Stopped after 1 of 3" in note, f"the count is wrong: {note!r}"
+    assert "the host said no" in note, (
+        f"a stopped refresh does not say what the host refused: {note!r}")
+
+
 def test_a_stopped_refresh_reports_against_the_whole_catalogue(window) -> None:
     """A stop must not claim the catalogue was read to the end.
 
