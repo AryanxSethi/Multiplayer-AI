@@ -333,7 +333,6 @@ class DesktopRuntime:
                 raise ValueError("Only the workspace owner can rename it")
             self.entry()["name"] = name
             self.engine.storage.update(workspace_name=name)
-            self.engine.storage.save()
             self.save_catalog()
             await self.snapshot()
 
@@ -343,7 +342,6 @@ class DesktopRuntime:
             return await self.create_workspace("My workspace")
         if forget_remote:
             self.storage.discard("remote")
-            self.storage.save()
         await self.switch_workspace(local["id"])
 
     async def reset_identity(self):
@@ -409,7 +407,6 @@ class DesktopRuntime:
             if save:
                 self.storage.update(remote={"url": url, "allow_insecure": allow_insecure})
                 self.storage.vault.set("remote-token", token)
-                self.storage.save()
             self.save_catalog()
             await self.snapshot()
             if conversation_id:
