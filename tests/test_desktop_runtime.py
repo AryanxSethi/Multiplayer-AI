@@ -1219,3 +1219,25 @@ class PollBackoffTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.retry_poll()
         self.assertEqual(self.engine._poll_delay, 48)
         self.assertEqual(self.engine._poll_failures, 5)
+        self.assertFalse(self.engine._poll_wake.is_set(),
+                         "a failed Retry woke the loop into the same dead relay")
+
+    async def test_retry_wakes_the_sleeping_loop_not_just_its_delay(self):
+        """Clearing the stored delay does not reach a loop already asleep in it.
+
+        The loop reads the delay at the top of a pass and sleeps it at the
+        bottom, so a Retry that only reset the number left the loop in the old
+        wait: one manual refresh, then up to five more minutes of silence from
+        the loop that is meant to be watching the relay.
+        """
+        called = []
+
+        async def refresh():
+            called.append(True)
+
+        self.engine.refresh = refresh
+        self.engine._poll_delay, self.engine._poll_failures = 300, 9
+        await self.engine.retry_poll()
+        self.assertTrue(called, "the stubbed refresh was never used")
+        self.assertTrue(self.engine._poll_wake.is_set(),
+                        "the sleeping poll loop was not woken")

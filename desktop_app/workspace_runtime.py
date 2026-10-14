@@ -60,6 +60,12 @@ class WorkspaceRuntime:
         # moment it is reachable, not sit out a backoff earned by a fault that
         # has already been repaired.
         self._poll_delay, self._poll_failures = 3, 0
+        # Set to cut the poll's wait short. The loop reads the delay at the top
+        # of a pass and sleeps it at the bottom, so clearing the stored delay
+        # while it is already asleep changes nothing about that wait: on a relay
+        # that had backed off, a reader pressing Retry would get one manual
+        # refresh and then five more minutes of silence from the loop.
+        self._poll_wake = asyncio.Event()
         self.port = None
         self.poller = None
         self.closed = False
@@ -628,13 +634,17 @@ class WorkspaceRuntime:
 
         The poll backs off to a five minute ceiling while the relay is gone, so
         a host that has just come back would otherwise stay unnoticed until
-        that elapsed. This does not touch the backoff or restart the loop: it
-        runs a single pass, which resets the backoff if it succeeds and reports
-        offline if it does not, exactly as the loop would have.
+        that elapsed. Clearing the stored delay is not enough on its own: the
+        loop is asleep in the delay it read at the top of the pass it is on, so
+        this runs one pass, resets the backoff if that succeeded, and wakes the
+        loop so it resumes on the new cadence rather than the old one. A pass
+        that fails leaves the backoff alone and reports offline, exactly as the
+        loop would have: Retry is not a way to hammer a relay that is still gone.
         """
         try:
             await self.refresh()
             self._poll_delay, self._poll_failures = 3, 0
+            self._poll_wake.set()
         except Exception:
             self.emit("offline", "Relay connection interrupted. The app will keep trying to reconnect.")
 
@@ -709,7 +719,17 @@ class WorkspaceRuntime:
                 # Doubling, to a ceiling of five minutes, with a little
                 # jitter so a room full of clients does not come back in step.
                 self._poll_delay = min(self._poll_delay * 2, 300)
-            await asyncio.sleep(delay * (0.9 + 0.2 * random.random()))
+            try:
+                # Waiting on an event rather than sleeping, so a manual refresh
+                # can end the wait instead of only clearing the number for the
+                # next one. The event is only ever set to cut this short, so it
+                # is cleared here rather than when it is set.
+                await asyncio.wait_for(self._poll_wake.wait(),
+                                       delay * (0.9 + 0.2 * random.random()))
+            except asyncio.TimeoutError:
+                pass
+            else:
+                self._poll_wake.clear()
 
     async def send(self, target, payload):
         generation = self.generation
