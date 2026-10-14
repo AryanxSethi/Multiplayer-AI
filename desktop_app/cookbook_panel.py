@@ -584,6 +584,12 @@ class CookbookPanel(QWidget):
         self.restore.setEnabled(not busy and bool(self.directory and
                                                  self.directory.joinpath(PREVIOUS_NAME).is_file()))
         self.restore_mirror.setEnabled(not busy)
+        # The two controls that change the mirror itself, rather than undoing
+        # a save of it. They change what the refresh is reading, which is the
+        # same reason restore is off: the requests in flight are answered
+        # against the host that was set when they were issued.
+        self.mirror.setEnabled(not busy)
+        self.use_mirror.setEnabled(not busy)
         self.task_picker.setEnabled(not busy)
 
     def cancel_refresh(self):
