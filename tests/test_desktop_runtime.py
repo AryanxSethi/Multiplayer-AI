@@ -10,6 +10,7 @@ import httpx
 from desktop_app.runtime import DesktopRuntime, relay_http_url
 from desktop_app.storage import ABSENT, REMOVED, UNAVAILABLE, Storage
 import desktop_app.runtime as runtime_module
+from desktop_app.workspace_runtime import WorkspaceRuntime
 
 
 class MemoryVault:
@@ -1157,3 +1158,64 @@ class EditedProfileTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PollBackoffTests(unittest.IsolatedAsyncioTestCase):
+    """A repaired outage must not leave the poll quiet.
+
+    The backoff lived in a local of _poll, which loops forever, so within one
+    call it accumulated correctly and nothing outside could touch it. A guest
+    that rejoined after its host restarted therefore kept a backoff earned by a
+    fault that was already over and saw no agents at all while it waited out the
+    rest of it -- up to five minutes on a client that was already connected.
+
+    The state is on the engine now, so joining and Retry can both clear it.
+
+    Built directly instead of through DesktopRuntime.start(). start() populates
+    the engine and spawns the _poll loop, and that loop owns these same fields:
+    it resets them on a successful pass and doubles them on a failed one, either
+    of which lands between the setup and the assertion and decides the result.
+    Nothing here needs a relay, a socket or a clock.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.engine = WorkspaceRuntime(Storage(self.directory.name, MemoryVault()),
+                                       lambda kind, data: None)
+
+    async def asyncTearDown(self):
+        self.directory.cleanup()
+
+    async def test_the_backoff_is_state_someone_else_can_reach(self):
+        """It starts on the engine, not inside the loop that owns it."""
+        self.assertEqual(self.engine._poll_delay, 3)
+        self.assertEqual(self.engine._poll_failures, 0)
+
+    async def test_retry_clears_a_backoff_earned_by_an_outage_that_is_over(self):
+        """The reader pressing Retry should not wait out a repaired fault."""
+        called = []
+
+        async def refresh():
+            called.append(True)
+
+        self.engine.refresh = refresh
+        self.engine._poll_delay, self.engine._poll_failures = 300, 9
+        await self.engine.retry_poll()
+        self.assertTrue(called, "the stubbed refresh was never used")
+        self.assertEqual(self.engine._poll_delay, 3)
+        self.assertEqual(self.engine._poll_failures, 0)
+
+    async def test_a_retry_that_fails_leaves_the_backoff_where_it_was(self):
+        """Otherwise Retry would promise a cadence the relay cannot keep.
+
+        Clearing on a failed retry would put the poll straight back to hammering
+        a relay that is still gone, which is what the backoff is for.
+        """
+        async def refresh():
+            raise OSError("relay still gone")
+
+        self.engine.refresh = refresh
+        self.engine._poll_delay, self.engine._poll_failures = 48, 5
+        await self.engine.retry_poll()
+        self.assertEqual(self.engine._poll_delay, 48)
+        self.assertEqual(self.engine._poll_failures, 5)
