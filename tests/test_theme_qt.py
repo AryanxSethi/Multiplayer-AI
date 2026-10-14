@@ -27,7 +27,6 @@ pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop theme t
 from PySide6.QtGui import QPalette  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from desktop_app.dialogs import _style_error  # noqa: E402
 from desktop_app.storage import Storage  # noqa: E402
 from desktop_app.theme import DARK, LIGHT, MIKU, color, provider_entry, stylesheet  # noqa: E402
 from desktop_app.markdown import MarkdownMessage  # noqa: E402
@@ -407,25 +406,6 @@ def test_orbit_art_defaults_to_dark_for_a_caller_that_forgets(qt_app) -> None:
     during startup.
     """
     assert OrbitArt()._theme == DARK
-
-
-def test_dialog_error_label_follows_the_window_theme(qt_app) -> None:
-    """A dialog's error label is coloured from the window's live theme."""
-
-    class StubWindow:
-        theme = DARK
-
-    window_stub = StubWindow()
-    widget = label("")
-
-    _style_error(widget, window_stub)
-    dark = widget.styleSheet()
-
-    window_stub.theme = LIGHT
-    _style_error(widget, window_stub)
-
-    assert widget.styleSheet() != dark
-    assert "color: " in widget.styleSheet()
 
 
 def test_app_icon_differs_between_themes(qt_app) -> None:

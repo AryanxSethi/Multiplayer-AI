@@ -3922,11 +3922,15 @@ def test_the_dialog_dropdowns_ignore_the_wheel(window, qt_app) -> None:
     Scroll inside a dialog and the provider silently changes, which is
     worse than no scroll at all because the choice is what gets sent.
     """
-    from desktop_app.dialogs import AgentDialog, InviteDialog
+    from desktop_app.dialogs import InviteDialog
 
-    dialogs = [AgentDialog(window, "ollama", {}), InviteDialog(window)]
+    # The connect-a-model dialog is gone. These are the dropdowns it used to
+    # own, now on the card that replaced it, plus the ones still in a dialog.
+    invite = InviteDialog(window)
+    combos = [window.model_provider, window.model_id,
+              window.model_search_provider, window.model_search_mode]
+    combos += invite.findChildren(win.Select)
     try:
-        combos = [c for d in dialogs for c in d.findChildren(win.Select)]
         assert len(combos) >= 4, f"only {len(combos)} dropdowns were found"
         for combo in combos:
             assert isinstance(combo, win.Select), (
@@ -3946,8 +3950,7 @@ def test_the_dialog_dropdowns_ignore_the_wheel(window, qt_app) -> None:
                     f"a {type(combo.parent()).__name__} dropdown moved "
                     f"on a {delta:+d} notch")
     finally:
-        for dialog in dialogs:
-            dialog.deleteLater()
+        invite.deleteLater()
 
 
 def test_a_checkbox_paints_nothing_behind_itself(window, qt_app) -> None:
