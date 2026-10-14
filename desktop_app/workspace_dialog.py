@@ -196,13 +196,25 @@ class WorkspaceDialog(QDialog):
 
     def invite(self):
         InviteDialog(self.window).exec()
+        self.window.reload_workspace_invitations(self)
+        # Refreshed independently of refresh(): an invitation does not change
+        # who is in the workspace, so that call returns early and the list of
+        # invitations this device can reissue would keep showing what it had
+        # before the reader made this one.
         self.refresh()
 
     def remove(self, identity):
         if QMessageBox.question(self, "Remove member", f"Remove {identity}? Their invitation will be revoked and their connection closed.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
             return
-        self.window.command("remove_member", identity, success=lambda result: self.refresh(), failure=self.error.setText)
+
+        def revoked(result):
+            # The names this device can reissue come from a separate read, so
+            # reloading them is not part of redrawing the members table.
+            self.window.reload_workspace_invitations(self)
+            self.refresh()
+
+        self.window.command("remove_member", identity, success=revoked, failure=self.error.setText)
 
     def delete(self):
         if self.window.remote:

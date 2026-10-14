@@ -5235,3 +5235,48 @@ def test_refreshing_invitations_empties_the_rows_and_keeps_the_heading(window) -
             if hasattr(child, "text")]
     assert "laptop-one" not in text, f"a removed invitation was still listed: {text}"
     assert "Invitations already created" in text, "the heading went missing on refresh"
+
+def test_making_or_removing_an_invitation_reloads_the_list(window, monkeypatch) -> None:
+    """The invitations must follow the reader's changes without a reopen.
+
+    The dialog reads the list when it opens, and its own refresh() returns early
+    whenever membership is unchanged -- which is exactly what making an
+    invitation does, since nobody has joined yet. So a new invitation never
+    appeared, and a revoked one stayed, until the dialog was closed and opened
+    again.
+    """
+    from desktop_app import workspace_dialog as dialog_module
+
+    window.outstanding_invitations = []
+    dialog = dialog_module.WorkspaceDialog(window)
+
+    reloaded = []
+    monkeypatch.setattr(window, "reload_workspace_invitations",
+                        lambda target: reloaded.append(target))
+
+    class StubInvite:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(dialog_module, "InviteDialog", StubInvite)
+    dialog.invite()
+    assert reloaded == [dialog], "making an invitation did not re-read the list"
+
+    reloaded.clear()
+    monkeypatch.setattr(
+        dialog_module.QMessageBox, "question",
+        lambda *args, **kwargs: dialog_module.QMessageBox.StandardButton.Yes)
+    sent = []
+
+    def command(method, *args, **kwargs):
+        sent.append(method)
+        if kwargs.get("success"):
+            kwargs["success"](None)
+
+    monkeypatch.setattr(window, "command", command)
+    dialog.remove("guest-laptop")
+    assert sent == ["remove_member"], sent
+    assert reloaded == [dialog], "revoking an invitation did not re-read the list"
