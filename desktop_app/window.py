@@ -4037,8 +4037,19 @@ class MainWindow(QMainWindow):
         self.command("delete_workspace", success=done, failure=failed)
 
     def manage_workspace(self):
+        """Open workspace settings, with the invitations this device can reissue.
+
+        The list is fetched once, when the dialog opens, rather than polled:
+        it changes only when this reader creates or removes an invitation, and
+        both of those happen from this window rather than in the background.
+        Reading it through the network thread would mean a second poll ticking
+        every second for a list that is almost always empty.
+        """
         from .workspace_dialog import WorkspaceDialog
         if self.ready:
+            self.outstanding_invitations = []
+            self.command("outstanding_invitations",
+                         success=lambda names: setattr(self, "outstanding_invitations", names))
             WorkspaceDialog(self).exec()
 
     def invite_device(self):

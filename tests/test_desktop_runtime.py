@@ -870,5 +870,89 @@ class BackgroundArchiveTests(unittest.IsolatedAsyncioTestCase):
                          "a locked keyring was reported as a lost relay")
         self.assertIsInstance(result, dict)
 
+
+class InvitationRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """An invitation has to be showable more than once.
+
+    It used to be readable exactly once, in the dialog that created it. Close
+    it without copying and that device could never join, because the token was
+    minted, saved to the credential store, and never written anywhere the
+    reader could get at again -- and the only documented way out was to reset
+    their own identity, which destroys every other identity in the workspace.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.events = []
+        self.runtime = DesktopRuntime(Storage(self.directory.name, self.vault),
+                                      lambda kind, data: self.events.append((kind, data)))
+        await self.runtime.start()
+        self.engine = self.runtime.engine
+
+    async def asyncTearDown(self):
+        await self.runtime.close()
+        self.directory.cleanup()
+
+    async def test_an_invitation_can_be_shown_again_after_it_was_made(self):
+        made = await self.runtime.invite("guest-laptop", self.runtime.active_url)
+
+        assert await self.runtime.outstanding_invitations() == ["guest-laptop"], (
+            "an invitation that was just made cannot be listed, so it cannot be "
+            "shown again")
+
+        again = await self.runtime.invitation_for("guest-laptop")
+        assert again == made, (
+            f"the invitation shown again is not the one that was issued:\n"
+            f"  issued: {made}\n  again:  {again}")
+
+    async def test_the_token_is_read_back_from_the_credential_store_not_stored(self):
+        """A settings file copied off this machine must not carry anyone's access."""
+        await self.runtime.invite("guest-laptop", self.runtime.active_url)
+        recorded = self.engine.storage.settings["invitations"]["guest-laptop"]
+
+        assert "token" not in recorded, (
+            f"the token was written into settings.json: {recorded}")
+        assert self.engine.storage.vault.get("relay:guest-laptop"), (
+            "the token is not in the credential store, so it cannot be read back")
+
+        written = json.loads(Path(self.directory.name, "settings.json").read_text())
+        assert "guest-laptop" in written["invitations"], (
+            "the invitation was not recorded at all, so it cannot be recovered")
+        blob = json.dumps(written)
+        token = self.engine.storage.vault.get("relay:guest-laptop")
+        assert token not in blob, (
+            "the relay token appears in the settings file on disk")
+
+    async def test_a_removed_member_cannot_have_their_invitation_reissued(self):
+        await self.runtime.invite("guest-laptop", self.runtime.active_url)
+        await self.runtime.remove_member("guest-laptop")
+
+        assert await self.runtime.outstanding_invitations() == [], (
+            "a removed member is still offered an invitation, and the token it "
+            "would read back has been deleted, so the offer only fails on use")
+        with self.assertRaisesRegex(ValueError, "no saved invitation"):
+            await self.runtime.invitation_for("guest-laptop")
+
+    async def test_a_locked_credential_store_says_so_rather_than_issuing_a_broken_one(self):
+        """An invitation missing its token looks valid until the guest is refused."""
+        await self.runtime.invite("guest-laptop", self.runtime.active_url)
+
+        class Locked:
+            def get(self, name):
+                raise RuntimeError("The OS credential store is unavailable.")
+
+        self.engine.storage.vault = Locked()
+        with self.assertRaisesRegex(ValueError, "credential store"):
+            await self.runtime.invitation_for("guest-laptop")
+
+    async def test_a_guest_is_never_shown_another_device_token(self):
+        await self.runtime.invite("guest-laptop", self.runtime.active_url)
+        self.engine.remote = True
+
+        assert await self.runtime.outstanding_invitations() == [], (
+            "a guest can list the invitations its host made")
+        with self.assertRaisesRegex(ValueError, "host"):
+            await self.runtime.invitation_for("guest-laptop")
 if __name__ == "__main__":
     unittest.main()

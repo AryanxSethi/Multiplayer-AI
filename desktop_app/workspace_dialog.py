@@ -2,8 +2,9 @@
 import json
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import (QDialog, QHBoxLayout, QHeaderView, QLineEdit,
-    QMessageBox, QTableWidget, QTableWidgetItem, QVBoxLayout)
+from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QHeaderView,
+    QLineEdit, QMessageBox, QPlainTextEdit, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget)
 
 from .dialogs import InviteDialog
 from .widgets import action, label
@@ -40,6 +41,21 @@ class WorkspaceDialog(QDialog):
         self.invite_button = action("Invite a member", self.invite)
         self.invite_button.setEnabled(not window.remote)
         layout.addWidget(self.invite_button)
+        # Invitations already made, so one can be shown again. An invitation
+        # used to be readable exactly once, in the dialog that made it: close
+        # it without copying and that device could never join, and the only way
+        # to recover was to reset this device's own identity, which destroys
+        # every other identity in the workspace too. The token is read back
+        # from the credential store on demand and is never held here.
+        self.invitations_box = QWidget()
+        invitations_column = QVBoxLayout(self.invitations_box)
+        invitations_column.setContentsMargins(0, 10, 0, 0)
+        invitations_column.setSpacing(8)
+        invitations_column.addWidget(label("Invitations already created", "heading"))
+        self.invitations_note = label("", "muted", True)
+        invitations_column.addWidget(self.invitations_note)
+        self.invitations_box.setVisible(False)
+        layout.addWidget(self.invitations_box)
         if window.remote:
             layout.addWidget(label("The owner manages this workspace's name and members.", "muted", True))
         self.error = label("", "muted", True)
@@ -59,6 +75,41 @@ class WorkspaceDialog(QDialog):
         # None rather than an empty string, so the first pass always draws.
         self.signature = None
         self.refresh()
+
+    def show_invitation(self, agent_id, invitation):
+        """Show one invitation again, read-only, with a copy button.
+
+        The token is only ever in the dialog that is showing it, and never in
+        the workspace settings.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Invitation for {agent_id}")
+        dialog.setMinimumWidth(520)
+        column = QVBoxLayout(dialog)
+        column.setContentsMargins(26, 24, 26, 24)
+        column.setSpacing(14)
+        column.addWidget(label(f"INVITATION FOR {agent_id.upper()}", "eyebrow"))
+        column.addWidget(label("Send this to the device", "title"))
+        body = QPlainTextEdit(json.dumps(invitation, indent=2))
+        body.setReadOnly(True)
+        column.addWidget(body)
+        row = QHBoxLayout()
+        copy = action("Copy", lambda: QApplication.clipboard().setText(
+            json.dumps(invitation, indent=2)))
+        copy.setAccessibleName(f"Copy the invitation for {agent_id} to the clipboard")
+        row.addWidget(copy)
+        row.addStretch()
+        row.addWidget(action("Done", dialog.accept))
+        column.addLayout(row)
+        dialog.exec()
+
+    def reissue_invitation(self, agent_id):
+        """Fetch a saved invitation and show it."""
+        def done(invitation):
+            self.show_invitation(agent_id, invitation)
+        def failed(message):
+            self.error.setText(message)
+        self.window.command("invitation_for", agent_id, success=done, failure=failed)
 
     def refresh(self):
         """Redraw only when the membership has actually changed.
@@ -92,6 +143,32 @@ class WorkspaceDialog(QDialog):
                 remove.setToolTip(f"Revoke {member['id']}'s invitation and close its connection")
                 self.members.setCellWidget(row, 3, remove)
             self.members.setRowHeight(row, 46)
+        self.refresh_invitations()
+
+    def refresh_invitations(self):
+        """List the invitations this device can still issue, one row each."""
+        names = list(getattr(self.window, "outstanding_invitations", ()) or ())
+        for child in self.invitations_box.findChildren(QWidget):
+            if child is not self.invitations_box:
+                self.invitations_box.layout().removeWidget(child)
+                child.setParent(None)
+        if not names:
+            self.invitations_box.setVisible(False)
+            return
+        self.invitations_box.setVisible(True)
+        self.invitations_note.setText(
+            "Shown again from this device's credential store. Closing an "
+            "invitation without sending it no longer strands that device.")
+        for agent_id in names:
+            row = QHBoxLayout()
+            row.addWidget(label(agent_id, "body"))
+            row.addStretch()
+            button = action("Show invitation", lambda checked=False, name=agent_id:
+                            self.reissue_invitation(name), name="ghost")
+            button.setAccessibleName(f"Show the invitation for {agent_id} again")
+            button.setToolTip(f"Read the saved invitation for {agent_id} from the credential store")
+            row.addWidget(button)
+            self.invitations_box.layout().addLayout(row)
 
     def rename(self):
         self.rename_button.setEnabled(False)

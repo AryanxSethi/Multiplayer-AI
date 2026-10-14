@@ -878,7 +878,72 @@ class WorkspaceRuntime:
             invitation["workspace_name"] = self.storage.settings.get("workspace_name", "My workspace")
             if conversation_id:
                 invitation["conversation_id"] = conversation_id
+            # Everything except the token, so the invitation can be shown again
+            # later. The token itself is not written here and never leaves the
+            # credential store: it is read back from the vault on demand, so a
+            # settings file that is copied off this machine does not carry
+            # anyone's access. An invitation used to be readable exactly once,
+            # in the dialog that created it, which meant a reader who closed
+            # it without copying had stranded the device they were inviting --
+            # and the only way out was to reset their own identity, which
+            # destroys every other identity in the workspace with it.
+            invitations = dict(self.storage.settings.get("invitations") or {})
+            invitations[agent_id] = {
+                "url": public_url, "allow_insecure": bool(lan),
+                "workspace_name": invitation["workspace_name"],
+                "conversation_id": conversation_id or ""}
+            self.storage.settings["invitations"] = invitations
+            self.storage.save()
             return invitation
+
+    async def outstanding_invitations(self):
+        """Device identities this device minted, and can still issue an invite for.
+
+        Everything except the local identity and anything that is a connected
+        model agent: a model agent has a profile in settings["agents"] and was
+        connected rather than invited, so it has no invitation to reissue.
+        """
+        if self.remote:
+            return []
+        agents = {profile["id"] for profile in self.storage.settings.get("agents", [])}
+        recorded = self.storage.settings.get("invitations") or {}
+        return sorted(name for name in self.credentials
+                      if name != self.active_id and name not in agents
+                      and name in recorded)
+
+    async def invitation_for(self, agent_id):
+        """Rebuild one invitation, reading its token back from the credential store.
+
+        Raises rather than returning a partial invitation: an invitation
+        missing its token looks like a valid one until the guest is refused,
+        and the reader has no way to tell which of the two they are holding.
+        """
+        if self.remote:
+            raise ValueError("Only this workspace's host can issue invitations")
+        recorded = (self.storage.settings.get("invitations") or {}).get(agent_id)
+        if not recorded:
+            raise ValueError(f"There is no saved invitation for {agent_id}")
+        try:
+            token = self.storage.vault.get("relay:" + agent_id)
+        except (RuntimeError, OSError):
+            # The store is locked. Vault.get raises rather than returning
+            # nothing, and letting that through as a generic failure would say
+            # the operation failed, when what is actually true is that it has
+            # not been tried yet.
+            raise ValueError(
+                f"The saved invitation for {agent_id} cannot be read because "
+                f"your credential store is locked. Unlock it and try again."
+            ) from None
+        if not token:
+            raise ValueError(
+                f"The saved invitation for {agent_id} is no longer in your "
+                f"credential store. Create a new one.")
+        invitation = {"version": 1, "agent_id": agent_id, "url": recorded["url"],
+                      "token": token, "allow_insecure": bool(recorded["allow_insecure"])}
+        invitation["workspace_name"] = recorded["workspace_name"]
+        if recorded.get("conversation_id"):
+            invitation["conversation_id"] = recorded["conversation_id"]
+        return invitation
 
     async def remove_member(self, member):
         """Revoke a member's access and clean up its runner, history, and credentials."""
@@ -891,6 +956,14 @@ class WorkspaceRuntime:
             if member not in self.credentials:
                 raise ValueError("This member is no longer in the workspace")
             updated = {name: config for name, config in self.credentials.items() if name != member}
+            # The invitation record goes with the credential, or the Workspaces
+            # page would keep offering to reissue an invitation for someone who
+            # has just been removed -- and the token it would read back has
+            # been deleted below, so the offer would only fail when used.
+            invitations = {name: saved for name, saved
+                           in (self.storage.settings.get("invitations") or {}).items()
+                           if name != member}
+            self.storage.settings["invitations"] = invitations
             self.storage.save_credentials(updated)
             self.credentials = updated
             self.app.state.relay.credentials = updated
