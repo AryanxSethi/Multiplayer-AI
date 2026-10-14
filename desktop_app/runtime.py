@@ -158,14 +158,37 @@ class DesktopRuntime:
                 engine = self.engines[workspace_id]
                 state = engine.history_store.load("ui").get("state", {})
                 previous = state.get("conversations", {})
-                state["conversations"] = {room["id"]: room for room in data}
                 chats = state.setdefault("chats", {})
+                # Nothing to do when every room already carries the revision we
+                # last wrote. This branch runs for every workspace on every poll
+                # tick, three seconds apart, for as long as the app is open --
+                # and the rewrite below is the whole archive: every room, every
+                # message, plus state["conversations"], which keeps the rooms
+                # raw so attachments stay as the base64 they arrived as. On a
+                # workspace holding a few images that is megabytes re-encoded
+                # into SQLite twenty times a minute to reproduce what was
+                # already on disk.
+                #
+                # The same guard the window applies to the workspace on screen
+                # (network_event, "conversations"). A revision is the room's
+                # own account of what has changed, so an unchanged one means
+                # the copy on disk is already correct.
+                rooms = {room["id"]: room for room in data}
+                # A room that has vanished is a change too. Leaving it out of
+                # the guard would mean a conversation deleted on another device
+                # stayed in this workspace's archive for ever, because the only
+                # code that removes it is the code this guard now skips.
+                dropped = [key for key in chats
+                           if key.startswith("conversation-") and key not in rooms]
+                if not dropped and all(chats.get(room_id, {}).get("revision") == room["revision"]
+                                       for room_id, room in rooms.items()):
+                    return
+                state["conversations"] = rooms
                 # Rooms that dropped off the listing are gone, and their saved
                 # chats go with them. Only added to before, so a conversation
                 # deleted on another device stayed in this workspace's archive
                 # for good, and came back if the room ever reappeared.
-                for target in [key for key in chats
-                               if key.startswith("conversation-") and key not in state["conversations"]]:
+                for target in dropped:
                     del chats[target]
                 for room in data:
                     chat = chats.setdefault(room["id"], {"messages": [], "history": []})

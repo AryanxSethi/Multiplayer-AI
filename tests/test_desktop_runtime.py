@@ -772,5 +772,103 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
 
 
+class BackgroundArchiveTests(unittest.IsolatedAsyncioTestCase):
+    """The archive of a workspace nobody is looking at.
+
+    Every workspace gets its own engine and its own poll, so this branch runs
+    three seconds apart for all of them, for as long as the app is open.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.events = []
+        self.runtime = DesktopRuntime(Storage(self.directory.name, self.vault),
+                                      lambda kind, data: self.events.append((kind, data)))
+        await self.runtime.start()
+        await self.runtime.create_workspace("Second")
+        self.other_id, self.other = next((i, engine) for i, engine in self.runtime.engines.items()
+                                         if i != self.runtime.active_workspace_id)
+        self.saves = []
+        original = self.other.history_store.save
+        def counted(*args, **kwargs):
+            self.saves.append(1)
+            return original(*args, **kwargs)
+        self.other.history_store.save = counted
+
+    async def asyncTearDown(self):
+        await self.runtime.close()
+        self.directory.cleanup()
+
+    def room(self, revision="r1", room_id="conversation-one"):
+        return {"id": room_id, "revision": revision, "pending": False,
+                "messages": [{"id": "m1", "role": "user", "from": "someone", "content": "hello"}]}
+
+    async def test_an_unchanged_room_is_not_rewritten_to_disk(self):
+        """The whole archive, twenty times a minute, to reproduce what is there.
+
+        The listing arrives on every poll tick whether or not anything moved,
+        and the rewrite below rebuilds every room and every message -- plus
+        state["conversations"], which keeps the rooms raw, so an attachment
+        still in. A revision is the room's own account of what has changed, so
+        an unchanged one means the copy on disk is already right.
+        """
+        self.runtime.forward(self.other_id, "conversations", [self.room()])
+        first = len(self.saves)
+        self.assertTrue(self.saves, "nothing was written even the first time")
+
+        self.runtime.forward(self.other_id, "conversations", [self.room()])
+        self.assertEqual(len(self.saves), first,
+                         "an unchanged room was rewritten to SQLite again")
+
+        self.runtime.forward(self.other_id, "conversations", [self.room(revision="r2")])
+        self.assertGreater(len(self.saves), first,
+                           "a room whose revision moved was not written at all")
+
+    async def test_a_room_deleted_elsewhere_is_still_removed_here(self):
+        """The skip must not also skip the cleanup.
+
+        Rooms that vanish from the listing are deleted from the archive, and
+        that is the only code that does it. A guard that only compared
+        revisions would leave a conversation deleted on another device in this
+        workspace's archive for ever, because nothing would ever remove it.
+        """
+        self.runtime.forward(self.other_id, "conversations",
+                             [self.room(), self.room("r1", "conversation-two")])
+        saved = self.other.history_store.load("ui")["state"]["chats"]
+        self.assertIn("conversation-two", saved)
+
+        self.runtime.forward(self.other_id, "conversations", [self.room()])
+        saved = self.other.history_store.load("ui")["state"]["chats"]
+        self.assertNotIn("conversation-two", saved,
+                         "a conversation deleted on another device was kept for good")
+        self.assertIn("conversation-one", saved)
+
+    async def test_a_locked_credential_store_is_not_reported_as_a_relay_failure(self):
+        """Vault.get raises when the OS store is locked, and the read was unguarded.
+
+        It escaped refresh() into the poll loop above it, which reported
+        "Relay connection interrupted" -- blaming the relay for a keyring
+        problem, and repeating it every three seconds.
+        """
+        class Locked:
+            def get(self, name):
+                raise RuntimeError("The OS credential store is unavailable.")
+
+        self.other.storage.vault = Locked()
+        # runners holds (client, task) pairs; only the client's ready event is
+        # read on this path, and teardown cancels the task, so both are given.
+        task = asyncio.ensure_future(asyncio.sleep(3600))
+        self.addAsyncCleanup(task.cancel)
+        self.other.runners["chat-agent"] = (unittest.mock.Mock(ready=asyncio.Event()), task)
+        profiles = {"chat-agent": {"id": "chat-agent", "provider": "ollama",
+                                   "model": "chat", "base_url": "http://127.0.0.1:1"}}
+
+        result = await self.other.refresh_ollama_availability(profiles)
+
+        self.assertNotIn("offline", [kind for kind, _ in self.events],
+                         "a locked keyring was reported as a lost relay")
+        self.assertIsInstance(result, dict)
+
 if __name__ == "__main__":
     unittest.main()

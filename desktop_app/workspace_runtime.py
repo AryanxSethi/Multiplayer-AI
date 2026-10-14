@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import json
+import random
 import re
 import secrets
 import socket
@@ -552,8 +553,21 @@ class WorkspaceRuntime:
         runners = {identity: self.runners[identity] for identity in active}
         endpoints = {}
         for identity, profile in active.items():
+            # Guarded, because Vault.get raises when the OS credential store is
+            # locked or unavailable. It used to be read outside any try, so the
+            # error escaped refresh() into the poll loop above it, which
+            # reported the failure as "Relay connection interrupted" -- telling
+            # the reader their relay had gone when their keyring was the thing
+            # that had. It then repeated every three seconds.
+            #
+            # No key means no Ollama account, which is the same answer as a
+            # probe that could not reach the server: nothing available.
+            try:
+                key = self.storage.vault.get("provider:" + identity)
+            except (RuntimeError, OSError):
+                key = None
             endpoint = (profile.get("base_url") or PROVIDERS["ollama"].base_url,
-                        self.storage.vault.get("provider:" + identity), profile.get("allow_insecure", False))
+                        key, profile.get("allow_insecure", False))
             endpoints.setdefault(endpoint, []).append(identity)
 
         async def available(endpoint):
@@ -621,6 +635,14 @@ class WorkspaceRuntime:
 
     async def _poll(self):
         next_join = time.monotonic() + 15
+        # How long to wait before the next attempt, and how many attempts have
+        # failed in a row. The cadence was a flat three seconds whatever had
+        # happened, which is right while things work and wrong the moment they
+        # do not: an unreachable host was asked for /agents, /conversations and
+        # /workspace every three seconds for as long as the app stayed open, and
+        # every desktop client sharing that host came back at the same moment
+        # and asked again together.
+        delay, failures = 3, 0
         while not self.closed:
             saved = self.storage.settings.get("remote") if self.restore_remote else None
             if saved and not self.remote and time.monotonic() >= next_join:
@@ -633,9 +655,17 @@ class WorkspaceRuntime:
                     pass
             try:
                 await self.refresh()
+                # Back to the steady cadence on the first success, so a blip
+                # costs one slow moment rather than the rest of the session.
+                failures = 0
+                delay = 3
             except Exception:
+                failures += 1
                 self.emit("offline", "Relay connection interrupted. The app will keep trying to reconnect.")
-            await asyncio.sleep(3)
+                # Doubling, to a ceiling of five minutes, with a little
+                # jitter so a room full of clients does not come back in step.
+                delay = min(delay * 2, 300)
+            await asyncio.sleep(delay * (0.9 + 0.2 * random.random()))
 
     async def send(self, target, payload):
         generation = self.generation
