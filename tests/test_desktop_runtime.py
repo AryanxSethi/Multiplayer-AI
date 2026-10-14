@@ -1156,10 +1156,6 @@ class EditedProfileTests(unittest.IsolatedAsyncioTestCase):
         result = await self.runtime.send("researcher", {"text": "Hello after three edits"})
         self.assertEqual(result["text"], "Replied")
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PollBackoffTests(unittest.IsolatedAsyncioTestCase):
     """A repaired outage must not leave the poll quiet.
 
@@ -1241,3 +1237,7 @@ class PollBackoffTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(called, "the stubbed refresh was never used")
         self.assertTrue(self.engine._poll_wake.is_set(),
                         "the sleeping poll loop was not woken")
+
+
+if __name__ == "__main__":
+    unittest.main()
