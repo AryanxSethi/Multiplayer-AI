@@ -623,10 +623,15 @@ QPushButton#primary:focus { border: 1px solid @@accent@@; }
 QPushButton#workspace:focus { border: 1px solid @@accent@@; }
 QPushButton#danger:focus { border: 1px solid @@error@@; }
 QToolButton:focus { border: 1px solid @@accent@@; }
-/* On the indicator rather than the box: the indicator is a fixed 16px, so
-   outlining it cannot change the size of the control it belongs to, and a
-   focus ring that reflows the row under the reader's fingers is its own bug. */
-QCheckBox:focus::indicator { border: 1px solid @@accent@@; }
+/* Deliberately no QCheckBox focus rule.
+
+   One was here and it was wrong. Outlining each indicator put a ring beside
+   every option, so a card with four of them -- Connect a model carries four --
+   read as four boxes to be stepped through rather than four settings. The
+   cost is real: a keyboard reader cannot see where they are on a checkbox.
+   The honest trade is to say so here rather than pretend the rule is
+   elsewhere; if a subtler cue is wanted later, a background tint on the
+   label is the shape that does not box each option individually. */
 QListWidget:focus { outline: 1px solid @@accent@@; }
 QTableWidget:focus { outline: 1px solid @@accent@@; }
 QLineEdit, QPlainTextEdit, QComboBox { background: @@input_bg@@; color: @@text@@; border: 1px solid @@border_strong@@; border-radius: 7px; padding: 10px; selection-background-color: @@accent@@; selection-color: @@on_accent@@; }

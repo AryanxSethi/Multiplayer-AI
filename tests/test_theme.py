@@ -149,7 +149,6 @@ def test_every_theme_declares_the_interaction_states() -> None:
         "QPushButton#nav:focus",
         "QPushButton#ghost:focus",
         "QPushButton#workspace:focus",
-        "QCheckBox:focus::indicator",
         "QListWidget:focus",
         # The danger button, which carries the most consequential actions in
         # the app -- leave, delete, reset identity, remove member -- and had a
@@ -382,7 +381,13 @@ def test_every_button_reachable_by_keyboard_advertises_that_it_is_focused() -> N
         assert "QPushButton:focus" in sheet, f"{name}: no focus rule for a button"
         assert "QPushButton#nav:focus" in sheet, f"{name}: the nav rail has no focus rule"
         assert "QPushButton#ghost:focus" in sheet, f"{name}: ghost buttons have no focus rule"
-        assert "QCheckBox:focus::indicator" in sheet, f"{name}: a checkbox has no focus rule"
+        # No checkbox focus ring, on purpose. See the note in theme.py:
+        # outlining each indicator put a ring beside every option, and a card
+        # carrying four settings read as four boxes to step through. Asserted
+        # so the ring cannot quietly come back.
+        assert "QCheckBox:focus" not in sheet, (
+            f"{name} puts a focus ring on every checkbox option, which on a card "
+            f"with several settings reads as a box per setting")
         assert "QListWidget:focus" in sheet, f"{name}: the activity list has no focus rule"
 
 
