@@ -1435,7 +1435,11 @@ class CookbookPanel(QWidget):
         """
         total = len(targets)
         if self._cancelled:
-            self._finish_refresh(index, updated, refused, before, stopped=True)
+            # index, not total: the note reports what was read out of what could
+            # have been, and index is how many were. Passing total there made a
+            # stop after 3 of 4 say "Stopped after 3 of 3" -- the one claim the
+            # reader cannot check and is most likely to believe.
+            self._finish_refresh(total, updated, refused, before, stopped=True)
             return
         if index >= total:
             self._finish_refresh(total, updated, refused, before)

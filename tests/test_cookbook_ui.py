@@ -3292,6 +3292,27 @@ def test_a_refresh_can_be_stopped_and_keeps_what_it_already_read(window) -> None
         f"{panel.catalog_note.text()!r}")
 
 
+def test_a_stopped_refresh_reports_against_the_whole_catalogue(window) -> None:
+    """A stop must not claim the catalogue was read to the end.
+
+    The note reports what was read out of what could have been. It was being
+    handed the number completed as its denominator, so stopping after one of
+    four said "Stopped after 1 of 1" -- the one claim on this page the reader
+    cannot check for themselves, and the one most likely to be acted on.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    targets = repopulate(panel, 4)
+
+    panel._busy = True
+    panel._cancelled = True
+    panel._refresh_step(1, targets, {targets[0].repo: targets[0]}, {}, targets)
+    note = panel.catalog_note.text()
+    assert f"Stopped after 1 of {len(targets)}" in note, (
+        f"a stopped refresh does not say how much was left unread: {note!r}")
+
+
 def test_arriving_on_the_page_re_reads_what_this_device_has_free(window) -> None:
     """The page ranks models by free memory, and read it once, at construction.
 
