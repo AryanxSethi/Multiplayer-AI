@@ -3221,3 +3221,66 @@ def test_a_member_is_offered_no_way_to_invite_a_device(window, monkeypatch) -> N
     assert not opened, "a member opened the invitation dialog"
     assert window.stack.currentIndex() == before, (
         "a member was sent somewhere from an action that is not theirs to take")
+
+
+def test_a_refresh_reads_only_the_models_it_was_started_with(window) -> None:
+    """The step used to index the live catalogue, with a hard-coded fallback.
+
+    If the catalogue was shorter than the step's index -- which a Restore
+    pressed mid-refresh could arrange -- the step fell through to a literal
+    Qwen repository and fetched, attributed and merged a model nobody asked
+    for. With the target list fixed at the press there is no index to be out
+    of range of, and no fallback left to reach.
+    """
+    import inspect
+
+    from desktop_app import cookbook_panel
+
+    source = inspect.getsource(cookbook_panel.CookbookPanel._refresh_step)
+    assert "self.catalog[index]" not in source, (
+        "the step re-reads the live catalogue rather than the list it was given")
+    assert "Qwen/Qwen2.5-0.5B-Instruct" not in source, (
+        "the step still holds a fallback repository to fetch when it has no model")
+
+def test_a_refresh_can_be_stopped_and_keeps_what_it_already_read(window) -> None:
+    """A refresh is up to three requests a model at fifteen seconds each.
+
+    Four models is a minute and a half with no way to end it early, and the
+    Restore button stayed live throughout -- which is how a restore could
+    shorten the catalogue underneath the request in progress.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    assert panel.refresh.isVisible(), "there is no way to see what refreshes"
+    assert panel.stop_refresh.isHidden(), "a Stop is offered when nothing is running"
+
+    asked = []
+    panel.window.command = lambda method, *args, **kwargs: (
+        asked.append(args[0]) if method == "cookbook_refresh" else None,
+        setattr(panel.window, "_pending", kwargs.get("failure")))[1]
+
+    panel.do_refresh()
+    assert not panel.refresh.isVisible(), (
+        "Refresh stayed on screen while a refresh was running, so there was "
+        "nothing to say the second press would do anything")
+    assert panel.stop_refresh.isVisible(), "a running refresh cannot be stopped"
+    assert not panel.restore.isEnabled(), (
+        "Restore stayed live during a refresh, and a restore can shorten the "
+        "catalogue the requests in flight are indexed against")
+    assert not panel.task_picker.isEnabled(), (
+        "the task filter stayed live during a refresh, which changes what the "
+        "page is showing while it is being re-read")
+
+    panel.cancel_refresh()
+    assert panel._cancelled, "Stop did not ask the refresh to end"
+
+    # Draining the remaining steps ends the run and hands the page back.
+    for index in range(len(panel.catalog) + 1):
+        panel._refresh_step(index, list(panel.catalog), {}, {}, list(panel.catalog))
+    assert panel.refresh.isVisible(), "the page was not handed back after a stop"
+    assert panel.refresh.isEnabled()
+    assert "stopped" in panel.catalog_note.text().lower(), (
+        f"a stopped refresh reports nothing about stopping: "
+        f"{panel.catalog_note.text()!r}")

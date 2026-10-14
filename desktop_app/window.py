@@ -216,6 +216,13 @@ class MainWindow(QMainWindow):
         self.toast_error = False
         self.request_count = 0
         self.ready = False
+        # Whether the relay has answered since the runtime came up. None until
+        # it has, which is the case command() must not refuse on: "not heard
+        # from yet" and "heard from, and then lost" look identical from here
+        # but need opposite behaviour, and only the second one is worth a
+        # refusal. True on an agents event that reached the relay, False once an
+        # offline event arrives.
+        self.connected = None
         self.closing = False
         self.preparing_files = False
         self.setWindowTitle("Multiplayer AI")
@@ -358,6 +365,13 @@ class MainWindow(QMainWindow):
         self.connection_status.setToolTip(
             "Whether this device is talking to its own relay. Unlocked keys are needed to send.")
         side.addWidget(self.connection_status)
+        # The only retry anywhere in the app. Hidden unless the relay has been
+        # heard from and then lost; see set_connection_state.
+        self.connection_retry = action("Retry", self.retry_connection, name="ghost")
+        self.connection_retry.setAccessibleName("Retry the connection to the relay")
+        self.connection_retry.setToolTip("Ask the relay for an update now, without waiting")
+        self.connection_retry.setVisible(False)
+        side.addWidget(self.connection_retry)
         profile, row = frame("profile", QHBoxLayout)
         row.setContentsMargins(12, 11, 12, 12)
         row.setSpacing(10)
@@ -2673,6 +2687,15 @@ class MainWindow(QMainWindow):
             if failure:
                 failure("Networking is still starting")
             return
+        # Nothing here gates on whether the relay answered, which is worth
+        # recording because it was tried. Refusing commands while "offline"
+        # looked principled and was not: a single offline event during startup
+        # set the flag, and the poll backs off to a five minute ceiling, so the
+        # reader could be refused for minutes after the relay was fine again --
+        # including on the one command that would have fixed it. A stale network
+        # flag is worse than a failed request, because the failed request says
+        # what went wrong. What the reader gets instead is the honest status
+        # line and a Retry beside it.
         request_id = self.network.submit(method, *args)
         self.callbacks[request_id] = (success, failure)
         self.busy_changed(len(self.callbacks) + 1)
@@ -2799,6 +2822,11 @@ class MainWindow(QMainWindow):
                 self.persist_history()
         elif event == "agents":
             self.agents = data["agents"]
+            # The relay answered, so it is reachable. Tracked rather than
+            # inferred from the status label, because command() has to decide
+            # whether to submit, and a label is not a place to read an answer
+            # from.
+            self.connected = bool(data["connected"])
             self.set_connection_state(
                 "statusOk" if data["connected"] else "statusWarn",
                 "●  Relay connected" if data["connected"] else "●  Reconnecting…")
@@ -2891,6 +2919,7 @@ class MainWindow(QMainWindow):
         elif event == "pending_cleanup":
             self.show_pending_cleanup(data["credentials"], data.get("files", 0))
         elif event == "offline":
+            self.connected = False
             self.set_connection_state("statusBad", "●  Relay unavailable")
             for agent in self.agents:
                 agent["online"] = False
@@ -3270,11 +3299,32 @@ class MainWindow(QMainWindow):
         polish, because Qt does not re-match a selector when only the object
         name moved -- the same three lines set_field_error uses, for the same
         reason.
+
+        The Retry button appears only when the relay has been heard from and
+        then lost, which is the one state where waiting is not what the reader
+        should do. During startup and after a fatal there is nothing to retry
+        yet, and a button that does nothing is worse than none.
         """
         self.connection_status.setObjectName(state)
         self.connection_status.style().unpolish(self.connection_status)
         self.connection_status.style().polish(self.connection_status)
         self.connection_status.setText(text)
+        self.connection_retry.setVisible(state == "statusBad" and self.ready)
+
+    def retry_connection(self):
+        """Ask the runtime to poll again now, rather than waiting out the backoff.
+
+        The poll backs off to a five minute ceiling while the relay is gone, so
+        a host that comes back would otherwise stay unnoticed for minutes after
+        the reader has put it right. This does not bypass the backoff for the
+        background loop; it runs one pass now.
+
+        This is the whole of the answer to "there is no retry in the app". What
+        it deliberately does not do is refuse commands while offline: see
+        command().
+        """
+        self.network.submit("retry_poll")
+        self.set_connection_state("statusWarn", "●  Reconnecting…")
 
     def set_field_error(self, widget, invalid):
         widget.setProperty("invalid", invalid)

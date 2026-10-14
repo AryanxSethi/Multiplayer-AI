@@ -1,4 +1,6 @@
 """Workspace names, invitations, membership, and deletion controls."""
+import json
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QHeaderView, QLineEdit,
     QMessageBox, QTableWidget, QTableWidgetItem, QVBoxLayout)
@@ -54,16 +56,40 @@ class WorkspaceDialog(QDialog):
         # Hidden dialogs must not keep rebuilding their native table widgets.
         self.finished.connect(self.timer.stop)
         self.timer.start()
+        # None rather than an empty string, so the first pass always draws.
+        self.signature = None
         self.refresh()
 
     def refresh(self):
+        """Redraw only when the membership has actually changed.
+
+        This ran every second unconditionally, and each pass built a fresh
+        Remove button per member and handed it to setCellWidget, which deletes
+        the previous one. So any keyboard focus sitting on a Remove button was
+        destroyed on the next tick and the dialog's per-row controls were
+        effectively mouse-only -- tab to one, and it vanishes before you can
+        act on it.
+
+        AgentListDialog already guards its refresh on a signature of the list,
+        which is the same problem with a smaller table; this follows it. The
+        timer is still a timer: it polls for the change and then does nothing.
+        """
         members = self.window.workspace_meta.get("members", [])
+        signature = json.dumps(members, sort_keys=True)
+        if signature == self.signature:
+            return
+        self.signature = signature
         self.members.setRowCount(len(members))
         for row, member in enumerate(members):
             for column, value in enumerate((member["id"], member["role"], "Online" if member["online"] else "Offline")):
                 self.members.setItem(row, column, QTableWidgetItem(value))
             if not self.window.remote and member["id"] != self.window.identity:
+                # Says which member, because a column of identical "Remove"
+                # buttons cannot be told apart by a screen reader or by anyone
+                # reading this dialog with their eyes rather than their hands.
                 remove = action("Remove", lambda checked=False, identity=member["id"]: self.remove(identity), name="danger")
+                remove.setAccessibleName(f"Remove {member['id']} from this workspace")
+                remove.setToolTip(f"Revoke {member['id']}'s invitation and close its connection")
                 self.members.setCellWidget(row, 3, remove)
             self.members.setRowHeight(row, 46)
 

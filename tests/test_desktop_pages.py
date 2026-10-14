@@ -5059,3 +5059,106 @@ def test_the_empty_agent_card_is_padded_like_the_ones_it_replaces(window) -> Non
     assert margins.left() >= 18, (
         f"the empty card's left padding is {margins.left()}px where an agent "
         f"card uses 18")
+
+
+def test_the_sidebar_offers_a_retry_when_the_relay_is_gone(window) -> None:
+    """There was no retry anywhere in the app.
+
+    Not one -- a repo-wide search found the word only in error prose. So a
+    reader whose relay had gone had no way to ask again, and the poll's own
+    cadence was the only thing that could notice a host coming back.
+    """
+    assert window.connection_retry.isHidden(), "a Retry is offered before anything has gone wrong"
+
+    # The runtime is up and the relay had been answering, which is the state a
+    # Retry is for: something that worked and then stopped.
+    window.ready = True
+    window.network_event("agents", {"agents": [], "connected": True})
+    assert window.connection_retry.isHidden(), "a Retry is offered while the relay is answering"
+
+    window.network_event("offline", None)
+    assert not window.connection_retry.isHidden(), (
+        "the relay is unreachable and nothing in the app offers to ask again")
+
+    window.network_event("agents", {"agents": [], "connected": True})
+    assert window.connection_retry.isHidden(), (
+        "the relay answered and the Retry is still on screen")
+
+    # Not offered while starting, or after a fatal: there is nothing to retry.
+    window.ready = False
+    window.network_event("offline", None)
+    assert window.connection_retry.isHidden(), (
+        "a Retry is offered before the runtime is up, where it cannot work")
+    window.ready = True
+
+
+def test_a_retry_reports_the_relay_back_without_a_command(window, monkeypatch) -> None:
+    """The poll is backing off to five minutes, so a reader needs a way to poke it.
+
+    Otherwise a host that has just been restarted stays unnoticed until that
+    ceiling elapses, which is long enough to look like the button is broken.
+    """
+    asked = []
+    monkeypatch.setattr(window.network, "submit",
+                        lambda method, *args, **kwargs: asked.append(method) or "r1")
+    window.network_event("offline", None)
+    window.connection_retry.click()
+
+    assert asked == ["retry_poll"], f"the Retry button sent {asked}"
+    assert window.connection_status.objectName() == "statusWarn", (
+        "after pressing Retry the status still claims the relay is unavailable")
+
+
+def test_a_failed_relay_does_not_lock_the_reader_out(window, monkeypatch) -> None:
+    """Refusing commands while offline was tried and removed.
+
+    The poll backs off to a five minute ceiling, so a flag set by one offline
+    event during startup would keep refusing commands -- including the one that
+    would have fixed it -- long after the relay was fine again. A stale network
+    flag is worse than a failed request, because the failed request says what
+    went wrong.
+    """
+    submitted = []
+    monkeypatch.setattr(window.network, "submit",
+                        lambda method, *args, **kwargs: submitted.append(method) or "r1")
+    window.ready = True
+    window.network_event("offline", None)
+
+    window.command("create_workspace", "Still mine to make")
+
+    assert submitted == ["create_workspace"], (
+        f"a command was swallowed while offline: {submitted}")
+
+
+def test_the_members_table_keeps_the_keyboard_focus_it_was_given(window) -> None:
+    """It rebuilt itself every second, destroying any focus on a Remove button.
+
+    refresh() built a fresh button per member and handed it to setCellWidget,
+    which deletes the previous one. So tabbing onto Remove and waiting a second
+    meant the focused widget no longer existed. AgentListDialog already guarded
+    its refresh on a signature of the list; this one did not.
+    """
+    from desktop_app.workspace_dialog import WorkspaceDialog
+
+    window.workspace_meta = {"members": [
+        {"id": "guest-laptop", "role": "device", "online": True}]}
+    dialog = WorkspaceDialog(window)
+    dialog.show()
+
+    first = dialog.members.cellWidget(0, 3)
+    first.setFocus()
+    dialog.refresh()
+
+    assert dialog.members.cellWidget(0, 3) is first, (
+        "an unchanged membership rebuilt the row, so the focused Remove button "
+        "was deleted underneath the reader")
+
+    window.workspace_meta = {"members": [
+        {"id": "guest-laptop", "role": "device", "online": True},
+        {"id": "phone", "role": "device", "online": False}]}
+    dialog.refresh()
+    assert dialog.members.rowCount() == 2, (
+        "a member who actually arrived was not drawn, because the guard is "
+        "skipping real changes as well as repeats")
+
+    dialog.close()

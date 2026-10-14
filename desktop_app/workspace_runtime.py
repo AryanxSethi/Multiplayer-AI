@@ -593,6 +593,20 @@ class WorkspaceRuntime:
                         self._ollama_availability[identity] = running
         return availability
 
+    async def retry_poll(self):
+        """One refresh now, because the reader asked for one.
+
+        The poll backs off to a five minute ceiling while the relay is gone, so
+        a host that has just come back would otherwise stay unnoticed until
+        that elapsed. This does not touch the backoff or restart the loop: it
+        runs a single pass, which resets the backoff if it succeeds and reports
+        offline if it does not, exactly as the loop would have.
+        """
+        try:
+            await self.refresh()
+        except Exception:
+            self.emit("offline", "Relay connection interrupted. The app will keep trying to reconnect.")
+
     async def refresh(self):
         if not self.active_token:
             return

@@ -159,6 +159,7 @@ class CookbookPanel(QWidget):
         super().__init__()
         self.window = window
         self._busy = False
+        self._cancelled = False
         self._page = 0
         # Set while a change to "Looking for" is waiting for its turn of the
         # event loop, so repeated presses collapse into one rebuild.
@@ -338,8 +339,15 @@ class CookbookPanel(QWidget):
         self.restore_mirror.setToolTip(
             "Go back to reading from huggingface.co. Only appears once a "
             "mirror has been set.")
+        # Takes Refresh's place while a refresh runs. A refresh is up to three
+        # requests per model at fifteen seconds each, so four models is a
+        # minute and a half with no way to stop it.
+        self.stop_refresh = action("Stop", self.cancel_refresh, name="ghost")
+        self.stop_refresh.setToolTip("Stop after the model currently being read.")
+        self.stop_refresh.setVisible(False)
         footer = QHBoxLayout()
         footer.addWidget(self.refresh)
+        footer.addWidget(self.stop_refresh)
         footer.addWidget(self.restore)
         footer.addWidget(self.restore_mirror)
         footer.addStretch()
@@ -518,6 +526,39 @@ class CookbookPanel(QWidget):
         """Enable the actions that have something to act on."""
         self.restore.setEnabled(bool(self.directory and self.directory.joinpath(
             PREVIOUS_NAME).is_file()))
+
+    def _set_busy(self, busy):
+        """Lock the page while a refresh is in flight, and swap Refresh for Stop.
+
+        Restore and the mirror box stayed live throughout a refresh before, which
+        is how a restore could shorten the catalogue underneath the request in
+        progress. They are controls that change what the refresh is reading, so
+        they are disabled for its duration rather than trusted to behave.
+        """
+        self._busy = busy
+        self.refresh.setEnabled(not busy)
+        self.refresh.setVisible(not busy)
+        self.stop_refresh.setVisible(busy)
+        # The button carries the progress while it runs, so putting it back is
+        # part of ending the run rather than something the caller has to
+        # remember to do on each path out.
+        if not busy:
+            self.refresh.setText(f"Refresh from {self.host_name()}")
+        self.restore.setEnabled(not busy and bool(self.directory and
+                                                 self.directory.joinpath(PREVIOUS_NAME).is_file()))
+        self.restore_mirror.setEnabled(not busy)
+        self.task_picker.setEnabled(not busy)
+
+    def cancel_refresh(self):
+        """Ask the refresh to stop after the model it is reading.
+
+        The request in flight is not abandoned -- there is nothing to abandon
+        it with -- but no further ones are issued, and whatever has already
+        come back is kept.
+        """
+        self._cancelled = True
+        self.stop_refresh.setEnabled(False)
+        self.stop_refresh.setText("Stopping.")
 
     def render_models(self):
         """Rebuild the list from the first page.
@@ -1318,24 +1359,38 @@ class CookbookPanel(QWidget):
         updated = {}
         refused = {}
         self._busy = True
-        self.refresh.setEnabled(False)
-        self._refresh_step(0, len(targets), updated, refused, before)
+        self._cancelled = False
+        # targets is passed down rather than re-read from self.catalog at each
+        # step. The step used to index the live list, and the Restore button
+        # stayed enabled throughout a refresh, so a restore mid-refresh could
+        # shorten the catalogue and leave the step out of range -- at which
+        # point it fell back to a hard-coded Qwen repo and fetched, attributed
+        # and merged a model nobody asked for.
+        self._set_busy(True)
+        self._refresh_step(0, targets, updated, refused, before)
 
-    def _refresh_step(self, index, total, updated, refused, before):
+    def _refresh_step(self, index, targets, updated, refused, before):
         """Re-read one model, then either finish or ask for the next.
 
         Sequential rather than concurrent, so the host sees one request at a
         time from a button press, and so the progress on the button means
         something: "2 of 4" is a fact about work already done.
+
+        With no fallback branch, because there is no longer any way to reach
+        this line without a model: targets is fixed when the press began, so
+        index < len(targets) always holds.
         """
+        total = len(targets)
+        if self._cancelled:
+            self._finish_refresh(index, updated, refused, before, stopped=True)
+            return
         if index >= total:
             self._finish_refresh(total, updated, refused, before)
             return
 
-        model = self.catalog[index] if index < len(self.catalog) else None
-        repo = model.repo if model else "Qwen/Qwen2.5-0.5B-Instruct"
-        artifacts = (model.artifact_repo if model
-                     else "bartowski/Qwen2.5-0.5B-Instruct-GGUF")
+        model = targets[index]
+        repo = model.repo
+        artifacts = model.artifact_repo
 
         def landed(result):
             try:
@@ -1345,24 +1400,33 @@ class CookbookPanel(QWidget):
                                  f"{error}")
             else:
                 updated[record.repo] = record
-            self._refresh_step(index + 1, total, updated, refused, before)
+            self._refresh_step(index + 1, targets, updated, refused, before)
 
         def missed(reason):
             refused[repo] = reason
-            self._refresh_step(index + 1, total, updated, refused, before)
+            self._refresh_step(index + 1, targets, updated, refused, before)
 
         self.refresh.setText(f"Refreshing {index + 1} of {total} from "
                              f"{self.host_name()}.")
         self.window.command("cookbook_refresh", repo, artifacts, self.base,
                             success=landed, failure=missed)
 
-    def _finish_refresh(self, total, updated, refused, before):
-        """Merge what came back, say what did not, and save it once."""
+    def _finish_refresh(self, total, updated, refused, before, stopped=False):
+        """Merge what came back, say what did not, and save it once.
+
+        ``stopped`` means the reader pressed Stop, not that the host refused.
+        Whatever had already arrived is kept and saved, because discarding a
+        successful read because the reader changed their mind about the rest
+        would throw away work that cost a request to obtain.
+        """
         self._busy = False
-        self.refresh.setEnabled(True)
-        self.refresh.setText(f"Refresh from {self.host_name()}")
+        self._set_busy(False)
 
         if not updated:
+            if stopped:
+                self.catalog_note.setText("Refresh stopped before anything came back.")
+                self.refresh_controls()
+                return
             first = next(iter(refused.values()), "the request was refused")
             self.catalog_note.setText(
                 f"{self.host_name()} could not be read: {first}")
@@ -1391,11 +1455,11 @@ class CookbookPanel(QWidget):
 
         self.catalog = merged
         self.catalog_note.setText(self._refresh_note(total, updated, refused,
-                                                     read, note, saved))
+                                                     read, note, saved, stopped))
         self.refresh_controls()
         self.render_models()
 
-    def _refresh_note(self, total, updated, refused, read, note, saved):
+    def _refresh_note(self, total, updated, refused, read, note, saved, stopped=False):
         """One sentence saying what this press actually achieved.
 
         A partial refresh that reported plain success would be the wrong claim
@@ -1403,6 +1467,9 @@ class CookbookPanel(QWidget):
         some models and not others, and the reader would otherwise assume the
         whole list is current.
         """
+        if stopped:
+            return (f"Stopped after {len(updated)} of {total}. Read {read} from "
+                    f"{self.host_name()}. {note}{saved}")
         if not refused:
             return (f"Read {read} from {self.host_name()}. {note}{saved}")
         problems = "; ".join(f"{repo}: {reason}" for repo, reason
