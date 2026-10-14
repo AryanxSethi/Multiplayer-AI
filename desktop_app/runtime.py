@@ -180,8 +180,16 @@ class DesktopRuntime:
                 # code that removes it is the code this guard now skips.
                 dropped = [key for key in chats
                            if key.startswith("conversation-") and key not in rooms]
-                if not dropped and all(chats.get(room_id, {}).get("revision") == room["revision"]
-                                       for room_id, room in rooms.items()):
+                # previous == rooms as well. The revisions are the rooms' own
+                # account of themselves, but state["conversations"] is stored
+                # separately, and a switch of the room on screen does not go
+                # through this. So the two can disagree while every revision
+                # still matches, and returning here is what stops them ever
+                # agreeing again: the write this guard skips is the only one
+                # that would copy the rooms across.
+                if (not dropped and previous == rooms
+                        and all(chats.get(room_id, {}).get("revision") == room["revision"]
+                                for room_id, room in rooms.items())):
                     return
                 state["conversations"] = rooms
                 # Rooms that dropped off the listing are gone, and their saved
