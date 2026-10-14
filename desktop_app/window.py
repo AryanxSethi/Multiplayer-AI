@@ -1582,7 +1582,7 @@ class MainWindow(QMainWindow):
         """Refresh model listings while retaining unchanged cards and scroll positions."""
         models = self.model_agents()
         for grid, agents in ((self.overview_cards, models[:3]),
-                             (self.agent_cards, [agent for agent in models if self.search.text().lower() in f"{agent['id']} {agent.get('model') or ''}".lower()])):
+                             (self.agent_cards, [agent for agent in models if self.search.text().lower() in f"{agent['id']} {agent.get('model') or ''} {agent.get('provider') or ''}".lower()])):
             signature = (self.workspace_id, self.theme, json.dumps(agents, sort_keys=True))
             if getattr(grid, "render_signature", None) == signature:
                 continue
@@ -4031,6 +4031,26 @@ class MainWindow(QMainWindow):
 
         self.command("delete_workspace", success=done, failure=failed)
 
+    def reload_workspace_invitations(self, dialog):
+        """Re-read the invitations this device can still issue, and show them.
+
+        The list is fetched once, when the dialog opens, and the dialog's own
+        refresh() returns early whenever the membership has not changed. Making
+        an invitation does not change who is in the workspace, so the section
+        went on showing what it had at open time -- a new invitation never
+        appeared, and a removed one stayed. Removing does change membership, but
+        it still read the names captured at open, so it stayed too.
+
+        So the two are driven separately: refresh() keeps its signature guard,
+        which is what stops the members table being rebuilt every second, and
+        the invitations are re-read by whoever changed them.
+        """
+        def loaded(names):
+            self.outstanding_invitations = names
+            dialog.refresh_invitations()
+
+        self.command("outstanding_invitations", success=loaded)
+
     def manage_workspace(self):
         """Open workspace settings, with the invitations this device can reissue.
 
@@ -4044,16 +4064,7 @@ class MainWindow(QMainWindow):
         if self.ready:
             self.outstanding_invitations = []
             dialog = WorkspaceDialog(self)
-
-            def loaded(names):
-                # The dialog is already open by the time this arrives, and it
-                # read the list while it was still empty. So the names have to
-                # be handed to it, not just stored: without this the section
-                # stayed blank until the dialog was closed and opened again.
-                self.outstanding_invitations = names
-                dialog.refresh_invitations()
-
-            self.command("outstanding_invitations", success=loaded)
+            self.reload_workspace_invitations(dialog)
             dialog.exec()
 
     def invite_device(self):
