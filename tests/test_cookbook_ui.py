@@ -3322,7 +3322,9 @@ def test_arriving_on_the_page_re_reads_what_this_device_has_free(window) -> None
     assert panel.hardware is freed, (
         "the page is still ranking models against the memory that was free "
         "when it was built")
-    assert "0.75" not in panel.hardware_label.text() or True
+    assert panel.hardware_label.text() == freed.describe(), (
+        f"the label still describes the panel that was built earlier: "
+        f"{panel.hardware_label.text()!r}")
     assert panel.hardware.memory_available == freed.memory_available
 
 
