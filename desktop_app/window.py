@@ -4043,9 +4043,18 @@ class MainWindow(QMainWindow):
         from .workspace_dialog import WorkspaceDialog
         if self.ready:
             self.outstanding_invitations = []
-            self.command("outstanding_invitations",
-                         success=lambda names: setattr(self, "outstanding_invitations", names))
-            WorkspaceDialog(self).exec()
+            dialog = WorkspaceDialog(self)
+
+            def loaded(names):
+                # The dialog is already open by the time this arrives, and it
+                # read the list while it was still empty. So the names have to
+                # be handed to it, not just stored: without this the section
+                # stayed blank until the dialog was closed and opened again.
+                self.outstanding_invitations = names
+                dialog.refresh_invitations()
+
+            self.command("outstanding_invitations", success=loaded)
+            dialog.exec()
 
     def invite_device(self):
         """Go to the page's own invitation card, ready to fill in.
