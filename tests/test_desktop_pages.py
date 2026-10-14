@@ -4984,3 +4984,78 @@ def test_a_search_that_matched_nothing_does_not_claim_the_team_is_empty(window) 
         f"the empty state does not echo what was searched for: {said}")
     assert "Clear search" in buttons, (
         f"nothing offers to undo the search that hid the reader's team: {buttons}")
+
+
+def test_a_control_a_screen_reader_cannot_name_is_named(window) -> None:
+    """Four controls in the shell were announced as a glyph or as nothing.
+
+    The join button has no text at all and carries an icon, so it was skipped
+    over entirely; the others were announced as "M, button", "question mark,
+    button" and "multiplication sign, button". The Cookbook button already had
+    an accessible name, so the convention existed -- these had simply not had
+    it applied.
+    """
+    cases = [
+        (window.join_button, "Create or join a workspace"),
+        (window.help_button, "Project documentation"),
+        (window.sidebar_close, "Close the sidebar"),
+    ]
+    for widget, expected in cases:
+        assert widget.accessibleName() == expected, (
+            f"a control announced as {widget.accessibleName()!r} instead of "
+            f"{expected!r}")
+
+    agents = [{"id": "local-llama", "kind": "model", "online": True,
+               "model": "llama3.2", "provider": "ollama", "profile": {"id": "local-llama"},
+               "local": True}]
+    window.agents = agents
+    window.render_agents()
+
+    grid = window.agent_cards
+    cards = [grid.itemAt(index).widget() for index in range(grid.count())
+             if grid.itemAt(index).widget() is not None]
+    names = [button.accessibleName() for card in cards
+             for button in card.findChildren(QPushButton)]
+    for expected in ("Open a conversation with local-llama",
+                     "Edit the settings for local-llama",
+                     "Stop local-llama on this device"):
+        assert expected in names, (
+            f"no button on the agent card is called {expected!r}; it carries {names}")
+
+
+def test_the_smallest_controls_are_still_wide_enough_to_hit(window) -> None:
+    """The one way to clear a card error was a 20x20 target.
+
+    ErrorLine's dismiss button sits in a row spaced 6px, is the only way to
+    dismiss the message, and was small enough to miss with a pointer and hard
+    to reach with one. The sidebar's close button was 26px on the same window.
+    """
+    from desktop_app.widgets import ErrorLine
+
+    line = ErrorLine(window, "model:connect")
+    assert line.dismiss.width() >= 28 and line.dismiss.height() >= 28, (
+        f"the dismiss target is {line.dismiss.width()}x{line.dismiss.height()}")
+    assert window.sidebar_close.width() >= 28 and window.sidebar_close.height() >= 28, (
+        f"the sidebar close target is {window.sidebar_close.width()}x"
+        f"{window.sidebar_close.height()}")
+
+
+def test_the_empty_agent_card_is_padded_like_the_ones_it_replaces(window) -> None:
+    """Qt's default margin, 11px, against 18/17 on the real cards below.
+
+    They sit in one grid on one screen, so the empty state was visibly the
+    tighter box of the two -- on the one screen where the difference is
+    easiest to notice, because it is the only card on it.
+    """
+    window.agents = []
+    window.search.clear()
+    window.render_agents()
+
+    grid = window.agent_cards
+    cards = [grid.itemAt(index).widget() for index in range(grid.count())
+             if grid.itemAt(index).widget() is not None]
+    assert cards, "nothing was drawn at all"
+    margins = cards[0].layout().contentsMargins()
+    assert margins.left() >= 18, (
+        f"the empty card's left padding is {margins.left()}px where an agent "
+        f"card uses 18")

@@ -115,7 +115,12 @@ class ErrorLine(QWidget):
         row.addWidget(self.message, 1)
         self.dismiss = action("×", lambda: on_dismiss(self), name="ghost")
         self.dismiss.setObjectName("errorDismiss")
-        self.dismiss.setFixedSize(20, 20)
+        # Was 20x20. That is the only way to clear a card error, it sits in a
+        # row spaced 6px, and it is small enough to be missed by a pointer and
+        # hard to reach with one. 28 is the smallest square that is still
+        # comfortable to hit without it looking like a button that matters
+        # more than the message it dismisses.
+        self.dismiss.setFixedSize(28, 28)
         self.dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
         self.dismiss.setToolTip("Dismiss")
         self.dismiss.setAccessibleName("Dismiss message")

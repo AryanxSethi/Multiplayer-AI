@@ -266,6 +266,9 @@ class MainWindow(QMainWindow):
         rail_layout.setSpacing(16)
         home = WorkspaceButton("M")
         home.setToolTip("Your local workspace")
+        # The button's text is "M", which a screen reader announces as "M,
+        # button". The name it carries is the same sentence the tooltip does.
+        home.setAccessibleName("Your local workspace")
         home.clicked.connect(lambda: self.command("use_local"))
         rail_layout.addWidget(home)
         workspace_scroll = QScrollArea()
@@ -284,12 +287,17 @@ class MainWindow(QMainWindow):
         join.setIconSize(QSize(24, 24))
         join.set_ink("success")
         join.setToolTip("Create or join a workspace")
+        # Empty text and an icon, so without this it is announced as nothing at
+        # all -- a 48x48 control in the rail that a screen reader walks past.
+        join.setAccessibleName("Create or join a workspace")
         refresh_join_icon(self, self.theme)
         join.clicked.connect(self.add_workspace)
         rail_layout.addWidget(join)
         self.help_button = WorkspaceButton("?")
         self.help_button.clicked.connect(self.open_documentation)
         self.help_button.setToolTip("Project documentation")
+        # Announced as "question mark, button" otherwise.
+        self.help_button.setAccessibleName("Project documentation")
         rail_layout.addWidget(self.help_button)
         shell.addWidget(rail)
         sidebar, outer = frame("sidebar")
@@ -313,8 +321,9 @@ class MainWindow(QMainWindow):
         workspace_heading = QHBoxLayout()
         workspace_heading.addWidget(self.workspace_label, 1)
         self.sidebar_close = action("×", self.toggle_sidebar, name="ghost")
-        self.sidebar_close.setFixedSize(26, 26)
+        self.sidebar_close.setFixedSize(28, 28)
         self.sidebar_close.setToolTip("Close the sidebar")
+        self.sidebar_close.setAccessibleName("Close the sidebar")
         workspace_heading.addWidget(self.sidebar_close)
         side.addLayout(workspace_heading)
         self.workspace_settings_button = action("Workspace settings", self.manage_workspace, name="ghost")
@@ -598,6 +607,12 @@ class MainWindow(QMainWindow):
             column.setContentsMargins(18, 15, 18, 15)
             column.addWidget(label(title, "muted"))
             value = action("0", self.show_workspace_agents, name="statValue") if index == 0 else label("0", "statValue")
+            # The title and the subtitle are siblings of the value, not children
+            # of it, so the button's own name was the digit alone -- announced
+            # as "0, button". The subtitle is also the only place the click
+            # affordance is written down, and a pointer-only hint is a hint no
+            # keyboard or screen reader user ever receives.
+            value.setAccessibleName(f"{title}. {subtitle}.")
             if index == 0:
                 value.setFlat(True)
             column.addWidget(value)
@@ -980,7 +995,12 @@ class MainWindow(QMainWindow):
             column.addWidget(label(info[0], "heading"))
             column.addWidget(label(info[1], "muted", True))
             column.addSpacing(10)
-            column.addWidget(action("Connect model  →", lambda checked=False, key=provider: self.add_agent(key), True))
+            # Ten of these, one per provider, all with the same text. A screen
+            # reader hears "Connect model, button" ten times and cannot tell
+            # them apart; the logo beside it is named, so the button should be.
+            connect = action("Connect model  →", lambda checked=False, key=provider: self.add_agent(key), True)
+            connect.setAccessibleName(f"Connect a {info[0]} model")
+            column.addWidget(connect)
             grid.addWidget(card, index // 2, index % 2)
         layout.addLayout(grid)
         layout.addStretch()
@@ -1528,6 +1548,13 @@ class MainWindow(QMainWindow):
             clear_layout(grid)
             if not agents:
                 card, column = frame("card")
+                # Matches the agent cards below it in the same grid. It was
+                # left at Qt's default, which is 11px against their 18/17 --
+                # so the empty state sat in a visibly tighter box than the
+                # cards it stands in for, on the one screen where the
+                # difference is easiest to notice. The Cookbook fixed the same
+                # class of defect on its own page with a CARD_PADDING constant.
+                column.setContentsMargins(18, 17, 18, 17)
                 # Two different situations, and they are not interchangeable.
                 # "Your team is getting ready" is a claim about the reader's
                 # own setup, and with a search box open it was being made while
@@ -1564,12 +1591,22 @@ class MainWindow(QMainWindow):
                 talk = action("Open conversation  →", lambda checked=False, id=agent["id"]: self.select_agent(id))
                 talk.setEnabled(agent["online"])
                 talk.setToolTip(f"Start a conversation with {agent['id']}")
+                talk.setAccessibleName(f"Open a conversation with {agent['id']}")
                 column.addWidget(talk)
                 if agent.get("profile"):
                     row = QHBoxLayout()
-                    row.addWidget(action("Edit", lambda checked=False, data=agent: self.edit_agent(data), name="ghost"))
+                    # A column of identical "Edit" and "Stop" buttons, one pair
+                    # per card. Each names the agent it belongs to, for the same
+                    # reason the Remove button on a file does.
+                    edit = action("Edit", lambda checked=False, data=agent: self.edit_agent(data), name="ghost")
+                    edit.setToolTip(f"Edit the settings for {agent['id']}")
+                    edit.setAccessibleName(f"Edit the settings for {agent['id']}")
+                    row.addWidget(edit)
                     if agent.get("local"):
-                        row.addWidget(action("Stop", lambda checked=False, id=agent["id"]: self.command("stop_agent", id), name="ghost"))
+                        stop = action("Stop", lambda checked=False, id=agent["id"]: self.command("stop_agent", id), name="ghost")
+                        stop.setToolTip(f"Stop {agent['id']} on this device")
+                        stop.setAccessibleName(f"Stop {agent['id']} on this device")
+                        row.addWidget(stop)
                     column.addLayout(row)
                 grid.addWidget(card, index // 3 if grid is self.overview_cards else index // 2,
                                index % 3 if grid is self.overview_cards else index % 2)

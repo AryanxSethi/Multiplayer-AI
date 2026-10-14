@@ -87,6 +87,13 @@ _DARK = {
     "scrollbar_track": "#1e1f22",
     "scrollbar_thumb": "#4e5058",
     "danger_bg": "#3a1f22",
+    # The danger button had no hover, pressed or disabled state of its own, so
+    # the most consequential controls in the app -- Leave workspace, Delete
+    # workspace, Reset identity, Remove member -- gave no feedback at all under
+    # the cursor. These sit either side of danger_bg, following the button
+    # pair's spacing rather than being invented separately.
+    "danger_bg_hover": "#4a272b",
+    "danger_bg_pressed": "#5a2f33",
     "success": "#3ba55d",
     "warning": "#e0a33e",
     "error": "#f76f74",
@@ -149,6 +156,8 @@ _LIGHT = {
     "scrollbar_track": "#eceef2",
     "scrollbar_thumb": "#b8bdc7",
     "danger_bg": "#fbe4e2",
+    "danger_bg_hover": "#f7d5d2",
+    "danger_bg_pressed": "#f2c6c2",
     "success": "#1e7d43",
     "warning": "#8a5a00",
     "error": "#c0392b",
@@ -249,6 +258,8 @@ _MIKU = {
     "scrollbar_track": "#3b4548",
     "scrollbar_thumb": "#5a6469",
     "danger_bg": "#4a2f3a",
+    "danger_bg_hover": "#5c3b48",
+    "danger_bg_pressed": "#6d4655",
     "success": "#55d1d0",
     # Carries verdict text on a card as well as the left border, so it is held
     # to the same 4.5:1 as "error" rather than picked as a decorative accent.
@@ -580,7 +591,7 @@ QPushButton#nav:checked { background: @@nav_checked_bg@@; color: @@text_strong@@
 QPushButton#workspace { background: @@workspace_btn_bg@@; border: 1px solid @@workspace_btn_border@@; border-radius: 16px; font-size: 20px; padding: 0; color: @@text@@; }
     QPushButton#workspace[ink="success"] { color: @@success@@; }
     QPushButton#workspace:hover, QPushButton#workspace:checked { background: @@accent@@; border-radius: 16px; color: @@on_accent@@; }
-QPushButton#ghost { background: transparent; color: @@text_nav@@; padding: 7px 10px; border: 1px solid @@ghost_border@@; }
+QPushButton#ghost { background: transparent; color: @@text_nav@@; padding: 9px 12px; border: 1px solid @@ghost_border@@; }
 QPushButton#ghost:hover { background: @@surface_hover@@; }
 /* The selected state a nav button gets, for the one navigation control that
    lives in the top bar rather than the rail. Without it the Cookbook could be
@@ -588,6 +599,36 @@ QPushButton#ghost:hover { background: @@surface_hover@@; }
    checkable button is the whole point of making it checkable. */
 QPushButton#ghost:checked { background: @@nav_checked_bg@@; color: @@text_strong@@; }
 QPushButton#danger { background: @@danger_bg@@; color: @@error@@; }
+QPushButton#danger:hover { background: @@danger_bg_hover@@; color: @@error@@; }
+QPushButton#danger:pressed { background: @@danger_bg_pressed@@; color: @@error@@; }
+QPushButton#danger:disabled { background: @@button_disabled@@; color: @@text_disabled@@; }
+/* Focus, for everything a button can be.
+   The sheet declared focus for inputs and for the stat buttons only, and an
+   application stylesheet replaces Qt's own painting: a widget drawn from the
+   sheet that says nothing about :focus draws nothing for it. So every button
+   in the app had no visible focus at all, and tabbing through the navigation
+   rail or the top bar gave no indication of where the reader was.
+
+   Written one selector per rule, like the rest of the sheet, so that a test
+   asking "does this selector have a rule" finds it by name rather than by
+   reading a comma-joined line.
+
+   statValue is deliberately absent: it is a readout, it shows no focus ring by
+   design, and the rule above already keeps it flat. The danger button takes
+   the error colour, since every action using it is the one to be careful with. */
+QPushButton:focus { border: 1px solid @@accent@@; }
+QPushButton#nav:focus { border: 1px solid @@accent@@; background: @@surface_hover@@; }
+QPushButton#ghost:focus { border: 1px solid @@accent@@; background: @@surface_hover@@; }
+QPushButton#primary:focus { border: 1px solid @@accent@@; }
+QPushButton#workspace:focus { border: 1px solid @@accent@@; }
+QPushButton#danger:focus { border: 1px solid @@error@@; }
+QToolButton:focus { border: 1px solid @@accent@@; }
+/* On the indicator rather than the box: the indicator is a fixed 16px, so
+   outlining it cannot change the size of the control it belongs to, and a
+   focus ring that reflows the row under the reader's fingers is its own bug. */
+QCheckBox:focus::indicator { border: 1px solid @@accent@@; }
+QListWidget:focus { outline: 1px solid @@accent@@; }
+QTableWidget:focus { outline: 1px solid @@accent@@; }
 QLineEdit, QPlainTextEdit, QComboBox { background: @@input_bg@@; color: @@text@@; border: 1px solid @@border_strong@@; border-radius: 7px; padding: 10px; selection-background-color: @@accent@@; selection-color: @@on_accent@@; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid @@accent@@; }
 QLineEdit[invalid="true"], QPlainTextEdit[invalid="true"], QComboBox[invalid="true"] { border: 1px solid @@error@@; }
@@ -604,7 +645,7 @@ TickCheckBox { qproperty-tickColor: @@success@@; }
 TickCheckBox::indicator:checked { background: transparent; border: none; }
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
-QScrollBar:vertical { background: @@scrollbar_track@@; width: 7px; margin: 3px; }
+QScrollBar:vertical { background: @@scrollbar_track@@; width: 12px; margin: 3px; }
 QScrollBar::handle:vertical { background: @@scrollbar_thumb@@; min-height: 28px; border-radius: 3px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
