@@ -53,6 +53,13 @@ class WorkspaceRuntime:
         self.active_id = None
         self.remote = False
         self.sharing = False
+        # How long the poll waits before trying again, and how many attempts
+        # have failed in a row. On the instance rather than local to _poll, so
+        # that reconnecting can clear them: a device that was backing off
+        # because the other end went away should start listening again the
+        # moment it is reachable, not sit out a backoff earned by a fault that
+        # has already been repaired.
+        self._poll_delay, self._poll_failures = 3, 0
         self.port = None
         self.poller = None
         self.closed = False
@@ -357,6 +364,11 @@ class WorkspaceRuntime:
     async def join(self, url, token, allow_insecure=False, save=True, conversation_id=None):
         async with self.mutation:
             result = await self.inspect_invitation(url, token, allow_insecure, conversation_id)
+            # The relay answered, so any backoff was earned by an outage that
+            # has now been repaired. Left in place it would keep the poll quiet
+            # for up to five minutes on a device that is already connected --
+            # which is how a guest that had just rejoined saw no agents at all.
+            self._poll_delay, self._poll_failures = 3, 0
             if self.remote and self.active_url == url and self.active_token == token:
                 await self.refresh()
                 if conversation_id:
@@ -607,6 +619,7 @@ class WorkspaceRuntime:
         """
         try:
             await self.refresh()
+            self._poll_delay, self._poll_failures = 3, 0
         except Exception:
             self.emit("offline", "Relay connection interrupted. The app will keep trying to reconnect.")
 
@@ -659,8 +672,8 @@ class WorkspaceRuntime:
         # /workspace every three seconds for as long as the app stayed open, and
         # every desktop client sharing that host came back at the same moment
         # and asked again together.
-        delay, failures = 3, 0
         while not self.closed:
+            delay, failures = self._poll_delay, self._poll_failures
             saved = self.storage.settings.get("remote") if self.restore_remote else None
             if saved and not self.remote and time.monotonic() >= next_join:
                 next_join = time.monotonic() + 15
@@ -674,14 +687,13 @@ class WorkspaceRuntime:
                 await self.refresh()
                 # Back to the steady cadence on the first success, so a blip
                 # costs one slow moment rather than the rest of the session.
-                failures = 0
-                delay = 3
+                self._poll_delay, self._poll_failures = 3, 0
             except Exception:
-                failures += 1
+                self._poll_failures += 1
                 self.emit("offline", "Relay connection interrupted. The app will keep trying to reconnect.")
                 # Doubling, to a ceiling of five minutes, with a little
                 # jitter so a room full of clients does not come back in step.
-                delay = min(delay * 2, 300)
+                self._poll_delay = min(self._poll_delay * 2, 300)
             await asyncio.sleep(delay * (0.9 + 0.2 * random.random()))
 
     async def send(self, target, payload):
