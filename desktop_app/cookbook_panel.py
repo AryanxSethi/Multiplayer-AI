@@ -575,6 +575,13 @@ class CookbookPanel(QWidget):
         self._busy = busy
         self.refresh.setEnabled(not busy)
         self.refresh.setVisible(not busy)
+        if busy:
+            # cancel_refresh disables Stop and relabels it "Stopping." so a
+            # second press cannot queue another. That state outlived the run,
+            # so the next refresh began with a visible Stop that was dead and
+            # still said it was stopping: a run that could not be stopped.
+            self.stop_refresh.setEnabled(True)
+            self.stop_refresh.setText("Stop")
         self.stop_refresh.setVisible(busy)
         # The button carries the progress while it runs, so putting it back is
         # part of ending the run rather than something the caller has to
