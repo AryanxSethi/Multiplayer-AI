@@ -559,6 +559,11 @@ class WorkspaceUITests(unittest.TestCase):
     def test_new_search_setup_defaults_to_hosted_and_explains_missing_key(self):
         """Verify new connections default to hosted search and focus a missing key error."""
         card = self.model_card()
+        # Checked before anything is touched. A blank card is set up for hosted
+        # search, so a reader is not expected to know that SearXNG needs a server
+        # of their own before they can search at all.
+        self.assertEqual(card.model_search_provider.currentData(), "ollama",
+                         "a new agent does not start out set up for hosted search")
         card.model_name.setText("searching-model")
         card.model_provider.setCurrentIndex(card.model_provider.findData("ollama"))
         card.change_model_provider()
@@ -566,6 +571,24 @@ class WorkspaceUITests(unittest.TestCase):
         card.model_id.setCurrentText("llama3")
         card.model_internet.setChecked(True)
         self.save_model_card(card, expect_error=True)
+
+        # The error has to be about the key. Waiting for "some error text" is
+        # not a test of that, and this card does ask Ollama for its installed
+        # models before saving -- so on a machine without Ollama a model error
+        # would satisfy the same wait and this would pass with the key check
+        # broken. It cannot actually reach that: save_model validates the search
+        # settings and returns before save_agent is ever called, and the
+        # blank-key allowance only applies when editing a saved profile, which
+        # this is not. So no Ollama stand-in is needed, and adding one would be
+        # answering a problem this code path does not have.
+        self.assertIn("key", self.model_error_text(card).lower(),
+                      f"the error does not name what is missing: {self.model_error_text(card)!r}")
+        self.assertTrue(card.model_search_key.hasFocus(),
+                        "the field that needs filling in is not the one focused")
+        saved = [agent["id"] for agent in
+                 self.host.network.runtime.storage.settings.get("agents", [])]
+        self.assertNotIn("searching-model", saved,
+                         "a refused save left the agent in the settings")
 
     def test_periodic_agent_refresh_keeps_overview_at_the_user_scroll_position(self):
         """Verify polling preserves cards and scroll position while actual state changes render."""
