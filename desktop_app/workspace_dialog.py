@@ -54,6 +54,14 @@ class WorkspaceDialog(QDialog):
         invitations_column.addWidget(label("Invitations already created", "heading"))
         self.invitations_note = label("", "muted", True)
         invitations_column.addWidget(self.invitations_note)
+        # Rows go in a layout of their own so a refresh can empty just them.
+        # Clearing the whole box took the heading and the note with it, and the
+        # note's text was then set on a widget that was no longer in the box,
+        # so neither was ever seen.
+        self.invitation_rows = QVBoxLayout()
+        self.invitation_rows.setContentsMargins(0, 0, 0, 0)
+        self.invitation_rows.setSpacing(8)
+        invitations_column.addLayout(self.invitation_rows)
         self.invitations_box.setVisible(False)
         layout.addWidget(self.invitations_box)
         if window.remote:
@@ -148,10 +156,14 @@ class WorkspaceDialog(QDialog):
     def refresh_invitations(self):
         """List the invitations this device can still issue, one row each."""
         names = list(getattr(self.window, "outstanding_invitations", ()) or ())
-        for child in self.invitations_box.findChildren(QWidget):
-            if child is not self.invitations_box:
-                self.invitations_box.layout().removeWidget(child)
+        while self.invitation_rows.count():
+            child = self.invitation_rows.takeAt(0).widget()
+            if child is not None:
+                # Detached before being scheduled for deletion: deleteLater
+                # waits for the next event loop pass, and until then the row is
+                # still a child of a visible box with no layout to hide it.
                 child.setParent(None)
+                child.deleteLater()
         if not names:
             self.invitations_box.setVisible(False)
             return
@@ -160,7 +172,9 @@ class WorkspaceDialog(QDialog):
             "Shown again from this device's credential store. Closing an "
             "invitation without sending it no longer strands that device.")
         for agent_id in names:
-            row = QHBoxLayout()
+            container = QWidget()
+            row = QHBoxLayout(container)
+            row.setContentsMargins(0, 0, 0, 0)
             row.addWidget(label(agent_id, "body"))
             row.addStretch()
             button = action("Show invitation", lambda checked=False, name=agent_id:
@@ -168,7 +182,7 @@ class WorkspaceDialog(QDialog):
             button.setAccessibleName(f"Show the invitation for {agent_id} again")
             button.setToolTip(f"Read the saved invitation for {agent_id} from the credential store")
             row.addWidget(button)
-            self.invitations_box.layout().addLayout(row)
+            self.invitation_rows.addWidget(container)
 
     def rename(self):
         self.rename_button.setEnabled(False)

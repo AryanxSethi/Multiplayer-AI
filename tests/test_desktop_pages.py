@@ -5202,3 +5202,36 @@ def test_opening_the_cookbook_builds_it_once(window) -> None:
     assert window.cookbook_panel is panel, (
         "the page was rebuilt on a second visit, re-probing the hardware and "
         "re-reading the catalogue for nothing")
+
+
+def test_refreshing_invitations_empties_the_rows_and_keeps_the_heading(window) -> None:
+    """A refresh should replace the invitations, not the whole section.
+
+    The list of invitations this device can reissue changes whenever the reader
+    makes or removes one, and the dialog redraws it in place. Clearing it by
+    emptying the container took the heading and the note with it, and the note's
+    text was then set on a widget no longer in the box, so the section lost its
+    explanation on the first open and every refresh after it.
+    """
+    from desktop_app.workspace_dialog import WorkspaceDialog
+
+    window.outstanding_invitations = []
+    dialog = WorkspaceDialog(window)
+    dialog.refresh_invitations()
+
+    window.outstanding_invitations = ["laptop-one", "laptop-two"]
+    dialog.refresh_invitations()
+    text = [child.text() for child in dialog.invitations_box.findChildren(win.QWidget)
+            if hasattr(child, "text")]
+    assert "Invitations already created" in text, f"the heading went missing: {text}"
+    assert "laptop-one" in text and "laptop-two" in text, f"rows missing: {text}"
+    assert any("credential store" in line for line in text), f"the note went missing: {text}"
+    assert dialog.invitation_rows.count() == 2, dialog.invitation_rows.count()
+
+    window.outstanding_invitations = ["laptop-three"]
+    dialog.refresh_invitations()
+    assert dialog.invitation_rows.count() == 1, dialog.invitation_rows.count()
+    text = [child.text() for child in dialog.invitations_box.findChildren(win.QWidget)
+            if hasattr(child, "text")]
+    assert "laptop-one" not in text, f"a removed invitation was still listed: {text}"
+    assert "Invitations already created" in text, "the heading went missing on refresh"
