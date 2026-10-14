@@ -415,7 +415,22 @@ class WorkspaceRuntime:
             if client.socket:
                 with contextlib.suppress(Exception):
                     await client.socket.close()
-            await asyncio.sleep(.1)
+            # Wait for the relay to drop the old registration, rather than for
+            # a fixed interval. This used to sleep 100ms, which is long enough
+            # most of the time and not the rest: when the peer took longer than
+            # that to go, the relay refused the replacement as a duplicate
+            # identity, and the editor was left with a model that had been
+            # saved, was listed as online, and was not running -- so every send
+            # came back "Target agent is offline". Editing a profile reuses its
+            # identity, which is why only the edit path hit it.
+            #
+            # The same drain _stop_agents does, twenty lines below, for the
+            # same stated reason.
+            if self.active_url and not self.remote:
+                for _ in range(100):
+                    if agent_id not in self.app.state.relay.peers:
+                        break
+                    await asyncio.sleep(.02)
 
     def _config(self, profile, key, search_key=None):
         """Build validated provider settings from a profile and its separate vault keys."""

@@ -1034,5 +1034,126 @@ class SettingsConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.storage.settings["reduce_motion"] = True
         self.storage.save()
         assert json.loads(Path(self.directory.name, "settings.json").read_text())["reduce_motion"] is True
+
+
+class _HeldPeers(dict):
+    """Relay peers that have not noticed a socket closing yet.
+
+    The relay drops an identity the moment its socket closes, which is
+    immediate, so a test that lets the real close happen is racing the thing it
+    is trying to measure. This refuses to release one identity until it is told
+    to -- which is precisely the condition the drain waits for.
+    """
+
+    held = False
+
+    def pop(self, key, *args, **kwargs):
+        if self.held and key == "researcher":
+            return self.get(key)
+        return super().pop(key, *args, **kwargs)
+
+    def __delitem__(self, key):
+        if self.held and key == "researcher":
+            return
+        super().__delitem__(key)
+
+
+class EditedProfileTests(unittest.IsolatedAsyncioTestCase):
+    """Reconnecting an agent that is already running.
+
+    Editing a profile reuses its identity, so the replacement connects while the
+    old registration may still be on the relay. Runner removal used to wait a
+    fixed 100ms rather than for the relay to drop the old peer, so when the peer
+    took longer than that to go -- a busy machine, a contended event loop -- the
+    replacement was refused as a duplicate identity, leaving a model that was
+    saved, listed as online, and not running, so every send came back "Target
+    agent is offline".
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.events = []
+        self.runtime = DesktopRuntime(Storage(self.directory.name, self.vault),
+                                      lambda kind, data: self.events.append((kind, data)))
+        await self.runtime.start()
+        self.old_http = self.runtime.http
+        self.replies = []
+
+        async def transport(request):
+            if request.url.host == "model.example":
+                body = json.loads(request.content)
+                self.replies.append(body)
+                return httpx.Response(200, json={"choices": [
+                    {"message": {"content": "Replied"}, "finish_reason": "stop"}]})
+            return await self.old_http.send(request)
+
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+        self.profile = {"id": "researcher", "provider": "bionic", "model": "test-model",
+                        "base_url": "https://model.example/v1", "autostart": True}
+        await self.runtime.save_agent(self.profile, "private-provider-key")
+
+    async def asyncTearDown(self):
+        await self.runtime.close()
+        await self.old_http.aclose()
+        self.directory.cleanup()
+
+    async def test_removing_a_runner_waits_for_the_identity_to_be_released(self):
+        """The wait is for the condition, not for an interval.
+
+        Deterministic: the relay's peer table is told to keep the identity
+        registered, which a real socket close would not do, so the only thing
+        that can end the wait is the release itself. The old code slept 100ms
+        and returned, so at 300ms -- three times that -- it was long done, and
+        the replacement it was clearing the way for would be free to be refused
+        as a duplicate.
+        """
+        import asyncio
+
+        engine = self.runtime.engine
+        relay = engine.app.state.relay
+        original = relay.peers
+        held = _HeldPeers(original)
+        held.held = True
+        relay.peers = held
+        returned_early = None
+        try:
+            task = asyncio.ensure_future(engine._remove_runner("researcher"))
+            await asyncio.sleep(.3)
+            returned_early = task.done()
+            held.held = False
+            held.pop("researcher", None)
+            await task
+        finally:
+            relay.peers = original
+
+        self.assertFalse(returned_early,
+                         "removing a runner returned while the relay still had "
+                         "the identity registered, so the replacement was free "
+                         "to be refused as a duplicate")
+
+    async def test_an_edited_profile_is_left_running_and_able_to_answer(self):
+        """The whole point: save an edit, then use the agent it edited."""
+        edited = {**self.profile, "system_prompt": "Answer in one word."}
+        await self.runtime.save_agent(edited, "private-provider-key")
+
+        self.assertIn("researcher", self.runtime.engine.runners,
+                      "the edited agent was saved but never launched, so the UI "
+                      "lists a model that nothing is running behind")
+        result = await self.runtime.send("researcher", {"text": "Hello after editing"})
+        self.assertEqual(result["text"], "Replied")
+        self.assertTrue(self.replies, "the agent was not actually called")
+
+    async def test_editing_twice_still_leaves_one_working_agent(self):
+        """Each edit replaces the last, and none of them is left half-attached."""
+        for attempt in range(3):
+            await self.runtime.save_agent(
+                {**self.profile, "system_prompt": f"Attempt {attempt}"},
+                "private-provider-key")
+            self.assertIn("researcher", self.runtime.engine.runners,
+                          f"attempt {attempt} left the agent not running")
+        result = await self.runtime.send("researcher", {"text": "Hello after three edits"})
+        self.assertEqual(result["text"], "Replied")
+
 if __name__ == "__main__":
     unittest.main()
