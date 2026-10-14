@@ -478,15 +478,22 @@ class CookbookPanel(QWidget):
             return
         self.mirror_error.setVisible(False)
 
-        previous = dict(self.window.storage.settings)
-        self.window.storage.update(cookbook_source=None if not typed else host)
+        settings = self.window.storage.settings
+        had_source = "cookbook_source" in settings
+        previous = settings.get("cookbook_source")
         try:
-            self.window.storage.save()
+            # update() persists under the storage lock itself, so this is the
+            # only write, and the only one that can fail.
+            self.window.storage.update(cookbook_source=None if not typed else host)
         except Exception as error:
             # Put the setting back rather than leaving the box showing a host
             # that was never saved, which would survive a restart and read as
-            # though it had taken.
-            self.window.storage.settings = previous
+            # though it had taken. Only this key, and only if it was there: a
+            # profile that never had a mirror must not gain one holding None.
+            if had_source:
+                settings["cookbook_source"] = previous
+            else:
+                settings.pop("cookbook_source", None)
             self.mirror_error.setText(f"That could not be saved: {error}")
             self.mirror_error.setVisible(True)
             return
