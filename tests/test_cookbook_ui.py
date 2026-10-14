@@ -1343,7 +1343,12 @@ def test_a_refused_consent_is_not_left_half_remembered(window, monkeypatch) -> N
     def refuse_save():
         raise OSError("the preferences file is not writable")
 
-    monkeypatch.setattr(window.storage, "save", refuse_save)
+    # Patched at every guarded entry point rather than at save(). Settings are
+    # changed through update/discard/change now, which is what makes the write
+    # atomic with the mutation, so failing save() alone no longer reaches the
+    # path being tested here.
+    for name in ("save", "change", "update", "discard"):
+        monkeypatch.setattr(window.storage, name, refuse_save)
     window.command = lambda name, *args, **kwargs: None
     panel.refresh.click()
     settle()

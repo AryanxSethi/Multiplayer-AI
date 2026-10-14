@@ -74,7 +74,7 @@ class WorkspaceRuntime:
         device_id = self.storage.settings.get("device_id")
         if not device_id:
             device_id = "device-" + uuid4().hex[:8]
-            self.storage.settings["device_id"] = device_id
+            self.storage.update(device_id=device_id)
         if device_id not in self.credentials:
             self.credentials[device_id] = {"token": secrets.token_urlsafe(32), "group": "workspace"}
         Relay(self.credentials)
@@ -98,8 +98,7 @@ class WorkspaceRuntime:
         self.app.state.relay.member_remover = self.remove_member
         self.sharing = bool(self.storage.settings.get("share_lan", False))
         await self._start_server("0.0.0.0" if self.sharing else "127.0.0.1", self.storage.settings.get("relay_port", 0))
-        self.storage.settings["relay_port"] = self.port
-        self.storage.save()
+        self.storage.update(relay_port=self.port)
         saved = self.storage.settings.get("remote") if self.restore_remote else None
         await self.use_local(forget_remote=False)
         if saved:
@@ -227,8 +226,7 @@ class WorkspaceRuntime:
         self.active_id = self.storage.settings["device_id"]
         self.active_token = self.credentials[self.active_id]["token"]
         if forget_remote:
-            self.storage.settings.pop("remote", None)
-        self.storage.save()
+            self.storage.discard("remote")
         await self._attach(self.active_id, self.active_token, self._echo)
         await self._restore_profiles()
         self.emit("workspace", {"name": self.storage.settings.get("workspace_name", "My workspace"), "url": self.active_url, "self": self.active_id, "remote": False})
@@ -256,7 +254,7 @@ class WorkspaceRuntime:
             device_id = self.storage.settings.get("device_id")
             if not device_id:
                 device_id = "device-" + uuid4().hex[:8]
-                self.storage.settings["device_id"] = device_id
+                self.storage.update(device_id=device_id)
             fresh = {device_id: {"token": secrets.token_urlsafe(32), "group": "workspace"}}
             skipped = []
             for profile in self.storage.settings.get("agents", []):
@@ -376,8 +374,7 @@ class WorkspaceRuntime:
                     await self.publish_profile(remote_profile, running=False)
                 if save:
                     self.storage.vault.set("remote-token", token)
-                    self.storage.settings["remote"] = {"url": url, "allow_insecure": allow_insecure}
-                    self.storage.save()
+                    self.storage.update(remote={"url": url, "allow_insecure": allow_insecure})
             except BaseException:
                 await self._stop_agents()
                 self.active_url, self.active_token, self.active_id, self.remote = previous
@@ -472,12 +469,18 @@ class WorkspaceRuntime:
                                 or self.app.state.relay.agent_description(configured)["kind"] != "model"):
             default = next((item["id"] for item in self.storage.settings.get("agents", [])
                             if self.app.state.relay.allowed(self.active_id, item["id"])), profile["id"])
-            previous = self.storage.settings
-            self.storage.settings = {**previous, "coordinator": default}
+            previous = self.storage.settings.get("coordinator")
             try:
-                self.storage.save()
+                self.storage.update(coordinator=default)
             except BaseException:
-                self.storage.settings = previous
+                # Put the one key back, in place. Restoring the whole dict by
+                # rebinding it would leave any reader holding the old object
+                # looking at settings nothing writes to again.
+                with contextlib.suppress(Exception):
+                    if previous is None:
+                        self.storage.discard("coordinator")
+                    else:
+                        self.storage.update(coordinator=previous)
                 raise
             self.app.state.relay.workspace["coordinator"] = default
 
@@ -775,12 +778,15 @@ class WorkspaceRuntime:
             if agent_id and (not relay.allowed(self.active_id, agent_id)
                              or relay.agent_description(agent_id)["kind"] != "model"):
                 raise ValueError("Choose a model in this workspace as the default")
-            previous = dict(self.storage.settings)
-            self.storage.settings["coordinator"] = agent_id or None
+            previous = self.storage.settings.get("coordinator")
             try:
-                self.storage.save()
+                self.storage.update(coordinator=agent_id or None)
             except BaseException:
-                self.storage.settings = previous
+                with contextlib.suppress(Exception):
+                    if previous is None:
+                        self.storage.discard("coordinator")
+                    else:
+                        self.storage.update(coordinator=previous)
                 raise
             relay.workspace["coordinator"] = agent_id or None
             await self.refresh()
@@ -859,8 +865,7 @@ class WorkspaceRuntime:
                 self.server_socket.close()
                 await self._start_server("0.0.0.0", self.port)
                 self.sharing = True
-                self.storage.settings["share_lan"] = True
-                self.storage.save()
+                self.storage.update(share_lan=True)
                 await self._attach(self.active_id, self.active_token, self._echo)
                 await self._restore_profiles()
             updated = {**self.credentials, agent_id: {"token": secrets.token_urlsafe(32), "group": "workspace"}}
@@ -887,13 +892,11 @@ class WorkspaceRuntime:
             # it without copying had stranded the device they were inviting --
             # and the only way out was to reset their own identity, which
             # destroys every other identity in the workspace with it.
-            invitations = dict(self.storage.settings.get("invitations") or {})
-            invitations[agent_id] = {
-                "url": public_url, "allow_insecure": bool(lan),
-                "workspace_name": invitation["workspace_name"],
-                "conversation_id": conversation_id or ""}
-            self.storage.settings["invitations"] = invitations
-            self.storage.save()
+            self.storage.change(lambda settings: settings.__setitem__(
+                "invitations", {**(settings.get("invitations") or {}), agent_id: {
+                    "url": public_url, "allow_insecure": bool(lan),
+                    "workspace_name": invitation["workspace_name"],
+                    "conversation_id": conversation_id or ""}}))
             return invitation
 
     async def outstanding_invitations(self):
@@ -960,10 +963,10 @@ class WorkspaceRuntime:
             # page would keep offering to reissue an invitation for someone who
             # has just been removed -- and the token it would read back has
             # been deleted below, so the offer would only fail when used.
-            invitations = {name: saved for name, saved
-                           in (self.storage.settings.get("invitations") or {}).items()
-                           if name != member}
-            self.storage.settings["invitations"] = invitations
+            self.storage.change(lambda settings: settings.__setitem__(
+                "invitations", {name: saved for name, saved
+                                in (settings.get("invitations") or {}).items()
+                                if name != member}))
             self.storage.save_credentials(updated)
             self.credentials = updated
             self.app.state.relay.credentials = updated
@@ -972,11 +975,12 @@ class WorkspaceRuntime:
             if peer:
                 await peer.socket.close(code=1008, reason="Removed from workspace")
             await self._remove_runner(member)
-            self.storage.settings["agents"] = [profile for profile in self.storage.settings.get("agents", []) if profile["id"] != member]
+            self.storage.change(lambda settings: settings.__setitem__(
+                "agents", [profile for profile in settings.get("agents", [])
+                           if profile["id"] != member]))
             if self.storage.settings.get("coordinator") == member:
-                self.storage.settings["coordinator"] = None
+                self.storage.update(coordinator=None)
                 self.app.state.relay.workspace["coordinator"] = None
-            self.storage.save()
             # The member is out of the workspace either way, but a token left
             # in the OS credential store would still be a secret this device
             # holds for someone who no longer has access, so say so rather

@@ -1342,15 +1342,13 @@ class MainWindow(QMainWindow):
             return
         name = THEME_CHOICES[index][1]
         if name is None:
-            self.storage.settings.pop("theme", None)
-            # Saved here too, not just in the branch below: removing the
-            # preference must persist immediately, or the theme reappears
-            # on next launch because nothing else wrote the file yet.
-            self.storage.save()
+            # discard() persists under the lock, which is also why removing the
+            # preference takes effect at once: otherwise the theme reappears on
+            # next launch because nothing else wrote the file yet.
+            self.storage.discard("theme")
             self.apply_theme(resolve_theme({}))
         else:
-            self.storage.settings["theme"] = name
-            self.storage.save()
+            self.storage.update(theme=name)
             self.apply_theme(name)
         self.update_theme_hint()
 
@@ -1429,8 +1427,7 @@ class MainWindow(QMainWindow):
     def theme_changed(self, light):
         """Persist the theme chosen in the UI and apply it."""
         name = LIGHT if light else DARK
-        self.storage.settings["theme"] = name
-        self.storage.save()
+        self.storage.update(theme=name)
         self.apply_theme(name)
 
     def launch_screen_changed(self, wanted):
@@ -1440,12 +1437,10 @@ class MainWindow(QMainWindow):
         own. It only takes effect on the next start; the screen is
         already up or already gone by the time anybody can reach this.
         """
-        self.storage.settings["launch_screen"] = bool(wanted)
-        self.storage.save()
+        self.storage.update(launch_screen=bool(wanted))
 
     def motion_changed(self, reduced):
-        self.storage.settings["reduce_motion"] = reduced
-        self.storage.save()
+        self.storage.update(reduce_motion=reduced)
         if reduced and hasattr(self, "page_animation"):
             self.page_animation.stop()
             effect = self.stack.currentWidget().graphicsEffect()

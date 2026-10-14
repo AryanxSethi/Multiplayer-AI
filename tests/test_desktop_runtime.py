@@ -954,5 +954,85 @@ class InvitationRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "a guest can list the invitations its host made")
         with self.assertRaisesRegex(ValueError, "host"):
             await self.runtime.invitation_for("guest-laptop")
+
+
+class SettingsConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    """Two threads write the same dict the GUI reads.
+
+    Storage.save() took the lock around json.dumps, but nothing took it around
+    a mutation, and the dict is handed out by reference. A write landing inside
+    a serialisation raises RuntimeError: dictionary changed size during
+    iteration -- which surfaces at whichever command happened to be running
+    rather than as what it is.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.storage = Storage(self.directory.name, self.vault)
+        self.storage.update(theme="dark", relay_port=7000)
+        self.errors = []
+
+    async def asyncTearDown(self):
+        self.directory.cleanup()
+
+    def hammer(self, key, value):
+        """Write the same key from another thread, as the network loop does."""
+        for index in range(400):
+            try:
+                self.storage.update(**{key: f"{value}-{index}"})
+            except Exception as error:
+                self.errors.append(error)
+
+    async def test_a_write_from_the_network_thread_cannot_break_a_save(self):
+        import threading
+
+        thread = threading.Thread(target=self.hammer, args=("relay_port", "port"))
+        thread.start()
+        for index in range(400):
+            # What the GUI thread does while a chat is rendering.
+            self.storage.update(theme="light" if index % 2 else "dark")
+        thread.join()
+
+        assert not self.errors, (
+            f"{len(self.errors)} writes from the network thread failed against "
+            f"the GUI thread's: {self.errors[0]!r}")
+
+    async def test_every_guarded_entry_point_persists_what_it_changed(self):
+        """update/discard/change write under the lock, and the write is the point."""
+        self.storage.update(theme="light")
+        assert json.loads(Path(self.directory.name, "settings.json").read_text())["theme"] == "light"
+
+        self.storage.discard("theme")
+        assert "theme" not in json.loads(Path(self.directory.name, "settings.json").read_text())
+
+        self.storage.change(lambda settings: settings.__setitem__("theme", "light"))
+        on_disk = json.loads(Path(self.directory.name, "settings.json").read_text())
+        assert on_disk["theme"] == "light"
+
+    async def test_a_read_modify_write_is_one_locked_act(self):
+        """change() exists because the new value depends on the old one.
+
+        Reading the dict outside the lock and writing inside it leaves the
+        window in between, which is the bug; a caller that only has update()
+        will reach for it and split the act.
+        """
+        import inspect
+
+        signature = inspect.signature(Storage.change)
+        assert list(signature.parameters) == ["self", "mutate"], (
+            f"change() takes {list(signature.parameters)}, so it is not the "
+            f"single-callable form the migration relies on")
+
+    async def test_the_daemon_does_not_need_a_bare_assignment_to_persist(self):
+        """The point of the helpers: no bare assignment, no second call."""
+        self.storage.update(share_lan=True)
+        assert json.loads(Path(self.directory.name, "settings.json").read_text())["share_lan"] is True
+
+        # The old pattern, deliberately: change the dict, then remember to save.
+        # This is what the GUI thread was doing concurrently with the above.
+        self.storage.settings["reduce_motion"] = True
+        self.storage.save()
+        assert json.loads(Path(self.directory.name, "settings.json").read_text())["reduce_motion"] is True
 if __name__ == "__main__":
     unittest.main()

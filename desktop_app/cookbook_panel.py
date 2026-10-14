@@ -479,7 +479,7 @@ class CookbookPanel(QWidget):
         self.mirror_error.setVisible(False)
 
         previous = dict(self.window.storage.settings)
-        self.window.storage.settings["cookbook_source"] = None if not typed else host
+        self.window.storage.update(cookbook_source=None if not typed else host)
         try:
             self.window.storage.save()
         except Exception as error:
@@ -1334,22 +1334,25 @@ class CookbookPanel(QWidget):
 
     def remember_consent(self, host):
         """Record the agreement, and refuse to keep it if it cannot be saved."""
-        settings = self.window.storage.settings
-        previous = settings.get("cookbook_refresh_ok")
-        agreed = dict(previous) if isinstance(previous, dict) else {}
-        agreed[host] = True
-        settings["cookbook_refresh_ok"] = agreed
+        storage = self.window.storage
+        previous = storage.settings.get("cookbook_refresh_ok")
         try:
-            self.window.storage.save()
+            storage.change(lambda settings: settings.__setitem__(
+                "cookbook_refresh_ok",
+                {**(previous if isinstance(previous, dict) else {}), host: True}))
         except Exception as error:
             # Put it back rather than leaving a remembered agreement that did
             # not survive a restart: the reader would not be warned again this
             # session and would be warned again next time, which is worse than
-            # not remembering at all.
-            if previous is None:
-                settings.pop("cookbook_refresh_ok", None)
-            else:
-                settings["cookbook_refresh_ok"] = previous
+            # not remembering at all. Guarded again, because this is a second
+            # write to the dict another thread may be reading.
+            try:
+                if previous is None:
+                    storage.discard("cookbook_refresh_ok")
+                else:
+                    storage.update(cookbook_refresh_ok=previous)
+            except Exception:
+                pass
             self.catalog_note.setText(f"That could not be saved: {error}")
 
     def do_refresh(self):

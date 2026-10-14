@@ -221,9 +221,7 @@ class DesktopRuntime:
         if entry["id"] in self.engines:
             return self.engines[entry["id"]]
         scoped = self.scoped_storage(entry)
-        scoped.settings["workspace_name"] = entry["name"]
-        scoped.settings["workspace_id"] = entry["id"]
-        scoped.save()
+        scoped.update(workspace_name=entry["name"], workspace_id=entry["id"])
         engine = WorkspaceRuntime(scoped, lambda event, data: self.forward(entry["id"], event, data),
                                   restore_remote=entry["kind"] == "remote", ollama_service=self.ollama_service)
         self.engines[entry["id"]] = engine
@@ -265,11 +263,11 @@ class DesktopRuntime:
         if not self.catalog_path.exists() and saved and self.storage.vault.get("remote-token"):
             entry = {"id": "workspace-" + uuid4().hex, "name": "Shared workspace", "kind": "remote", "url": saved["url"]}
             scoped = self.scoped_storage(entry)
-            scoped.settings["remote"] = saved
+            scoped.update(remote=saved)
             scoped.vault.set("remote-token", self.storage.vault.get("remote-token"))
             profile = self.storage.settings.get("remote_agent")
             if profile:
-                scoped.settings["remote_agent"] = profile
+                scoped.update(remote_agent=profile)
                 for prefix in ("provider:", "search:"):
                     key = self.storage.vault.get(prefix + profile["id"])
                     if key:
@@ -326,7 +324,7 @@ class DesktopRuntime:
             if self.entry()["kind"] != "local":
                 raise ValueError("Only the workspace owner can rename it")
             self.entry()["name"] = name
-            self.engine.storage.settings["workspace_name"] = name
+            self.engine.storage.update(workspace_name=name)
             self.engine.storage.save()
             self.save_catalog()
             await self.snapshot()
@@ -336,7 +334,7 @@ class DesktopRuntime:
         if not local:
             return await self.create_workspace("My workspace")
         if forget_remote:
-            self.storage.settings.pop("remote", None)
+            self.storage.discard("remote")
             self.storage.save()
         await self.switch_workspace(local["id"])
 
@@ -401,7 +399,7 @@ class DesktopRuntime:
             self.active_workspace_id = entry["id"]
             self.catalog["active"] = entry["id"]
             if save:
-                self.storage.settings["remote"] = {"url": url, "allow_insecure": allow_insecure}
+                self.storage.update(remote={"url": url, "allow_insecure": allow_insecure})
                 self.storage.vault.set("remote-token", token)
                 self.storage.save()
             self.save_catalog()
@@ -560,10 +558,9 @@ class DesktopRuntime:
         if directory is None:
             # Only the local workspace's own keys and its chat archive are
             # cleared; the root directory itself must survive.
-            for key in ("identities", "device_id", "agents", "remote", "remote_agent",
-                        "share_lan", "relay_port", "workspace_name", "workspace_id", "agent_save_revision"):
-                storage.settings.pop(key, None)
-            storage.save()
+            storage.discard("identities", "device_id", "agents", "remote",
+                            "remote_agent", "share_lan", "relay_port",
+                            "workspace_name", "workspace_id", "agent_save_revision")
             HistoryStore(storage.directory).clear()
         elif directory.exists():
             # settings.json and history.sqlite3 both live here. Errors are
@@ -604,9 +601,7 @@ class DesktopRuntime:
             return []
         remaining = [name for name in names
                      if self.storage.vault.delete(name) == UNAVAILABLE]
-        self.storage.settings.pop("remote", None)
-        self.storage.settings.pop("remote_agent", None)
-        self.storage.save()
+        self.storage.discard("remote", "remote_agent")
         return remaining
 
     def pending_cleanup_count(self):
