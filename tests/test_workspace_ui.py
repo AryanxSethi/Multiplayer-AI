@@ -375,7 +375,22 @@ class WorkspaceUITests(unittest.TestCase):
         self.host = self.open_window("host", self.vault)
         self.host.network.runtime.app.router.routes.append(Route("/mock/v1/chat/completions", self.echo_model, methods=["POST"]))
         self.join_workspace(self.guest, invitation)
-        self.wait(lambda: self.guest.network.runtime.active_url != "")
+        # engine.remote, not active_url and not selected. active_url is the local
+        # relay's from the moment the window opens, and None before that, and
+        # None != "" -- so that wait was true before the join was even attempted.
+        # selected is no better: this guest restored it from disk, so the
+        # assertion above already holds.
+        #
+        # remote is the one thing a join has to earn. __init__ and _use_local
+        # leave it False, join sets it once the invitation has been inspected,
+        # and a failure rolls it back to whatever it was. So a rejoin that did
+        # not work fails here, instead of surfacing later as an unexplained
+        # timeout waiting for an agent the host was never asked about.
+        # Thirty seconds, as elsewhere for a remote window. This join is a
+        # relay round trip and measures around fifteen, which is the default
+        # wait -- so the earlier condition, being true before the join was
+        # even attempted, was the only reason this never timed out.
+        self.wait(lambda: self.guest.network.runtime.engine.remote, 30)
         self.wait_for_agent(self.guest)
         self.send(self.guest, "Continue after reopening")
         self.wait(lambda: self.reply_received(self.guest, room_id, "Continue after reopening"))
