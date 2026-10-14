@@ -337,3 +337,17 @@ def test_unknown_provider_falls_back_without_raising() -> None:
     assert entry[0] == "Connectivity agent"
     assert entry[2] == "⌘"  # preserved from the pre-theme agent list
     assert entry[3] == theme.color(theme.LIGHT, "provider_fallback")
+
+
+def test_every_theme_is_offered_under_a_name_a_reader_can_use():
+    """One of the choices was labelled "39".
+
+    That is the song the palette was drawn from. It is not what anybody
+    looking at a dropdown is meant to recognise it by, and the hint under the
+    picker now has to say the name back.
+    """
+    for name, _ in theme.THEME_CHOICES:
+        assert not name.isdigit(), (
+            f"{name!r} is where the palette comes from, not a name for it")
+        assert len(name) > 1, f"{name!r} is not something a reader can choose"
+

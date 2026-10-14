@@ -49,11 +49,19 @@ def load_config(provider, model=None, base_url=None, api_key_env=None, system_pr
     base_url = base_url or env.get(spec.base_env) or (env.get("OLLAMA_HOST") if provider == "ollama" else None) or spec.base_url
     if not base_url:
         raise ValueError(f"Set {spec.base_env} or --provider-base-url")
-    return ProviderConfig(provider=provider, model=model or env.get("A2A_MODEL"), base_url=base_url,
-                          api_key=key, system_prompt=system_prompt if system_prompt is not None else env.get("A2A_SYSTEM_PROMPT"),
-                          max_tokens=max_tokens, timeout=timeout, concurrency=concurrency, allow_insecure=allow_insecure,
-                          vision=vision, web_search=web_search, searxng_url=searxng_url, searxng_allow_insecure=searxng_allow_insecure,
-                          search_provider=search_provider, search_api_key=env.get(search_api_key_env) or None)
+    # The flags and the variable are named here rather than in ProviderConfig,
+    # which the desktop app also builds. This is the only caller that knows a
+    # command line exists, so this is the only place that can say one.
+    try:
+        return ProviderConfig(provider=provider, model=model or env.get("A2A_MODEL"), base_url=base_url,
+                              api_key=key, system_prompt=system_prompt if system_prompt is not None else env.get("A2A_SYSTEM_PROMPT"),
+                              max_tokens=max_tokens, timeout=timeout, concurrency=concurrency, allow_insecure=allow_insecure,
+                              vision=vision, web_search=web_search, searxng_url=searxng_url, searxng_allow_insecure=searxng_allow_insecure,
+                              search_provider=search_provider, search_api_key=env.get(search_api_key_env) or None)
+    except ValueError as error:
+        if str(error) == "Choose a model":
+            raise ValueError("Choose a model with --model or A2A_MODEL") from None
+        raise
 
 
 def create_adapter(config, http):

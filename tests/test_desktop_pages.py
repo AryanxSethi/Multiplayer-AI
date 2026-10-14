@@ -4907,3 +4907,80 @@ def test_a_failure_in_an_unknown_workspace_is_dropped_rather_than_guessed(window
         "the failure landed in the workspace on screen")
     assert "send_error" not in store.load("ui")["state"]["chats"]["gone-model"], (
         "the failure was written into a workspace the user has left")
+
+
+def test_the_page_title_is_a_title_and_not_a_markdown_heading(window) -> None:
+    """The "#  " was painted, never parsed.
+
+    label() pins Qt.TextFormat.PlainText, so a heading marker in the source
+    became a character in the largest text in the window -- on every page, of
+    every session -- and a screen reader announced "hash, overview".
+    """
+    for title in win.PAGE_TITLES:
+        assert not title.startswith("#"), f"{title!r} is drawn with its marker showing"
+    window.navigate(win.OVERVIEW_PAGE)
+    assert not window.page_title.text().startswith("#"), window.page_title.text()
+
+
+def test_a_startup_that_failed_is_not_painted_as_a_healthy_one(window) -> None:
+    """One label, one colour, three different facts.
+
+    The connection line was created as "online" and only ever had its text
+    replaced, so "Relay unavailable" and "Startup needs attention" were both
+    drawn in the success green. It is the one status always on screen, and the
+    leading glyph does not change, so colour was carrying the whole meaning.
+    """
+    window.network_event("offline", None)
+    assert window.connection_status.objectName() == "statusBad", (
+        f"the relay is down and the line reads {window.connection_status.text()!r} "
+        f"in the state {window.connection_status.objectName()!r}")
+
+    window.network_event("agents", {"agents": [], "connected": True})
+    assert window.connection_status.objectName() == "statusOk", window.connection_status.text()
+
+    window.network_event("agents", {"agents": [], "connected": False})
+    assert window.connection_status.objectName() == "statusWarn", window.connection_status.text()
+
+
+def test_a_failed_startup_is_stated_and_not_only_toasted(window) -> None:
+    """The toast is gone in seven seconds; a fatal cannot be undone.
+
+    Everything the fatal disables stays disabled, so after the toast expired the
+    window was full of controls that would not work and nothing saying why.
+    """
+    assert window.startup_error.isHidden(), "the fatal surface should start hidden"
+    window.network_event("fatal", "The credential store is locked.")
+    assert not window.startup_error.isHidden(), (
+        "a fatal startup error has no lasting surface, so the reason is lost "
+        "as soon as the toast expires")
+    assert "credential store" in window.startup_error.text()
+
+
+def test_a_search_that_matched_nothing_does_not_claim_the_team_is_empty(window) -> None:
+    """"Your team is getting ready" is a claim about the reader's own setup.
+
+    With the search box open it was being made while a model was connected and
+    simply had not matched what was typed, which is the one thing the Cookbook's
+    empty_reason() discipline exists to prevent: one state standing in for
+    another.
+    """
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "model": "llama3.2", "provider": "ollama"}]
+    window.search.setText("nothing-matches-this")
+    window.render_agents()
+
+    grid = window.agent_cards
+    cards = [grid.itemAt(index).widget() for index in range(grid.count())
+             if grid.itemAt(index).widget() is not None]
+    said = [label.text() for card in cards
+            for label in card.findChildren(QLabel) if label.text()]
+    buttons = [button.text() for card in cards
+               for button in card.findChildren(QPushButton)]
+
+    assert said, "the page said nothing at all"
+    assert not any("getting ready" in text for text in said), (
+        f"a connected team was reported as empty: {said}")
+    assert any("nothing-matches-this" in text for text in said), (
+        f"the empty state does not echo what was searched for: {said}")
+    assert "Clear search" in buttons, (
+        f"nothing offers to undo the search that hid the reader's team: {buttons}")

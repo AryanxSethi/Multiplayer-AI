@@ -481,7 +481,11 @@ THEME_CHOICES = (
     ("Follow system", None),
     ("Dark", DARK),
     ("Light", LIGHT),
-    ("39", MIKU),
+    # Named, because this is what a reader picks from and what the hint below
+    # the picker has to be able to say back. It used to be labelled "39", which
+    # is the song the palette is drawn from and means nothing to anybody
+    # looking at a dropdown.
+    ("Teal", MIKU),
 )
 
 
@@ -502,6 +506,17 @@ THEME_CHOICES = (
 # wants no border the value is the keyword ``transparent`` and the sheet
 # always writes ``1px solid``, reserving the pixel without painting it,
 # which is what keeps this template free of per-theme conditionals.
+
+# The sidebar's connection line is on screen the whole time and is the only
+# status the app offers at a glance, so it has four names rather than one: a
+# stylesheet cannot read the words, and a single colour meant "Relay
+# unavailable" and "Startup needs attention" were both painted in the green
+# that means everything is fine. Set by MainWindow.set_connection_state.
+#
+# Note that the comments inside _TEMPLATE are CSS comments. A "#" line there is
+# an id selector, not a comment, and one that Qt cannot parse discards the rest
+# of the sheet -- which is how a status colour ended up silently removing the
+# checkbox rules below it.
 
 _TEMPLATE = """
 QWidget { background: @@surface_base@@; color: @@text@@; font-family: 'Segoe UI'; font-size: 13px; }
@@ -540,6 +555,9 @@ QLabel#statValue { font-size: 30px; color: @@text_strong@@; font-weight: 650; }
 QPushButton#statValue { background: transparent; font-size: 30px; color: @@text_strong@@; font-weight: 650; text-align: left; padding: 0; border: none; }
 QPushButton#statValue:hover, QPushButton#statValue:pressed, QPushButton#statValue:focus { background: transparent; border: none; text-decoration: none; }
 QLabel#online { color: @@success@@; }
+QLabel#statusOk { color: @@success@@; }
+QLabel#statusWarn { color: @@warning@@; }
+QLabel#statusBad { color: @@error@@; }
 QLabel#verdictOk { color: @@success@@; font-size: 11px; font-weight: 700; }
 QLabel#verdictWarn { color: @@warning@@; font-size: 11px; font-weight: 700; }
 QLabel#verdictBad { color: @@error@@; font-size: 11px; font-weight: 700; }

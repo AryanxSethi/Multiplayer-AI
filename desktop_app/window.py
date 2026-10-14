@@ -72,7 +72,12 @@ PAGES = (
     ("Cookbook", "cookbook"),
     ("Settings", "settings"),
 )
-PAGE_TITLES = tuple(f"#  {key}" for _, key in PAGES)
+# The titles are plain text and styled as a heading. They used to carry a
+# leading "#  ", which looked right in the source and was painted on screen:
+# label() pins Qt.TextFormat.PlainText, so the hash was never markdown, it was
+# a character in the largest text in the window, on every page, every session.
+# The two chat empty states had the same prefix for the same reason.
+PAGE_TITLES = tuple(key for _, key in PAGES)
 # Looked up by key rather than counted. Adding a page used to shift every
 # index below it, which broke the Ctrl+5 and Ctrl+, shortcuts without
 # anything failing: the numbers were still in range, just pointing at the
@@ -336,7 +341,11 @@ class MainWindow(QMainWindow):
             if key != "cookbook":
                 side.addWidget(button)
         side.addStretch(1)
-        self.connection_status = label("●  Starting your network…", "online", True)
+        # statusWarn, not a success: this device has no relay yet, which is what
+        # starting up looks like. The four states are named rather than implied,
+        # because this line is the one piece of status always on screen and it
+        # used to be green through every failure it could report.
+        self.connection_status = label("●  Starting your network…", "statusWarn", True)
         self.connection_status.setToolTip(
             "Whether this device is talking to its own relay. Unlocked keys are needed to send.")
         side.addWidget(self.connection_status)
@@ -368,7 +377,7 @@ class MainWindow(QMainWindow):
         top, top_layout = frame("topbar", QHBoxLayout)
         top.setFixedHeight(68)
         top_layout.setContentsMargins(28, 0, 25, 0)
-        self.page_title = label("#  overview", "heading")
+        self.page_title = label("overview", "heading")
         self.sidebar_toggle = action("Menu", self.toggle_sidebar, name="ghost")
         self.sidebar_toggle.setToolTip("Show workspace navigation")
         top_layout.addWidget(self.sidebar_toggle)
@@ -560,6 +569,19 @@ class MainWindow(QMainWindow):
         choices.addStretch()
         hero_words.addLayout(choices)
         layout.addWidget(self.welcome_card)
+        # State, not a toast, for a startup that failed. The toast is gone in
+        # seven and a half seconds, and a fatal is the one event the app cannot
+        # recover from by itself: the controls it disables stay disabled, so
+        # after the toast the window was full of things that would not work
+        # and no reason why. Shaped like pending_cleanup for the same reason.
+        #
+        # On the page rather than inside the welcome card, which hides itself
+        # as soon as there is a conversation to show, because a fatal must be
+        # readable whatever else the window holds.
+        self.startup_error = label("", "errorMessage", True)
+        self.startup_error.setVisible(False)
+        self.startup_error.setWordWrap(True)
+        layout.addWidget(self.startup_error)
 
         # Everything the welcome replaces, kept as one widget so it can be
         # hidden as a unit rather than six pieces.
@@ -627,6 +649,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("CONNECTED", "eyebrow"))
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search agents or models…")
+        # Without this the field is announced as an editable line with nothing
+        # but its placeholder, which is the one part of a screen reader's
+        # reading that can change under the reader's hands.
+        self.search.setAccessibleName("Search connected agents and models")
+        self.search.setAccessibleDescription(
+            "Filters the agents below by name, model or provider.")
         self.search.textChanged.connect(self.render_agents)
         layout.addWidget(self.search)
         self.agent_cards = QGridLayout()
@@ -1246,7 +1274,20 @@ class MainWindow(QMainWindow):
                 "Pick a theme to override it."
             )
         else:
-            self.theme_hint.setText("Your choice is remembered and overrides the system.")
+            # Name the theme in force. "Your choice is remembered and overrides
+            # the system" describes the mechanism and never says what the reader
+            # is now looking at, so picking a theme from the list gave no way to
+            # confirm which one took effect.
+            #
+            # Kept no longer than the sentence it replaces. This sits on the
+            # Settings page, and a longer hint wraps, grows the card and moves
+            # the controls below it -- which is a page-wide layout change
+            # arriving as a theme feature.
+            picked = next((name for name, value in THEME_CHOICES if value == stored), None)
+            self.theme_hint.setText(
+                f"{picked} theme, remembered, overriding your system."
+                if picked else
+                "Your choice is remembered and overrides the system.")
 
     def theme_choice_changed(self, index):
         """Persist the picked theme and apply it.
@@ -1465,6 +1506,16 @@ class MainWindow(QMainWindow):
             self.page_animation = animation
             animation.start()
 
+    def clear_agent_search(self):
+        """Empty the search box, from the empty state that offers to.
+
+        Clearing it rather than hiding the field: the reader can see that the
+        filter was what hid their team, rather than having it disappear and
+        leave them guessing.
+        """
+        self.search.clear()
+        self.search.setFocus()
+
     def render_agents(self):
         """Refresh model listings while retaining unchanged cards and scroll positions."""
         models = self.model_agents()
@@ -1477,8 +1528,24 @@ class MainWindow(QMainWindow):
             clear_layout(grid)
             if not agents:
                 card, column = frame("card")
-                column.addWidget(label("Your team is getting ready.", "heading"))
-                column.addWidget(label("Connect a model or invite a device to collaborate.", "muted", True))
+                # Two different situations, and they are not interchangeable.
+                # "Your team is getting ready" is a claim about the reader's
+                # own setup, and with a search box open it was being made while
+                # a nine-model team was connected and simply did not match what
+                # was typed. This is the Cookbook's empty_reason() rule: say
+                # which situation this is, never let one stand in for another.
+                query = self.search.text().strip()
+                if query:
+                    column.addWidget(label(f"No agents match “{query}”.", "heading", True))
+                    column.addWidget(label(
+                        f"{len(self.agents)} are connected. The search looks at names, models and providers.",
+                        "muted", True))
+                    column.addSpacing(7)
+                    clear = action("Clear search", self.clear_agent_search, name="ghost")
+                    column.addWidget(clear)
+                else:
+                    column.addWidget(label("Your team is getting ready.", "heading"))
+                    column.addWidget(label("Connect a model or invite a device to collaborate.", "muted", True))
                 grid.addWidget(card, 0, 0)
             for index, agent in enumerate(agents):
                 card, column = frame("card")
@@ -2216,12 +2283,12 @@ class MainWindow(QMainWindow):
             # agent" told a first-run user they had already started one.
             if self.selected:
                 self.messages.addWidget(
-                    label("#  This is the beginning of your collaboration.", "heading", True))
+                    label("This is the beginning of your collaboration.", "heading", True))
                 self.messages.addWidget(
                     label("Ask a question, explore an idea, or simply say hello.", "muted", True))
             else:
                 self.messages.addWidget(
-                    label("#  No conversation open", "heading", True))
+                    label("No conversation open", "heading", True))
                 self.messages.addWidget(
                     label("Choose a saved conversation above, open an agent from Agents, or connect a "
                           "model from Providers to start one.", "muted", True))
@@ -2695,7 +2762,9 @@ class MainWindow(QMainWindow):
                 self.persist_history()
         elif event == "agents":
             self.agents = data["agents"]
-            self.connection_status.setText("●  Relay connected" if data["connected"] else "●  Reconnecting…")
+            self.set_connection_state(
+                "statusOk" if data["connected"] else "statusWarn",
+                "●  Relay connected" if data["connected"] else "●  Reconnecting…")
             if not self.selected and any(agent["online"] for agent in self.model_agents()):
                 self.select_agent(GENERAL_TARGET)
             else:
@@ -2776,11 +2845,16 @@ class MainWindow(QMainWindow):
             self.notice(data)
             if event == "fatal":
                 self.progress.hide()
-                self.connection_status.setText("●  Startup needs attention")
+                self.set_connection_state("statusBad", "●  Startup needs attention")
+                # Stated, not toasted. See startup_error: this is the one event
+                # the app cannot undo, and a notice that disappears leaves a
+                # window of dead controls with nothing to explain them.
+                self.startup_error.setText(str(data))
+                self.startup_error.setVisible(True)
         elif event == "pending_cleanup":
             self.show_pending_cleanup(data["credentials"], data.get("files", 0))
         elif event == "offline":
-            self.connection_status.setText("●  Relay unavailable")
+            self.set_connection_state("statusBad", "●  Relay unavailable")
             for agent in self.agents:
                 agent["online"] = False
             for member in self.workspace_meta.get("members", []):
@@ -3143,6 +3217,27 @@ class MainWindow(QMainWindow):
         self.navigate(AGENTS_PAGE)
         self.schedule_model_discovery()
         self.model_id.setFocus()
+
+    def set_connection_state(self, state, text):
+        """Name the connection state as well as writing what it says.
+
+        This label used to be created as "online" and have only its text
+        replaced, so "Startup needs attention" and "Relay unavailable" were both
+        painted in the success green. The line is always on screen and it is the
+        only status the app offers at a glance, so it was reporting a failure in
+        the colour of a success.
+
+        Colour is what carries the meaning here: the leading glyph does not
+        change, and the words need reading rather than glancing at. So the state
+        is a name the stylesheet can match, and it is changed with unpolish and
+        polish, because Qt does not re-match a selector when only the object
+        name moved -- the same three lines set_field_error uses, for the same
+        reason.
+        """
+        self.connection_status.setObjectName(state)
+        self.connection_status.style().unpolish(self.connection_status)
+        self.connection_status.style().polish(self.connection_status)
+        self.connection_status.setText(text)
 
     def set_field_error(self, widget, invalid):
         widget.setProperty("invalid", invalid)
