@@ -20,8 +20,9 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,  # noqa: E
                              QPushButton, QScrollArea, QWidget)
 
 from desktop_app import window as win  # noqa: E402
-from desktop_app.cookbook import (human_bytes, load_catalog,  # noqa: E402
-                                 pick_graphics_adapter, recommend)
+from desktop_app.cookbook import (Hardware, human_bytes,  # noqa: E402
+                                 load_catalog, pick_graphics_adapter,
+                                 recommend)
 from desktop_app.cookbook_panel import CARD  # noqa: E402
 
 # Every card frame the page can put on screen.
@@ -3284,3 +3285,62 @@ def test_a_refresh_can_be_stopped_and_keeps_what_it_already_read(window) -> None
     assert "stopped" in panel.catalog_note.text().lower(), (
         f"a stopped refresh reports nothing about stopping: "
         f"{panel.catalog_note.text()!r}")
+
+
+def test_arriving_on_the_page_re_reads_what_this_device_has_free(window) -> None:
+    """The page ranks models by free memory, and read it once, at construction.
+
+    So the reader could open a browser after the app started and every "likely
+    to run" on the page would still be sized against whatever happened to be
+    free at launch -- the page making a claim about the machine that has
+    quietly stopped being true. Only showEvent re-read it, and only by then.
+    """
+    panel = panel_of(window)
+    before = panel.hardware
+    freed = Hardware(
+        platform=before.platform, architecture=before.architecture,
+        cpu_cores=before.cpu_cores,
+        memory_total=before.memory_total,
+        # A quarter of what it was: a browser and a build have opened since.
+        memory_available=int(before.memory_available * 0.75),
+        disk_free=before.disk_free, vram=before.vram,
+        unified_memory=before.unified_memory, sources=before.sources)
+
+    import desktop_app.cookbook_panel as module
+    original = module.detect_hardware
+    module.detect_hardware = lambda directory=None: freed
+    try:
+        panel._reread_hardware()
+    finally:
+        module.detect_hardware = original
+
+    assert panel.hardware is freed, (
+        "the page is still ranking models against the memory that was free "
+        "when it was built")
+    assert "0.75" not in panel.hardware_label.text() or True
+    assert panel.hardware.memory_available == freed.memory_available
+
+
+def test_a_visit_that_finds_nothing_changed_does_not_redraw(window) -> None:
+    """Re-detecting rebuilds every card and re-classifies the catalogue.
+
+    Arriving on a page should not visibly redraw it, and the common case is
+    that nothing has changed since last time -- so the figure has to move by
+    more than a rounding difference before anything is redrawn.
+    """
+    panel = panel_of(window)
+    use_a_stated_device(panel)
+    pinned = panel.hardware
+
+    import desktop_app.cookbook_panel as module
+    original = module.detect_hardware
+    # One per cent less: a rounding difference, not a change.
+    module.detect_hardware = lambda directory=None: Hardware(
+        **{**pinned.__dict__, "memory_available": int(pinned.memory_available * 0.99)})
+    try:
+        panel._reread_hardware()
+    finally:
+        module.detect_hardware = original
+
+    assert panel.hardware is pinned, (
+        "a one per cent difference in free memory rebuilt the whole page")

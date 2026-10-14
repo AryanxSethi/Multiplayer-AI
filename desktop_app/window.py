@@ -459,7 +459,15 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.chat_page())
         self.stack.addWidget(self.providers_page())
         self.stack.addWidget(self.resources_page())
-        self.stack.addWidget(self.cookbook_page())
+        # A placeholder in the Cookbook's place, not the page itself. Building
+        # it costs a hardware probe, and that probe runs nvidia-smi with a
+        # three second timeout -- on the GUI thread, during build_ui, before
+        # anything is on screen. So every launch paid up to three seconds of
+        # frozen window, on a machine that has an NVIDIA card, to construct a
+        # page most sessions never open. It is built the first time it is
+        # navigated to instead.
+        self.stack.addWidget(self._cookbook_placeholder())
+        self.cookbook_panel = None
         self.stack.addWidget(self.settings_page())
         body_layout.addWidget(self.stack, 1)
         shell.addWidget(body, 1)
@@ -1513,8 +1521,33 @@ class MainWindow(QMainWindow):
                 row.addWidget(label("Managed on its device", "muted"))
             self.imported_model_rows.addWidget(card)
 
+    def _cookbook_placeholder(self):
+        """The Cookbook's slot in the stack until somebody opens it.
+
+        A plain widget rather than None: QStackedWidget needs a real widget at
+        every index so that navigate() can select by index and the keyboard
+        shortcuts keep pointing at the right page.
+        """
+        placeholder = QWidget()
+        placeholder.setObjectName("cookbookPlaceholder")
+        return placeholder
+
+    def _build_cookbook_page(self):
+        """Build the Cookbook the first time it is opened, and only then."""
+        if self.cookbook_panel is not None:
+            return
+        placeholder = self.stack.widget(COOKBOOK_PAGE)
+        previous = self.stack.currentIndex()
+        self.stack.removeWidget(placeholder)
+        placeholder.deleteLater()
+        self.cookbook_panel = None
+        self.stack.insertWidget(COOKBOOK_PAGE, self.cookbook_page())
+        self.stack.setCurrentIndex(previous)
+
     def navigate(self, index):
         """Select a page, update navigation, and sample resources only while visible."""
+        if index == COOKBOOK_PAGE:
+            self._build_cookbook_page()
         self.sidebar_expanded = False
         self.apply_sidebar_density()
         self.stack.setCurrentIndex(index)

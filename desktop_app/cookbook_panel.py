@@ -382,12 +382,23 @@ class CookbookPanel(QWidget):
         self.load()
 
     def showEvent(self, event):
-        """Re-read the mirror each time the page is shown.
+        """Re-read the mirror and this device's memory each time the page is shown.
 
         A setting changed while this page was not on screen should not leave it
         describing a host it has stopped using -- the box, the button and the
         disclosure all name where the next request will go, and a stale name on
         those is the page making a claim it cannot keep.
+
+        The hardware is re-read for the same reason, and it matters more here.
+        The page ranks models by how much memory is free, and it read that once,
+        at construction, and never again -- so the reader could open a browser
+        after the app started and every "likely to run" on the page would still
+        be sized against whatever happened to be free at launch. It is a page
+        making a claim about the machine that has quietly stopped being true.
+
+        Only when the figure has actually moved, because re-detecting rebuilds
+        every card and re-classifies the catalogue, and arriving on a page
+        should not visibly redraw it.
 
         Skipped while the box has focus, so that arriving on the page does not
         overwrite what somebody is in the middle of typing.
@@ -403,6 +414,25 @@ class CookbookPanel(QWidget):
             f"Re-read model details from {self.host_name()}. Sends your network "
             "address and the model names being shown. Nothing is requested "
             "until you press this.")
+        self._reread_hardware()
+
+    def _reread_hardware(self, force=False):
+        """Re-detect this device, and redraw only if the memory has moved.
+
+        A percentage rather than an absolute figure, because "1% of 32GB" is a
+        rounding difference and "20% of 32GB" is a laptop having closed four
+        things. Two per cent keeps a slowly drifting background process from
+        repainting the page on every visit.
+        """
+        fresh = detect_hardware(
+            self.window.storage.directory if hasattr(self.window, "storage") else None)
+        before, after = self.hardware.memory_available, fresh.memory_available
+        if not force and before and after:
+            if abs(after - before) < before * 0.02:
+                return
+        self.hardware = fresh
+        self.hardware_label.setText(self.hardware.describe())
+        self.render_models()
 
     @property
     def base(self):

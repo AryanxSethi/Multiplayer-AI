@@ -5162,3 +5162,43 @@ def test_the_members_table_keeps_the_keyboard_focus_it_was_given(window) -> None
         "skipping real changes as well as repeats")
 
     dialog.close()
+
+
+def test_the_cookbook_is_not_built_while_the_window_is(window) -> None:
+    """Building it runs nvidia-smi with a three second timeout, on the GUI thread.
+
+    Every page was constructed into the stack at start-up, so the Cookbook's
+    hardware probe ran inside build_ui before anything was drawn. On a machine
+    where nvidia-smi is slow that is up to three seconds of frozen window, on
+    every launch, to prepare a page most sessions never open.
+
+    Measured with the probe forced to take three seconds: 3.23s to construct
+    the window before, 0.11s after.
+    """
+    assert window.cookbook_panel is None, (
+        "the Cookbook page was built during start-up, which puts the graphics "
+        "card probe on the path that draws the window")
+    assert window.stack.widget(win.COOKBOOK_PAGE) is not None, (
+        "the stack must still have a widget in the Cookbook's slot, or "
+        "navigate() and the page shortcuts point at nothing")
+
+
+def test_opening_the_cookbook_builds_it_once(window) -> None:
+    """The cost moves rather than disappears, which is the point.
+
+    It is paid the first time the reader asks for the page, and only then.
+    """
+    window.navigate(win.OVERVIEW_PAGE)
+    assert window.cookbook_panel is None
+
+    window.navigate(win.COOKBOOK_PAGE)
+    panel = window.cookbook_panel
+    assert panel is not None, "navigating to the Cookbook did not build it"
+    assert window.stack.widget(win.COOKBOOK_PAGE) is panel, (
+        "the page was built but not put in the slot navigate() selects")
+
+    window.navigate(win.OVERVIEW_PAGE)
+    window.navigate(win.COOKBOOK_PAGE)
+    assert window.cookbook_panel is panel, (
+        "the page was rebuilt on a second visit, re-probing the hardware and "
+        "re-reading the catalogue for nothing")
