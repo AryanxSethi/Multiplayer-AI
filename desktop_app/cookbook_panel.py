@@ -1434,15 +1434,19 @@ class CookbookPanel(QWidget):
         index < len(targets) always holds.
         """
         total = len(targets)
+        if index >= total:
+            # Checked before the cancellation, because the last request is
+            # issued before the button can be pressed. Stop during it and this
+            # is reached with index == total: the refresh did finish, and calling
+            # it a stop told the reader it ended early when it did not.
+            self._finish_refresh(total, updated, refused, before)
+            return
         if self._cancelled:
             # index, not total: the note reports what was read out of what could
             # have been, and index is how many were. Passing total there made a
             # stop after 3 of 4 say "Stopped after 3 of 3" -- the one claim the
             # reader cannot check and is most likely to believe.
             self._finish_refresh(total, updated, refused, before, stopped=True)
-            return
-        if index >= total:
-            self._finish_refresh(total, updated, refused, before)
             return
 
         model = targets[index]

@@ -3282,9 +3282,13 @@ def test_a_refresh_can_be_stopped_and_keeps_what_it_already_read(window) -> None
     panel.cancel_refresh()
     assert panel._cancelled, "Stop did not ask the refresh to end"
 
-    # Draining the remaining steps ends the run and hands the page back.
-    for index in range(len(panel.catalog) + 1):
-        panel._refresh_step(index, list(panel.catalog), {}, {}, list(panel.catalog))
+    # Draining the remaining steps ends the run and hands the page back. Only
+    # the steps still outstanding: arriving at the end of the targets is a
+    # completed refresh, not a stopped one, so driving past it asserted that a
+    # Stop during the final request had ended the run early when it had not.
+    targets = repopulate(panel, 3)
+    for index in range(len(targets)):
+        panel._refresh_step(index, targets, {}, {}, targets)
     assert panel.refresh.isVisible(), "the page was not handed back after a stop"
     assert panel.refresh.isEnabled()
     assert "stopped" in panel.catalog_note.text().lower(), (
@@ -3313,6 +3317,28 @@ def test_a_stopped_refresh_still_reports_what_the_host_refused(window) -> None:
     assert "Stopped after 1 of 3" in note, f"the count is wrong: {note!r}"
     assert "the host said no" in note, (
         f"a stopped refresh does not say what the host refused: {note!r}")
+
+
+def test_stopping_during_the_last_request_finishes_the_refresh(window) -> None:
+    """The last request is already in flight before Stop can be pressed.
+
+    Reaching the end of the targets is a refresh that completed. The
+    cancellation was checked first, so arriving there said stopped -- telling a
+    reader who pressed Stop just as the final model came back that the run had
+    been cut short when every model had in fact been read.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    targets = repopulate(panel, 3)
+
+    panel._busy = True
+    panel._cancelled = True
+    panel._refresh_step(len(targets), targets, {t.repo: t for t in targets}, {}, targets)
+    note = panel.catalog_note.text()
+    assert "Stopped" not in note, (
+        f"a refresh that read every target is reported as stopped: {note!r}")
+    assert panel.refresh.isVisible(), "the page was not handed back"
 
 
 def test_a_stopped_refresh_reports_against_the_whole_catalogue(window) -> None:
