@@ -154,8 +154,19 @@ class WorkspaceDialog(QDialog):
         self.refresh_invitations()
 
     def refresh_invitations(self):
-        """List the invitations this device can still issue, one row each."""
+        """List the invitations this device can still issue, one row each.
+
+        Only rebuilt when the list itself changes. refresh() calls this whenever
+        the membership does, and a member going online or offline is not a
+        change to the invitations -- but rebuilding anyway deleted the rows, and
+        took the keyboard focus sitting on a "Show invitation" button with them.
+        That is the defect the signature guard on refresh() exists to prevent,
+        reintroduced one call down, so it is guarded here for the same reason.
+        """
         names = list(getattr(self.window, "outstanding_invitations", ()) or ())
+        if names == getattr(self, "rendered_invitations", None):
+            return
+        self.rendered_invitations = list(names)
         while self.invitation_rows.count():
             child = self.invitation_rows.takeAt(0).widget()
             if child is not None:

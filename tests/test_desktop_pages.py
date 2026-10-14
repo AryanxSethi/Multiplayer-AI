@@ -5045,6 +5045,41 @@ def test_the_smallest_controls_are_still_wide_enough_to_hit(window) -> None:
         f"{window.sidebar_close.height()}")
 
 
+def test_an_unrelated_membership_change_keeps_the_focused_invitation_button(window) -> None:
+    """A member going online must not rebuild the invitation rows.
+
+    refresh() runs whenever the membership changes, and it calls
+    refresh_invitations on the way through. Rebuilding deleted the rows, so a
+    reader part-way through tabbing to "Show invitation" had the button vanish
+    under them -- the same thing the signature guard on refresh() exists to
+    stop, one call down.
+    """
+    from desktop_app.workspace_dialog import WorkspaceDialog
+
+    window.outstanding_invitations = ["laptop-one"]
+    dialog = WorkspaceDialog(window)
+    dialog.refresh_invitations()
+    button = dialog.invitation_rows.itemAt(0).widget().findChildren(QPushButton)[0]
+    assert button is not None, "no button was built for the invitation"
+    button.setFocus()
+
+    before = dialog.invitation_rows.itemAt(0).widget()
+    window.workspace_meta = dict(window.workspace_meta or {}, members=[
+        {"id": "laptop-one", "role": "Device", "online": True}])
+    dialog.refresh()
+    dialog.refresh_invitations()
+
+    assert dialog.invitation_rows.count() == 1, dialog.invitation_rows.count()
+    after = dialog.invitation_rows.itemAt(0).widget()
+    assert after is before, (
+        "the invitation row was rebuilt for an unrelated membership change, so "
+        "the button under the reader's focus was deleted")
+    # The button object itself, not whether Qt happens to have given it focus:
+    # the dialog is not shown here, and an inactive window grants focus to
+    # nothing. Keeping the widget is the part that matters -- focus survives a
+    # widget that is still there.
+
+
 def test_the_empty_agent_card_is_padded_like_the_ones_it_replaces(window) -> None:
     """Qt's default margin, 11px, against 18/17 on the real cards below.
 
