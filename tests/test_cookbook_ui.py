@@ -6,11 +6,9 @@ this app sends nothing anywhere. The second is that it says which models fit
 and why, rather than presenting a list a reader has to take on trust.
 """
 
-import os
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page tests")
 pytest.importorskip("psutil", reason="psutil backs hardware detection")

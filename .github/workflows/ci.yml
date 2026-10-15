@@ -1,0 +1,64 @@
+name: CI
+
+# There was no workflow here at all, which meant the test suite never ran
+# except on whoever's machine, and the Ruff rule set was documentation rather
+# than a gate. Both now run on every push and pull request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the desktop platform. Linux is here for two tests in
+        # test_vault.py that guard the POSIX branch of a path lookup and skip
+        # themselves on Windows, so without it they never run anywhere.
+        os: [windows-latest, ubuntu-latest]
+
+    env:
+      # Qt needs a platform plugin that needs no display. Set once here rather
+      # than per test module: tests/conftest.py sets it too, for runs that do
+      # not come through here, and both use setdefault so neither wins over the
+      # other.
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements-desktop.txt
+            requirements-network.txt
+
+      - name: Install
+        run: python -m pip install -r requirements-desktop.txt pytest pytest-asyncio ruff==0.16.8
+
+      - name: Tests
+        run: python -m pytest tests
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: python -m pip install ruff==0.16.8
+      - name: Ruff
+        # Reads [tool.ruff] from pyproject.toml. Until that file is on main
+        # this reports Ruff's defaults, which find 348 findings on a codebase
+        # that was never written against them -- so this step is expected to be
+        # red until the rule-set change merges, and that is deliberate rather
+        # than a thing to work around by loosening it.
+        run: python -m ruff check .

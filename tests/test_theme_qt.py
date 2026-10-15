@@ -15,12 +15,9 @@ the developer's keyring every time the suite ran.
 from __future__ import annotations
 
 import math
-import os
 
 import pytest
 
-# Must be set before QApplication is constructed.
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop theme tests")
 

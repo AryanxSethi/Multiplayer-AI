@@ -8,6 +8,15 @@ keeps the production classes free of test-only reset methods.
 
 from __future__ import annotations
 
+# Before anything can construct a QApplication, and before any test module
+# is imported. Eight modules each set this for themselves, which meant the
+# variable was right only if every one of them happened to be imported
+# before the first Qt object was built -- a precondition nothing enforced
+# and nothing said. One place, set first.
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
 from starlette.testclient import TestClient
 

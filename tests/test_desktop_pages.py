@@ -11,13 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import json
-import os
 import re
 import time
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page tests")
 pytest.importorskip("psutil", reason="psutil backs the Resources page")
