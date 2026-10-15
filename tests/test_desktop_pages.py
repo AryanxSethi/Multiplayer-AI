@@ -1262,7 +1262,6 @@ def test_a_renamed_agent_does_not_inherit_the_previous_replys_header(window, qt_
         ("local_agent", "still the first run"),
     ]}}
     window.render_messages()
-    first = [row_labels(row) for row in window.messages_widget.findChildren(win.HoverRow)]
 
     # The agent comes back under a new id, and the history follows it.
     window.agents = [{"id": "llama3-new", "kind": "model", "online": True,
@@ -1659,7 +1658,7 @@ def test_hovering_the_rail_does_not_strip_a_workspace_button(qt_app) -> None:
     Checked on a button carrying text rather than the rail's plus, which
     is drawn and so never depended on the button's own colour.
     """
-    from desktop_app.widgets import Select, WorkspaceButton
+    from desktop_app.widgets import WorkspaceButton
 
     button = WorkspaceButton("AB")
     button.set_ink("success")
@@ -3461,7 +3460,7 @@ def test_the_card_still_leaves_at_the_cap_without_readiness(qt_app) -> None:
     an app that is entirely usable, and neither must one that never reported
     ready at all. The cap is what covers both.
     """
-    from desktop_app.splash import LAUNCH_CAP_MS, LAUNCH_FLOOR_MS, LaunchScreen, StartupStatus
+    from desktop_app.splash import LAUNCH_FLOOR_MS, LaunchScreen, StartupStatus
 
     status = StartupStatus()
     status.observe("agents", {"agents": [], "connected": False})
@@ -3617,7 +3616,7 @@ def test_the_card_releases_even_if_the_runtime_goes_quiet(qt_app, storage) -> No
     is left unsettled deliberately: a startup with nothing owed settles at
     once and would release at the floor whether or not the cap existed.
     """
-    from desktop_app.splash import LAUNCH_CAP_MS, LaunchScreen, StartupStatus
+    from desktop_app.splash import LaunchScreen, StartupStatus
 
     window = win.MainWindow(storage)
     try:
@@ -3726,7 +3725,7 @@ def test_the_launch_screen_has_a_background_of_its_own(qt_app) -> None:
         # check for the wrong reason.
         pump(qt_app, FADE_MS / 1000 + 0.15)
         image = screen.grab().toImage()
-        width, height = image.width(), image.height()
+        width = image.width()
 
         middle = image.pixelColor(width // 2, 8)
         assert middle.alpha() == 255, (

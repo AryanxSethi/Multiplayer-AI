@@ -15,9 +15,8 @@ import pytest
 
 from desktop_app.cookbook import (CACHE_NAME, PREVIOUS_NAME, CatalogError, Model,
                                   Variant, cache_paths, describe_changes,
-                                  load_cache, parse_catalog, parse_model,
+                                  load_cache, parse_model,
                                   rollback_catalog, save_catalog)
-from tests.test_cookbook import CODER
 
 
 def directory():
@@ -88,7 +87,6 @@ def test_a_cache_that_cannot_be_read_is_ignored_rather_than_raised(tmp_path) -> 
     catalogue is what is used instead. Any of them being an exception would
     mean the page could not open at all.
     """
-    from desktop_app.cookbook import CACHE_NAME
     assert load_cache(tmp_path) is None, "an empty directory reported a catalogue"
 
     for content in ("{not json", json.dumps({"version": 99, "models": []}),

@@ -8,7 +8,6 @@ import pytest
 from starlette.testclient import TestClient
 
 from src.errors import ClientNotFoundError
-from src.server.connection_manager import ConnectionManager
 
 
 def test_client_connection_is_accepted(client: TestClient) -> None:

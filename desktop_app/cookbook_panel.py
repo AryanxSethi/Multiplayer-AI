@@ -23,7 +23,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
 
-from .cookbook import (EXPLANATIONS, FITTING, LIKELY, NOT_ENOUGH_PUBLISHED,
+from .cookbook import (EXPLANATIONS, LIKELY, NOT_ENOUGH_PUBLISHED,
                        POSSIBLE, PREVIOUS_NAME, VERIFIED,
                        CatalogError, TASKS, describe_changes, detect_hardware,
                        empty_reason, human_bytes, kv_cache_bytes, load_cache,

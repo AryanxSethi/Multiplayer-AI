@@ -3,7 +3,6 @@ import json
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QLineEdit, QPlainTextEdit, QVBoxLayout
 
-from .theme import color
 from .lan import lan_addresses
 from .widgets import Select, TickCheckBox, action, label
 

@@ -13,7 +13,7 @@ pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
@@ -222,7 +222,7 @@ class WorkspaceUITests(unittest.TestCase):
         deleted_directory = Path(self.directory.name) / "host" / "workspaces" / second
         deleted_directory.mkdir(parents=True, exist_ok=True)
         (deleted_directory / "settings.json").write_text("{}", encoding="utf-8")
-        deleted_archive = deleted_directory / "history.sqlite3"
+        deleted_directory / "history.sqlite3"
         HistoryStore(deleted_directory).save("ui", "state", {"chats": {"gone": {}}})
         dialog = WorkspaceDialog(self.host)
         dialog.show()

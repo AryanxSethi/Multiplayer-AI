@@ -1,0 +1,25 @@
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+# Pyflakes-level correctness only: unused names, redefinitions, and the
+# syntax-level errors. Everything here is a thing that is wrong rather than a
+# thing that is written differently.
+#
+# Ruff 0.16 ships a much broader default set than earlier versions did, which
+# is why selecting nothing found 348 findings across 74 files on a codebase
+# that has never claimed to be lint-clean. Most of that 348 is not defect but
+# disagreement: I001 wants imports sorted against the layout this codebase has
+# written consistently, BLE001 and S110 flag blind excepts that are deliberate
+# and documented at the site, RUF059 flags discarded unpack targets like
+# "_, previous = cache_paths()", and RUF100 fires on the existing noqa
+# markers for rules this file does not enable.
+#
+# So the narrow set is the honest one: it is what can be fixed without first
+# settling an argument about house style. Widening it is a separate decision
+# and should be made rule by rule.
+#
+# Deliberately no [project] table. Ruff is a developer tool installed into the
+# conda environment, not a runtime requirement, so it is not declared as a
+# dependency and is not listed in requirements-*.txt.
+select = ["E4", "E7", "E9", "F"]

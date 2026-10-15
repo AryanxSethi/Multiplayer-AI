@@ -236,7 +236,6 @@ def test_the_date_on_the_file_is_the_day_the_figures_were_read(monkeypatch, tmp_
     the date is the whole provenance of a catalogue whose point is that its
     numbers came from somewhere.
     """
-    import asyncio
     import json as _json
     import scripts.grow_catalogue as tool
 
