@@ -57,23 +57,34 @@ class ConnectionManager:
         self._clients: Dict[str, ClientInfo] = {}
         self._connection_ids: Dict[str, str] = {}
 
-    def register(self, client_id: str, websocket: WebSocket) -> str:
+    def register(
+        self, client_id: str, websocket: WebSocket
+    ) -> tuple[str, Optional[WebSocket]]:
         """Register a newly connected client.
 
-        Reconnecting with an id that is already present replaces the
-        previous entry. The old socket is not closed here; the client
-        registry has no authority over a socket the framework still owns,
-        so a duplicate-id reconnect leaves the previous socket orphaned.
-        That is acceptable for the prototype and is called out rather
-        than papered over.
+        One client id is one socket. Reconnecting with an id already present
+        replaces the previous entry, and the socket it replaced is returned so
+        the caller can close it: it used to be left open and its connection id
+        left in the table, so a client that dropped and came back stranded both.
+
+        The socket is not closed from here. Closing is async and this is not,
+        and the caller has the connection in hand at the moment it is worth
+        closing. Its connection id is dropped now rather than when it finally
+        closes, because that is what makes the return above the only record of
+        it -- unregister() can no longer find it, which is correct: by then the
+        id belongs to nobody.
 
         Returns:
-            The new connection id, needed later to unregister.
+            The new connection id, needed later to unregister, and the socket
+            this one displaced, or None if nothing was registered.
         """
+        previous = self._clients.get(client_id)
+        if previous is not None:
+            self._connection_ids.pop(previous.connection_id, None)
         info = ClientInfo(client_id, websocket)
         self._clients[client_id] = info
         self._connection_ids[info.connection_id] = client_id
-        return info.connection_id
+        return info.connection_id, (previous.websocket if previous else None)
 
     def unregister(self, connection_id: str) -> Optional[str]:
         """Remove a client by connection id.

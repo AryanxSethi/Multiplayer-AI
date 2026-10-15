@@ -15,7 +15,7 @@ the sender as structured errors.
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator, Dict
 
 from starlette.applications import Starlette
@@ -119,7 +119,19 @@ async def client_socket(websocket: WebSocket) -> None:
     client_id = websocket.path_params["client_id"]
 
     await websocket.accept()
-    connection_id = connection_manager.register(client_id, websocket)
+    connection_id, displaced = connection_manager.register(client_id, websocket)
+    if displaced is not None:
+        # One client id is one socket, so the one this replaced has to go.
+        # Closing is where it belongs -- the connection is in hand here and the
+        # registry cannot await -- and it used to be left open, with its
+        # connection id left behind too, on every reconnect.
+        #
+        # Suppressed because closing a socket the framework is already tearing
+        # down can raise, and it is out of the registry either way: there is
+        # nothing to report and nothing left to clean up.
+        with suppress(Exception):
+            await displaced.close()
+        logger.info("CLIENT_DISPLACED clientId=%s connectionId=%s", client_id, connection_id)
     logger.info(
         "CLIENT_CONNECTED clientId=%s connectionId=%s", client_id, connection_id
     )
