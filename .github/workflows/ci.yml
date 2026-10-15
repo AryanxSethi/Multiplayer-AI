@@ -26,16 +26,7 @@ jobs:
       # than per test module: tests/conftest.py sets it too, for runs that do
       # not come through here, and both use setdefault so neither wins over the
       # other.
-      #
-      # The configfile pins the offscreen screen to 1920x1080. Without it Qt
-      # picks one, and what it picks is not the same everywhere -- a runner and
-      # a developer's machine came out at different sizes here, which is enough
-      # to move the width at which the sidebar collapses and with it the
-      # layout the page tests measure. Several tests assert on geometry, so an
-      # unpinned screen makes the suite assert against whatever the runner
-      # happened to be. The path is relative on purpose: Qt 6.11 crashes on an
-      # absolute one.
-      QT_QPA_PLATFORM: offscreen:configfile=qt-offscreen.json
+      QT_QPA_PLATFORM: offscreen
 
     steps:
       # v5 and v6 rather than v4 and v5. Those two run on Node 20, which GitHub
