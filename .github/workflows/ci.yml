@@ -29,15 +29,24 @@ jobs:
       QT_QPA_PLATFORM: offscreen
 
     steps:
-      - uses: actions/checkout@v4
+      # v5 and v6 rather than v4 and v5. Those two run on Node 20, which GitHub
+      # has retired; every run logged "Node.js 20 actions are deprecated" and
+      # forced the step onto Node 24 anyway, which is a warning today and a
+      # refusal later. setup-python v6 needs runner v2.327.1 or newer, which is
+      # long since true of both GitHub-hosted images.
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
+          # requirements-dev.txt is listed because the step below installs it.
+          # It was left out here, so the cache key did not change when the test
+          # tooling changed and a runner could be handed a stale copy.
           cache-dependency-path: |
             requirements-desktop.txt
             requirements-network.txt
+            requirements-dev.txt
 
       - name: Install
         # Every dependency comes from the requirements files rather than being
@@ -56,8 +65,8 @@ jobs:
     name: ruff
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: Install

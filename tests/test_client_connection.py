@@ -74,11 +74,14 @@ def test_various_client_ids_are_accepted(
 
 
 def test_a_second_socket_for_one_client_is_closed(client: TestClient, registry) -> None:
-    """The end of the orphan, over a real socket rather than a stand-in.
+    """The registry half of the orphan, over a real socket rather than a stand-in.
 
-    The registry reports the socket it replaced; this checks the caller acts on
-    it, because a fix that only tidied the table would still leave the socket
-    open, which is the half a reader can actually be hurt by.
+    The displaced socket is closed by the handler, and Starlette records no
+    state we can read back for it: application_state reads DISCONNECTED whether
+    or not close() ran, and a receive() on an abandoned socket blocks for ever
+    and hangs the suite instead of failing it. So this asserts the bookkeeping
+    the close must not corrupt, and the stand-in test above carries the close
+    itself.
     """
     with client.websocket_connect("/ws/client-A"):
         stale = registry.get_client("client-A").connection_id
@@ -90,8 +93,8 @@ def test_a_second_socket_for_one_client_is_closed(client: TestClient, registry) 
                 "the replaced connection id was left in the table")
             assert registry.count() == 1, (
                 f"{registry.count()} entries for one client id")
-        # The live socket closed with the inner block and must take the client
-        # with it, even though a stale id unregisters first on the way out.
+            assert registry.is_connected("client-A"), (
+                "closing the displaced socket took the live client with it")
         assert not registry.is_connected("client-A")
 
 

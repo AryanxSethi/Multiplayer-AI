@@ -9,7 +9,8 @@ from datetime import datetime
 
 from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize,
                             Qt, QTimer, QUrl, Slot)
-from PySide6.QtGui import (QGuiApplication, QIcon, QKeySequence, QColor, QDesktopServices, QPalette, QShortcut)
+from PySide6.QtGui import (QAccessible, QAccessibleAnnouncementEvent,
+                           QGuiApplication, QIcon, QKeySequence, QColor, QDesktopServices, QPalette, QShortcut)
 from PySide6.QtWidgets import (QApplication, QFileDialog,
     QFormLayout, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QMainWindow, QMenu,
@@ -1397,10 +1398,16 @@ class MainWindow(QMainWindow):
         # dismiss button beside the message, and painting only the label would
         # put the button outside the bordered box -- so the toast would look
         # like a panel with a stray control next to it.
+        foreground = color(self.theme, "error" if self.toast_error else "toast_fg")
         self.toast_row.setStyleSheet("background:" + color(self.theme, "toast_bg")
-                                     + "; color:" + color(self.theme, "error" if self.toast_error else "toast_fg")
+                                     + "; color:" + foreground
                                      + "; border:1px solid " + color(self.theme, "text")
                                      + "; padding:12px 24px;")
+        # The label sets its own foreground rather than relying on the row's
+        # cascading down to it. A QLabel takes its text colour from the
+        # palette, so a failure styled on the row alone is painted in the
+        # ordinary notice colour -- the one thing this styling is for.
+        self.toast.setStyleSheet("color:" + foreground)
 
     def style_placeholders(self):
         palette = self.palette()
@@ -2739,6 +2746,14 @@ class MainWindow(QMainWindow):
         # all, so a failure that nobody heard is the same as a failure that
         # never happened.
         self.toast.setAccessibleName(message)
+        if error:
+            # The name above is metadata. Without this it is written and never
+            # spoken, so a screen reader is still told nothing -- which was the
+            # whole reason the message was made to persist. Announced politely
+            # rather than asserted, so it does not interrupt whatever the reader
+            # is in the middle of, and without moving focus.
+            QAccessible.updateAccessibility(
+                QAccessibleAnnouncementEvent(self.toast, message))
         self.toast_row.show()
         if error:
             # Errors stand until dismissed or replaced by a later one. Seven
@@ -4152,6 +4167,10 @@ class MainWindow(QMainWindow):
             self.closing = True
             self.setEnabled(False)
             self.toast.setText("Disconnecting agents and shutting down your local relay…")
+            # Stopped first: this message is not going anywhere, and a copy
+            # notice still counting down would take it off the screen a second
+            # later -- during shutdown, on a window that is already disabled.
+            self.toast_timer.stop()
             self.toast_row.show()
             self.network.shutdown()
 

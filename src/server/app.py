@@ -125,18 +125,25 @@ async def client_socket(websocket: WebSocket) -> None:
         # Closing is where it belongs -- the connection is in hand here and the
         # registry cannot await -- and it used to be left open, with its
         # connection id left behind too, on every reconnect.
-        #
-        # Suppressed because closing a socket the framework is already tearing
-        # down can raise, and it is out of the registry either way: there is
-        # nothing to report and nothing left to clean up.
-        with suppress(Exception):
-            await displaced.close()
-        logger.info("CLIENT_DISPLACED clientId=%s connectionId=%s", client_id, connection_id)
+        logger.info(
+            "CLIENT_DISPLACED clientId=%s connectionId=%s", client_id, connection_id
+        )
     logger.info(
         "CLIENT_CONNECTED clientId=%s connectionId=%s", client_id, connection_id
     )
 
     try:
+        if displaced is not None:
+            # Inside the try so a cancellation here still reaches the finally.
+            # CancelledError is not an Exception, so suppress() does not cover
+            # it, and outside the block it would skip unregister entirely and
+            # leave the new connection registered for ever.
+            #
+            # Suppressed otherwise, because closing a socket the framework is
+            # already tearing down can raise, and it is out of the registry
+            # either way: nothing to report, nothing left to clean up.
+            with suppress(Exception):
+                await displaced.close()
         while True:
             frame = await _receive_frame(websocket)
             if frame is None:
