@@ -148,6 +148,23 @@ async def client_socket(websocket: WebSocket) -> None:
             frame = await _receive_frame(websocket)
             if frame is None:
                 continue
+            # A frame that arrives after this connection has been displaced is
+            # not acted on. close() sends a close event; it does not cancel the
+            # receive_json() already waiting below, and it does not stop the
+            # client that is still writing. So this handler stays in the loop
+            # with a client id the registry has handed to somebody else, and
+            # routing on that id alone would deliver the stale frame down the
+            # new socket or run it as an agent request on the new one's behalf.
+            # The registry is the only thing that knows which connection is
+            # current, so it is what decides.
+            current = connection_manager.get_client(client_id)
+            if current is None or current.connection_id != connection_id:
+                logger.info(
+                    "CLIENT_FRAME_DROPPED clientId=%s connectionId=%s reason=displaced",
+                    client_id,
+                    connection_id,
+                )
+                break
             await _handle_frame(websocket, client_id, frame)
     except WebSocketDisconnect:
         pass

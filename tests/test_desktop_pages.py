@@ -1481,6 +1481,34 @@ def test_a_failure_is_not_cut_short_by_the_notice_before_it(window, qt_app) -> N
     assert window.toast_row.isHidden() is True, "dismissing the failure did nothing"
 
 
+def test_the_toast_row_carries_its_own_border_and_inset(window, qt_app) -> None:
+    """The border and padding style_toast() writes are actually applied.
+
+    Qt's style sheet implements the box model only on frames. On a plain QWidget
+    a border and a padding are dropped without a word, and because the layout
+    inside the row sets its margins to zero -- on the assumption that the
+    padding was supplying the inset -- the message ended up flush against the
+    edge of a box that had no edge. Asserted through contentsRect, which is
+    where the box model shows up: equal to rect() on a widget that ignored it,
+    inset by the border and padding on one that did not.
+    """
+    from PySide6.QtWidgets import QFrame
+
+    assert isinstance(window.toast_row, QFrame), (
+        f"the toast row is a {type(window.toast_row).__name__}, so style_toast()'s "
+        "border and padding are applied to something that discards them")
+
+    window.notice("Something failed.", error=True)
+    qt_app.processEvents()
+
+    row = window.toast_row
+    assert row.contentsRect() != row.rect(), (
+        "the toast row's contents fill it edge to edge, so the border and "
+        "padding in its style sheet were not applied")
+    assert row.styleSheet().count("border:") == 1, (
+        "the toast row is no longer given a border to apply")
+
+
 def test_one_timer_owns_the_toast(window) -> None:
     """The countdown is a window-owned timer that each notice restarts.
 

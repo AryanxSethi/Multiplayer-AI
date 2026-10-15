@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from copy import copy
 
 import pytest
+
+from tests.conftest import envelope
 from starlette.testclient import TestClient
 
+import src.server.app as server_app
 from src.errors import ClientNotFoundError
 
 
@@ -96,6 +100,67 @@ def test_a_second_socket_for_one_client_is_closed(client: TestClient, registry) 
             assert registry.is_connected("client-A"), (
                 "closing the displaced socket took the live client with it")
         assert not registry.is_connected("client-A")
+
+
+def test_a_displaced_connection_cannot_handle_a_frame(
+    client: TestClient, registry, monkeypatch
+) -> None:
+    """A frame from a replaced socket is dropped, not routed.
+
+    close() only sends a close event. It does not cancel the receive_json()
+    already waiting in the displaced handler, and the client on the other end
+    can keep writing, so that handler is still sitting in its loop holding a
+    client id the registry has since given to somebody else. Routing on that id
+    alone sends the stale frame down the new socket, or runs it as an agent
+    request in the new connection's name.
+
+    The registry is made to report the displacement directly rather than racing
+    a real one, because the window in which the old handler would still accept
+    a frame is exactly as wide as the close event takes to arrive -- which is to
+    say, not at all, from the test's side of it. What is under test is the
+    decision, not the timing.
+    """
+    handled: list[str] = []
+    real_handle = server_app._handle_frame
+
+    async def record(websocket, client_id, frame):
+        handled.append(client_id)
+        return await real_handle(websocket, client_id, frame)
+
+    monkeypatch.setattr(server_app, "_handle_frame", record)
+    real_get = registry.get_client
+
+    def displaced(client_id):
+        found = real_get(client_id)
+        if client_id != "client-A" or found is None:
+            return found
+        # Same client, somebody else's socket: what the registry looks like the
+        # moment a reconnect lands, without the reconnect itself.
+        other = copy(found)
+        other.connection_id = "a-different-connection"
+        return other
+
+    with client.websocket_connect("/ws/client-A") as socket:
+        mine = registry.get_client("client-A").connection_id
+        monkeypatch.setattr(registry, "get_client", displaced)
+        assert registry.get_client("client-A").connection_id != mine, (
+            "the registry did not report the displacement, so this test would "
+            "pass without ever putting the handler in the displaced state")
+
+        socket.send_json(envelope(destination="client-B"))
+
+        # Let the portal turn, bounded, so a handler that wrongly accepts the
+        # frame has time to say so. A receive() here would block for ever when
+        # nothing is delivered, reporting the failure as a hung suite rather
+        # than as a failure.
+        for _ in range(40):
+            if handled:
+                break
+            client.get("/health")
+
+    assert not handled, (
+        f"a displaced connection handled {len(handled)} frame(s) for "
+        f"{handled[0]!r}, which would deliver them over the live socket")
 
 
 def test_unknown_client_send_raises_not_found(registry) -> None:

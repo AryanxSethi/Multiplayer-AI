@@ -433,7 +433,13 @@ class MainWindow(QMainWindow):
         # shape as ErrorLine -- message, then a ghost dismiss -- so there is one
         # convention for it rather than two. The row is what is shown and hidden;
         # the label inside carries the text.
-        self.toast_row = QWidget()
+        self.toast_row = QFrame()
+        # QFrame rather than QWidget because style_toast() puts a border and a
+        # padding on this row, and Qt's style sheet applies the box model only to
+        # frames. On a plain QWidget both are dropped without a word: contents()
+        # comes back equal to rect() and the toast renders with no border and no
+        # inset, which is why the layout below sets its own margins to zero --
+        # the padding that was supposed to supply them was never applied.
         toast_layout = QHBoxLayout(self.toast_row)
         toast_layout.setContentsMargins(0, 0, 0, 0)
         toast_layout.setSpacing(6)
