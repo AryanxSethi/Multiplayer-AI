@@ -145,8 +145,18 @@ class MarkdownMessage(QTextBrowser):
         width = self.viewport().width() or self.width()
         self._fitting = True
         try:
+            # setTextWidth asks for a rewrap, and setTextWidth is not the only
+            # way the document changes: documentSizeChanged is connected to
+            # fit_height, so the rewrap calls back in here while _fitting is set
+            # and is dropped. That leaves this pass measuring the layout from
+            # before the rewrap, which for a reply rewrapped at the width it
+            # already had came back two pixels short. The size that matters is
+            # therefore read from the layout itself rather than from the
+            # document's own view of it, which the dropped call has left stale.
             self.document().setTextWidth(max(1, width))
-            height = math.ceil(self.document().size().height()) + margins.top() + margins.bottom()
+            height = self.document().documentLayout().documentSize().height()
+            height = max(height, self.document().size().height())
+            height = math.ceil(height) + margins.top() + margins.bottom()
         finally:
             self._fitting = False
         if self.horizontalScrollBar().isVisible():

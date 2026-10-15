@@ -1052,6 +1052,19 @@ def test_no_bubble_is_too_short_for_the_text_it_holds(window, qt_app) -> None:
         window.chats = {"local-llama": {"messages": [
             ("user", question), ("assistant", answer)]}}
         window.render_messages()
+        # A markdown reply is laid out by its document, which rewraps to the
+        # width it is given and reports the settled height only once the layout
+        # has been run. Read straight after render_messages(), that height is
+        # the one from before the rewrap -- a couple of pixels short of what
+        # the text now needs -- so the assertion reports text cut off when none
+        # is, at whichever width in the sweep happened to cross a rewrap.
+        #
+        # settle_message_layout() rather than processEvents() here: it forces
+        # the chat's own layout and resizes the bubbles, and unlike spinning the
+        # event loop it cannot give the relay poll a turn, which replaces the
+        # chats with whatever the relay actually holds -- nothing here -- and
+        # leaves the assertion measuring an empty page.
+        window.settle_message_layout()
         assert window.message_bubbles, f"the message is missing at {width}px"
         assert not clipped(), f"text is cut off at {width}px: {clipped()}"
 

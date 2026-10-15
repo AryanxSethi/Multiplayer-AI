@@ -63,6 +63,24 @@ def test_minimum_is_never_above_the_chosen_size(screen) -> None:
     assert height >= minimum_height
 
 
+@pytest.mark.parametrize("screen", COMMON_SCREENS)
+def test_minimum_leaves_room_for_the_sidebar_to_collapse(screen) -> None:
+    """The minimum width has to be below the collapse threshold.
+
+    This is the defect being fixed: the minimum was capped at 1010 while the
+    sidebar collapses at 1000, so a window could never be dragged narrow
+    enough to collapse the sidebar and the collapsed layout was unreachable on
+    every screen wide enough for the cap to apply. Qt enforces the minimum on
+    resize, so the window simply refused to get smaller.
+    """
+    minimum_width, _ = layout.minimum_size(screen)
+
+    assert minimum_width < layout.SIDEBAR_COLLAPSE_WIDTH, (
+        f"the minimum width {minimum_width} on a {screen[0]}px screen is not "
+        f"below the {layout.SIDEBAR_COLLAPSE_WIDTH}px collapse threshold, so "
+        "the sidebar can never be collapsed by narrowing the window")
+
+
 def test_small_laptop_is_the_case_that_matters() -> None:
     """1366x768 cannot fit the old fixed 910px height."""
     width, height = layout.window_size(None, {}, (1366, 768))
