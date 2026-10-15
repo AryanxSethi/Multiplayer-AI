@@ -1418,11 +1418,11 @@ def test_a_copied_message_confirms_itself_briefly(window, qt_app) -> None:
     # the toast's own state: the fixture's window is never shown, so
     # ``isVisible`` would report False for both of them and prove nothing.
     QTest.qWait(1100)
-    assert window.toast.isHidden() is True, "the copy toast was still up"
+    assert window.toast_row.isHidden() is True, "the copy toast was still up"
 
     window.notice("Could not save credentials.", error=True)
     QTest.qWait(1100)
-    assert window.toast.isHidden() is False, (
+    assert window.toast_row.isHidden() is False, (
         "a failure has to outlive a copy: it is the one worth reading")
 
 
@@ -1447,16 +1447,26 @@ def test_a_failure_is_not_cut_short_by_the_notice_before_it(window, qt_app) -> N
     # Past the copy's one second, but nowhere near the failure's seven and a
     # half. Under the old per-notice timers this is where the toast vanished.
     QTest.qWait(700)
-    assert window.toast.isHidden() is False, (
+    assert window.toast_row.isHidden() is False, (
         "the failure was taken down by the countdown from the copy before it, "
         "so it disappeared after a second instead of being readable")
     assert window.toast.text() == "Could not save credentials.", (
         f"the toast shows {window.toast.text()!r}, not the failure")
 
-    # And it still goes away on its own schedule rather than never.
-    QTest.qWait(7200)
-    assert window.toast.isHidden() is True, (
-        "the failure toast never went away, so the timer is not running")
+    # A failure now stands until it is dismissed, rather than timing itself out.
+    # Seven and a half seconds is a window: look away, come back, and the reason
+    # the button did nothing has gone with it.
+    QTest.qWait(8000)
+    assert window.toast_row.isHidden() is False, (
+        "a failure timed itself out instead of being dismissed")
+
+    # And being dismissed is a control, not only the absence of a timer.
+    # isHidden and not isVisible, for the reason noted above: the window is
+    # never shown, so a visible check reports False for everything.
+    assert window.toast_dismiss.isHidden() is False, (
+        "there is no way to take the failure off the screen")
+    window.dismiss_notice()
+    assert window.toast_row.isHidden() is True, "dismissing the failure did nothing"
 
 
 def test_one_timer_owns_the_toast(window) -> None:
@@ -1476,13 +1486,44 @@ def test_one_timer_owns_the_toast(window) -> None:
         f"a copy should start a {win.COPY_TOAST_MS}ms countdown, got "
         f"{window.toast_timer.interval()}ms")
     window.notice("Something failed.", error=True)
-    assert window.toast_timer.isActive() is True, (
-        f"a failure did not restart the toast timer, which is {window.toast_timer.interval()}ms")
-    assert window.toast_timer.interval() == win.TOAST_MS, (
-        f"a failure should restart the countdown at {win.TOAST_MS}ms, got "
-        f"{window.toast_timer.interval()}ms")
+    # A failure stops the countdown rather than restarting it. Restarting would
+    # have left it to time out, and leaving the copy's one second running would
+    # have let that take the failure down instead.
+    assert window.toast_timer.isActive() is False, (
+        "a failure left a countdown running, so it would still take itself down")
     assert window.toast_timer.parent() is window, (
         "the timer is not owned by the window, so it can outlive it")
+
+
+def test_a_failure_is_announced_and_not_overwritten_by_a_confirmation(window, qt_app) -> None:
+    """A failure nobody heard, and a confirmation nobody can find, are both lost.
+
+    The toast is a panel of colour and text that goes away, and there is no live
+    region in Qt to announce it. So the accessible name is the only thing that
+    tells a screen reader a failure happened at all, and a confirmation arriving
+    afterwards must not take the failure off the screen.
+    """
+    window.notice("Could not reach the host.", error=True)
+    assert window.toast_row.isHidden() is False, "the failure was never shown"
+    assert window.toast.accessibleName() == "Could not reach the host.", (
+        f"a failure was announced as {window.toast.accessibleName()!r}, so a "
+        f"screen reader is told nothing")
+
+    # A confirmation confirms something that visibly happened already, and the
+    # thing still standing is the one that was not acted on.
+    window.notice("Message Copied", duration=win.COPY_TOAST_MS)
+    assert window.toast.text() == "Could not reach the host.", (
+        f"a confirmation replaced the failure: {window.toast.text()!r}")
+    assert window.toast_row.isHidden() is False, (
+        "a confirmation took the failure off the screen")
+
+    window.dismiss_notice()
+    assert window.toast_row.isHidden() is True, "the failure stayed after dismissal"
+
+    # And with the screen clear, a confirmation behaves as it always did.
+    window.notice("Message Copied", duration=win.COPY_TOAST_MS)
+    assert window.toast.text() == "Message Copied"
+    assert window.toast.accessibleName() == "Message Copied"
 
 
 def test_the_composer_is_set_apart_from_the_messages(window, qt_app) -> None:
@@ -4658,8 +4699,8 @@ def test_a_failed_command_is_reported_in_the_error_colour(window) -> None:
     window.command_failure("no-such-request", "Could not save credentials.")
 
     assert window.toast_error is True
-    assert win.color(window.theme, "error") in window.toast.styleSheet()
-    assert win.color(window.theme, "toast_fg") not in window.toast.styleSheet()
+    assert win.color(window.theme, "error") in window.toast_row.styleSheet()
+    assert win.color(window.theme, "toast_fg") not in window.toast_row.styleSheet()
 
 
 def test_a_notice_is_reported_in_the_success_colour(window) -> None:
@@ -4667,7 +4708,7 @@ def test_a_notice_is_reported_in_the_success_colour(window) -> None:
     window.notice("Replaced 2 saved identities.")
 
     assert window.toast_error is False
-    assert win.color(window.theme, "toast_fg") in window.toast.styleSheet()
+    assert win.color(window.theme, "toast_fg") in window.toast_row.styleSheet()
 
 
 def test_switching_themes_does_not_turn_an_error_toast_green(window) -> None:
@@ -4680,8 +4721,8 @@ def test_switching_themes_does_not_turn_an_error_toast_green(window) -> None:
 
     window.apply_theme(LIGHT)
 
-    assert win.color(LIGHT, "error") in window.toast.styleSheet()
-    assert win.color(LIGHT, "toast_fg") not in window.toast.styleSheet()
+    assert win.color(LIGHT, "error") in window.toast_row.styleSheet()
+    assert win.color(LIGHT, "toast_fg") not in window.toast_row.styleSheet()
 
 
 def test_settings_shows_owed_credentials_until_the_cleanup_completes(window) -> None:

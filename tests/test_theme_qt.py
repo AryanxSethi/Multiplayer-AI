@@ -126,11 +126,11 @@ def test_apply_theme_recolours_hand_styled_widgets(window) -> None:
     it is painted now, so it is covered by its own test instead.
     """
     window.apply_theme(LIGHT)
-    light_toast = window.toast.styleSheet()
+    light_toast = window.toast_row.styleSheet()
 
     window.apply_theme(DARK)
 
-    assert window.toast.styleSheet() != light_toast
+    assert window.toast_row.styleSheet() != light_toast
 
 
 # --- pieces ---------------------------------------------------------------

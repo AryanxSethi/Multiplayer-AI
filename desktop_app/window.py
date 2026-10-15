@@ -429,9 +429,25 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.invite_button)
         top_layout.addWidget(self.add_button)
         body_layout.addWidget(top)
+        # A message and, when it is a failure, a way to get rid of it. The same
+        # shape as ErrorLine -- message, then a ghost dismiss -- so there is one
+        # convention for it rather than two. The row is what is shown and hidden;
+        # the label inside carries the text.
+        self.toast_row = QWidget()
+        toast_layout = QHBoxLayout(self.toast_row)
+        toast_layout.setContentsMargins(0, 0, 0, 0)
+        toast_layout.setSpacing(6)
         self.toast = label("", wrap=True)
+        toast_layout.addWidget(self.toast, 1)
+        self.toast_dismiss = action("×", self.dismiss_notice, name="ghost")
+        self.toast_dismiss.setObjectName("errorDismiss")
+        self.toast_dismiss.setFixedSize(28, 28)
+        self.toast_dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toast_dismiss.setToolTip("Dismiss")
+        self.toast_dismiss.setAccessibleName("Dismiss message")
+        toast_layout.addWidget(self.toast_dismiss, 0, Qt.AlignmentFlag.AlignTop)
         self.style_toast()
-        self.toast.hide()
+        self.toast_row.hide()
         # One timer for the toast, restarted by every notice, rather than a
         # singleShot scheduled per notice. Two notices in quick succession used
         # to leave two timers pending and the older one took the toast down in
@@ -441,8 +457,8 @@ class MainWindow(QMainWindow):
         # toast it hides already exists.
         self.toast_timer = QTimer(self)
         self.toast_timer.setSingleShot(True)
-        self.toast_timer.timeout.connect(self.toast.hide)
-        body_layout.addWidget(self.toast)
+        self.toast_timer.timeout.connect(self.toast_row.hide)
+        body_layout.addWidget(self.toast_row)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setToolTip("Waiting on the network")
@@ -1378,10 +1394,14 @@ class MainWindow(QMainWindow):
         """
         if error is not None:
             self.toast_error = error
-        self.toast.setStyleSheet("background:" + color(self.theme, "toast_bg")
-                                 + "; color:" + color(self.theme, "error" if self.toast_error else "toast_fg")
-                                 + "; border:1px solid " + color(self.theme, "text")
-                                 + "; padding:12px 24px;")
+        # Styled on the row, not the label inside it. The row now carries the
+        # dismiss button beside the message, and painting only the label would
+        # put the button outside the bordered box -- so the toast would look
+        # like a panel with a stray control next to it.
+        self.toast_row.setStyleSheet("background:" + color(self.theme, "toast_bg")
+                                     + "; color:" + color(self.theme, "error" if self.toast_error else "toast_fg")
+                                     + "; border:1px solid " + color(self.theme, "text")
+                                     + "; padding:12px 24px;")
 
     def style_placeholders(self):
         palette = self.palette()
@@ -2704,10 +2724,35 @@ class MainWindow(QMainWindow):
         and a stale timer from a previous notice hides this one early, which is
         at its worst on a short notice followed by a long one.
         """
+        # isHidden and not isVisible: the window is never shown in tests, and
+        # more to the point a reader who has the window minimised has the
+        # same problem -- the row is on screen in the layout either way.
+        if self.toast_error and not error and not self.toast_row.isHidden():
+            # A confirmation must not overwrite a failure that is still on
+            # screen. Nothing is shown for it: what it confirmed has already
+            # visibly happened, and the thing still standing is the one that
+            # was not acted on.
+            return
         self.style_toast(error)
         self.toast.setText(message)
-        self.toast.show()
-        self.toast_timer.start(TOAST_MS if duration is None else duration)
+        # The toast is visual and brief, and there is no live region in Qt to
+        # announce it. The accessible name is how a screen reader is told at
+        # all, so a failure that nobody heard is the same as a failure that
+        # never happened.
+        self.toast.setAccessibleName(message)
+        self.toast_row.show()
+        if error:
+            # Errors stand until dismissed or replaced by a later one. Seven
+            # and a half seconds is long enough to miss: look away, come back,
+            # and the reason the button did nothing is gone.
+            self.toast_timer.stop()
+        else:
+            self.toast_timer.start(TOAST_MS if duration is None else duration)
+
+    def dismiss_notice(self):
+        """Take the message away. There is a control for it, not just a timer."""
+        self.toast_timer.stop()
+        self.toast_row.hide()
 
     def command(self, method, *args, success=None, failure=None):
         if not self.ready and method != "close":
@@ -4108,7 +4153,7 @@ class MainWindow(QMainWindow):
             self.closing = True
             self.setEnabled(False)
             self.toast.setText("Disconnecting agents and shutting down your local relay…")
-            self.toast.show()
+            self.toast_row.show()
             self.network.shutdown()
 
     @Slot()
