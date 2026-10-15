@@ -151,10 +151,6 @@ REMOVED = "removed"
 ABSENT = "absent"
 UNAVAILABLE = "unavailable"
 
-# The two outcomes that mean the entry is gone, and the caller has what it
-# wanted. Only UNAVAILABLE is worth retrying or reporting.
-GONE = (REMOVED, ABSENT)
-
 # The only credential names this app mints: the bare legacy invitation
 # token, provider/search/relay entries per agent id, and save backups per revision.
 # Agent ids, profile ids and member names are validated as [A-Za-z0-9_-]{1,64} when they
