@@ -767,9 +767,6 @@ class WorkspaceRuntime:
         except httpx.HTTPError:
             raise RuntimeError("Could not reach the relay. Your request was not replayed.") from None
 
-    async def ollama_models(self, base_url="http://127.0.0.1:11434"):
-        return await self.provider_models("ollama", base_url)
-
     async def cookbook_refresh(self, repo, artifact_repo=None, base=None):
         """Read one model's details from the model catalogue, on request.
 

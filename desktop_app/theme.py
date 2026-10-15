@@ -321,16 +321,12 @@ THEME_NAMES = (DARK, LIGHT, MIKU)
 # screenshot and obvious in use, so the pairings that carry text are
 # declared here as data and checked by the test suite.
 #
-# Three classes, because WCAG treats them differently:
+# Two thresholds, because WCAG treats them differently:
 #   BODY  4.5:1, text a person reads as prose.
 #   LARGE 3.0:1, headings, glyphs and other large or non-text marks.
-#   INACTIVE exempt; WCAG excludes controls that are disabled. Declared
-#          rather than omitted so the exemption is a deliberate choice
-#          instead of an oversight.
 
 BODY_TEXT = 4.5
 LARGE_MARK = 3.0
-INACTIVE = 0.0
 
 
 def _hex_to_rgb(value: str):

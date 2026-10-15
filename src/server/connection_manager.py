@@ -102,10 +102,6 @@ class ConnectionManager:
         """Whether a client id currently has a live socket."""
         return client_id in self._clients
 
-    def connected_client_ids(self) -> list[str]:
-        """Ids of every currently connected client."""
-        return list(self._clients.keys())
-
     def count(self) -> int:
         """Number of connected clients."""
         return len(self._clients)
