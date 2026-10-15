@@ -2107,8 +2107,11 @@ def test_only_the_labels_that_changed_are_touched(window) -> None:
     settle()
 
     def snapshot(wanted):
-        return [(l, l.objectName(), l.text())
-                for l in wanted.findChildren(QLabel)]
+        # The label itself as well as what it says: the object is what the
+        # comparison below keys on, so a label that was replaced by a new one
+        # saying the same thing has to read as a difference.
+        return [(item, item.objectName(), item.text())
+                for item in wanted.findChildren(QLabel)]
 
     # Two builds of different sizes, so the figures really do move.
     targets = [r.property("buildVariant") for r in build_rows_of(card)]
@@ -2240,7 +2243,6 @@ class _ShowSpy:
         self.hits = []
 
     def __enter__(self):
-        from PySide6.QtWidgets import QWidget
 
         self._original = QWidget.setVisible
 
@@ -2256,7 +2258,6 @@ class _ShowSpy:
         return self
 
     def __exit__(self, *exc):
-        from PySide6.QtWidgets import QWidget
 
         QWidget.setVisible = self._original
         return False
@@ -2786,7 +2787,7 @@ def test_a_model_card_groups_its_lines_instead_of_stacking_them_at_one_gap(windo
 
     card = cards_on_page(panel)[0]
     column = card.layout()
-    inside = column.spacing()
+    column.spacing()
 
     groups, current = [], None
     for index in range(column.count()):
@@ -2936,7 +2937,7 @@ def test_a_refresh_of_something_not_in_the_catalogue_carries_nothing_over(window
     """
     from desktop_app.cookbook_panel import carry_over
 
-    panel = panel_of(window)
+    panel_of(window)
     settle()
     hub = {"repo": "someone/Unknown", "name": "Unknown", "parameters": 1}
     merged = carry_over(None, hub)
@@ -3142,7 +3143,7 @@ def test_the_invite_button_goes_to_the_page_and_not_a_window(window, monkeypatch
     window.show()
     settle()
     window.invite_button.setEnabled(True)
-    before = window.stack.currentIndex()
+    window.stack.currentIndex()
 
     window.invite_button.click()
 

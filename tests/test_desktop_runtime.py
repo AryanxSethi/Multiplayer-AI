@@ -108,7 +108,7 @@ class DesktopRuntimeTests(unittest.IsolatedAsyncioTestCase):
         old_http = self.runtime.http
         async def transport(request):
             if request.url.host == "model.example":
-                body = json.loads(request.content)
+                json.loads(request.content)
                 return httpx.Response(200, json={"choices": [{"message": {"content": "Native model reply"}, "finish_reason": "stop"}]})
             return await old_http.send(request)
         self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
@@ -652,7 +652,6 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
         Dropping the engine before the catalog was written would strand its
         relay and its port for the rest of the process, with no error.
         """
-        engine = self.runtime.engine
         workspace_id = self.runtime.active_workspace_id
 
         def refuse():

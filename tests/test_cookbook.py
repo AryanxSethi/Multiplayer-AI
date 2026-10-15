@@ -822,9 +822,6 @@ def test_a_verdict_never_calls_system_memory_the_graphics_card(monkeypatch):
                  tasks=("general",))
     tiny_variant = Variant(name="m-Q4_K_M.gguf", quantization="Q4_K_M",
                            size=700_000_000)
-    generous = Model(repo="a/b", name="Huge Card", parameters=1_000_000_000,
-                     context=4096, layers=32, kv_heads=8, head_dim=128,
-                     tasks=("general",))
     seen = set()
     for candidate, artifact in ((model, variant), (small, small_variant),
                                 (tiny, tiny_variant), (tiny, Variant(
@@ -998,7 +995,6 @@ def test_the_catalogue_file_is_bundled_where_the_build_already_looks():
     If this ever moves out of assets/ the packaged app would find no catalogue
     at all and show an empty page with no explanation.
     """
-    from pathlib import Path
     import desktop_app.cookbook as cookbook
     assert "assets" in cookbook.CATALOG_PATH.parts, (
         f"the catalogue is at {cookbook.CATALOG_PATH}, outside the bundled assets tree")

@@ -197,7 +197,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             await a.request("b", {})
         async def slow(payload, source):
             await asyncio.sleep(30)
-        b = await self.start("b", slow)
+        await self.start("b", slow)
         with self.assertRaisesRegex(RuntimeError, "timed out"):
             await a.request("b", {})
         request = asyncio.create_task(a.request("b", {}))

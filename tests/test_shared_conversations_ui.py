@@ -14,7 +14,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 from starlette.responses import JSONResponse
-from starlette.routing import Route
 
 from desktop_app.dialogs import InviteDialog
 from tests.model_card import connect_model, join_workspace

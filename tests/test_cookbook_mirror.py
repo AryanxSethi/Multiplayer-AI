@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from desktop_app.cookbook_hub import (DEFAULT_BASE, HubError, check_base,
-                                      check_repo, fetch_entry, fetch_model,
+                                      fetch_entry, fetch_model,
                                       fetch_variants)
 
 

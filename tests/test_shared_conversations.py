@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import httpx
 from unittest.mock import MagicMock, patch
 
 from desktop_app.runtime import DesktopRuntime
