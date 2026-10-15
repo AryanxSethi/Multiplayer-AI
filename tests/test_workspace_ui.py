@@ -21,10 +21,10 @@ from starlette.routing import Route
 
 from network_a2a.persistence import HistoryStore
 
-from desktop_app.dialogs import AgentDialog, InviteDialog, JoinDialog
+from desktop_app.dialogs import InviteDialog
 from desktop_app.agent_list_dialog import AgentListDialog
 from desktop_app.storage import Storage
-from desktop_app.window import MainWindow, WORKSPACES_PAGE
+from desktop_app.window import AGENTS_PAGE, MainWindow, WORKSPACES_PAGE
 from desktop_app.workspace_dialog import WorkspaceDialog
 from tests.test_desktop_runtime import MemoryVault
 from tests.test_attachments import make_files
@@ -67,18 +67,97 @@ class WorkspaceUITests(unittest.TestCase):
         self.stop(self.host)
         self.directory.cleanup()
 
+    def model_card(self, window=None):
+        window = window or self.host
+        window.navigate(AGENTS_PAGE)
+        return window
+
+    def _agent_ready(self, window, agent_id):
+        entry = window.network.runtime.engine.runners.get(agent_id)
+        return bool(entry and entry[0] is not None and entry[0].ready.is_set())
+
+    def wait_for_agent(self, window=None, agent_id="saved-model"):
+        window = window or self.host
+        self.wait(lambda: any(a["id"] == agent_id and a["online"] for a in window.agents),
+                  30 if window.remote else 15)
+        if not window.remote:
+            self.wait(lambda: self._agent_ready(window, agent_id))
+        return window
+
+    def model_error_text(self, window=None):
+        """The card's validation line, which replaces the dialog error box."""
+        window = window or self.host
+        line = window.model_error_line
+        return line.message.text() if line.isVisible() else ""
+
+    def save_model_card(self, window=None, expect_error=False):
+        """Press Save and wait for the card to finish with the save.
+
+        AgentDialog closed on success and stayed open on failure, so its closing
+        was an honest signal. The card never closes and its save button is
+        enabled before and after, because save_model re-enables it on failure too
+        and never relabels it. So the only honest signal is the window's in-flight
+        flag, and it is an honest one: save_agent is fully awaited, so the vault
+        write happens inside it and the flag clears only once everything has been
+        persisted. Waiting for the saved profile instead would be wrong, because
+        saving an unchanged profile leaves it identical and the restart test does
+        exactly that.
+        """
+        window = window or self.host
+        window.model_save_button.click()
+        if expect_error:
+            self.wait(lambda: bool(self.model_error_text(window)))
+            return window
+        self.wait(lambda: window.busy)
+        self.wait(lambda: not window.busy)
+        return window
+
+    def edit_model(self, profile, window=None):
+        """Load a profile into the model card the way the app itself does.
+
+        edit_agent takes an entry from the agent list, not a bare profile: it
+        reads agent["profile"], and a bare profile has no such key, so it is given
+        {} and loads an empty form instead -- no model id, search off, no keys.
+        The save then fails validation on the empty model id and never persists,
+        so the test goes on to read back the previous, stale profile. That is
+        where a web_search of "off" and an empty vault both came from.
+        """
+        window = self.model_card(window)
+        window.edit_agent({"id": profile["id"], "provider": profile["provider"],
+                           "profile": profile})
+        self.wait(lambda: window.model_id.currentText() == profile["model"])
+        return window
+
+    def join_workspace(self, window, invitation):
+        """Join through the workspace card's invitation box.
+
+        JoinDialog reported a bad invitation by staying open. The card writes the
+        refusal on its join line, so wait for the room to be selected rather than
+        for a dialog to close.
+        """
+        window.navigate(WORKSPACES_PAGE)
+        window.workspace_invitation.setPlainText(invitation)
+        window.workspace_join_button.click()
+        return window
+
     def configure_model(self, handler, vision=False):
-        self.host.network.runtime.app.router.routes.append(Route("/mock/v1/chat/completions", handler, methods=["POST"]))
-        dialog = AgentDialog(self.host, "bionic")
-        dialog.show()
-        dialog.name.setText("saved-model")
-        dialog.base.setText(f"http://127.0.0.1:{self.host.port}/mock/v1")
-        dialog.model.setCurrentText("test-model")
-        dialog.key.setText("test-key")
-        dialog.vision.setChecked(vision)
-        QTest.mouseClick(dialog.save_button, Qt.MouseButton.LeftButton)
-        self.wait(lambda: not dialog.isVisible())
-        self.host.select_agent("saved-model")
+        self.host.network.runtime.app.router.routes.append(
+            Route("/mock/v1/chat/completions", handler, methods=["POST"]))
+        async def installed(request):
+            return JSONResponse({"models": [{"name": "test-model:latest"}]})
+        self.host.network.runtime.app.router.routes.append(
+            Route("/mock/v1/api/tags", installed, methods=["GET"]))
+        window = self.model_card()
+        window.model_provider.setCurrentIndex(window.model_provider.findData("bionic"))
+        window.change_model_provider()
+        window.model_name.setText("saved-model")
+        window.model_base.setText(f"http://127.0.0.1:{self.host.port}/mock/v1")
+        window.model_id.setCurrentText("test-model")
+        window.model_key.setText("test-key")
+        window.model_vision.setChecked(vision)
+        self.save_model_card(window)
+        self.wait_for_agent(window)
+        window.select_agent("saved-model")
 
     @staticmethod
     async def echo_model(request):
@@ -279,11 +358,9 @@ class WorkspaceUITests(unittest.TestCase):
         invite.close()
         guest_vault = MemoryVault()
         self.guest = self.open_window("guest", guest_vault)
-        join = JoinDialog(self.guest)
-        join.show()
-        join.invitation.setPlainText(invitation)
-        QTest.mouseClick(join.connect_button, Qt.MouseButton.LeftButton)
-        self.wait(lambda: not join.isVisible() and self.guest.selected == room_id)
+        self.join_workspace(self.guest, invitation)
+        self.wait(lambda: self.guest.selected == room_id)
+        self.wait_for_agent(self.guest)
         guest_settings = WorkspaceDialog(self.guest)
         self.assertTrue(guest_settings.name.isReadOnly())
         self.assertFalse(guest_settings.rename_button.isEnabled())
@@ -297,11 +374,24 @@ class WorkspaceUITests(unittest.TestCase):
         self.assertFalse(self.guest.send_button.isEnabled())
         self.host = self.open_window("host", self.vault)
         self.host.network.runtime.app.router.routes.append(Route("/mock/v1/chat/completions", self.echo_model, methods=["POST"]))
-        join = JoinDialog(self.guest)
-        join.show()
-        join.invitation.setPlainText(invitation)
-        QTest.mouseClick(join.connect_button, Qt.MouseButton.LeftButton)
-        self.wait(lambda: not join.isVisible())
+        self.join_workspace(self.guest, invitation)
+        # engine.remote, not active_url and not selected. active_url is the local
+        # relay's from the moment the window opens, and None before that, and
+        # None != "" -- so that wait was true before the join was even attempted.
+        # selected is no better: this guest restored it from disk, so the
+        # assertion above already holds.
+        #
+        # remote is the one thing a join has to earn. __init__ and _use_local
+        # leave it False, join sets it once the invitation has been inspected,
+        # and a failure rolls it back to whatever it was. So a rejoin that did
+        # not work fails here, instead of surfacing later as an unexplained
+        # timeout waiting for an agent the host was never asked about.
+        # Thirty seconds, as elsewhere for a remote window. This join is a
+        # relay round trip and measures around fifteen, which is the default
+        # wait -- so the earlier condition, being true before the join was
+        # even attempted, was the only reason this never timed out.
+        self.wait(lambda: self.guest.network.runtime.engine.remote, 30)
+        self.wait_for_agent(self.guest)
         self.send(self.guest, "Continue after reopening")
         self.wait(lambda: self.reply_received(self.guest, room_id, "Continue after reopening"))
         self.wait(lambda: self.reply_received(self.host, room_id, "Continue after reopening"))
@@ -390,32 +480,27 @@ class WorkspaceUITests(unittest.TestCase):
         self.host.network.runtime.app.router.routes.append(Route("/search", search))
         profile = dict(next(agent["profile"] for agent in self.host.agents if agent["id"] == "saved-model"))
         profile.pop("search_provider", None)  # Profiles saved before the provider choice use SearXNG.
-        dialog = AgentDialog(self.host, "bionic", profile)
-        dialog.show()
-        self.assertTrue(dialog.name.isReadOnly())
-        dialog.internet.setChecked(True)
-        self.assertEqual(dialog.search_provider.currentData(), "searxng")
-        QTest.mouseClick(dialog.save_button, Qt.MouseButton.LeftButton)
-        self.wait(lambda: dialog.save_button.isEnabled())
-        self.assertTrue(dialog.isVisible())
-        self.assertIn("SearXNG", dialog.error.text())
-        self.assertIn("server address", dialog.error.text())
+        card = self.edit_model(profile)
+        card.model_internet.setChecked(True)
+        self.assertEqual(card.model_search_provider.currentData(), "searxng")
+        self.save_model_card(card, expect_error=True)
+        self.assertIn("SearXNG", self.model_error_text(card))
+        self.assertIn("server address", self.model_error_text(card))
         self.app.processEvents()
-        self.assertTrue(dialog.search_url.hasFocus())
-        dialog.search_url.setText(f"http://127.0.0.1:{self.host.port}")
-        dialog.search_test.click()
-        self.wait(lambda: "reachable" in dialog.search_status.text())
-        dialog.vision.setChecked(True)
-        dialog.save_button.click()
-        self.wait(lambda: not dialog.isVisible())
+        self.assertTrue(card.model_search_url.hasFocus())
+        search_url = f"http://127.0.0.1:{self.host.port}"
+        card.model_search_url.setText(search_url)
+        card.model_search_test.click()
+        self.wait(lambda: "reachable" in card.model_search_status.text())
+        card.model_vision.setChecked(True)
+        self.save_model_card(card)
         saved = self.host.network.runtime.storage.settings["agents"][0]
         self.assertEqual(saved["web_search"], "auto")
         self.assertTrue(saved["vision"])
-        restored = AgentDialog(self.host, "bionic", saved)
-        self.assertTrue(restored.internet.isChecked())
-        self.assertEqual(restored.search_mode.currentData(), "auto")
-        self.assertEqual(restored.search_url.text(), dialog.search_url.text())
-        restored.close()
+        self.edit_model(saved, card)
+        self.assertTrue(card.model_internet.isChecked())
+        self.assertEqual(card.model_search_mode.currentData(), "auto")
+        self.assertEqual(card.model_search_url.text(), search_url)
         self.send(self.host, "Tell me the latest facts")
         self.wait(lambda: not self.host.chats["saved-model"]["pending"])
         self.assertEqual(len(calls), 2)
@@ -438,18 +523,16 @@ class WorkspaceUITests(unittest.TestCase):
             return [{"title": "Fresh facts", "url": "https://source.example/new", "snippet": "Current evidence"}]
         self.configure_model(model)
         saved = self.host.network.runtime.storage.settings["agents"][0]
-        dialog = AgentDialog(self.host, "bionic", saved)
-        dialog.show()
-        dialog.internet.setChecked(True)
-        dialog.search_provider.setCurrentIndex(dialog.search_provider.findData("ollama"))
-        self.assertFalse(dialog.search_url.isVisible())
-        self.assertTrue(dialog.search_key.isVisible())
-        dialog.search_key.setText("private-search-key")
+        card = self.edit_model(saved)
+        card.model_internet.setChecked(True)
+        card.model_search_provider.setCurrentIndex(card.model_search_provider.findData("ollama"))
+        self.assertFalse(card.model_search_url.isVisible())
+        self.assertTrue(card.model_search_key.isVisible())
+        card.model_search_key.setText("private-search-key")
         with patch("network_a2a.web_search.OllamaSearch.search", search):
-            dialog.search_test.click()
-            self.wait(lambda: "reachable" in dialog.search_status.text())
-            dialog.save_button.click()
-            self.wait(lambda: not dialog.isVisible())
+            card.model_search_test.click()
+            self.wait(lambda: "reachable" in card.model_search_status.text())
+            self.save_model_card(card)
             self.assertEqual(self.host.network.runtime.storage.vault.get("search:saved-model"), "private-search-key")
             self.assertEqual(self.host.network.runtime.storage.vault.get("provider:saved-model"), "test-key")
             self.assertNotIn("private-search-key", self.host.network.runtime.storage.path.read_text())
@@ -458,14 +541,12 @@ class WorkspaceUITests(unittest.TestCase):
             self.stop(self.host)
             self.host = self.open_window("host", self.vault)
             self.host.network.runtime.app.router.routes.append(Route("/mock/v1/chat/completions", model, methods=["POST"]))
-            restored = AgentDialog(self.host, "bionic", saved)
-            restored.show()
-            self.assertEqual(restored.search_provider.currentData(), "ollama")
-            self.assertEqual(restored.search_key.text(), "")
-            restored.search_test.click()
-            self.wait(lambda: "reachable" in restored.search_status.text())
-            restored.save_button.click()
-            self.wait(lambda: not restored.isVisible())
+            card = self.edit_model(saved)
+            self.assertEqual(card.model_search_provider.currentData(), "ollama")
+            self.assertEqual(card.model_search_key.text(), "")
+            card.model_search_test.click()
+            self.wait(lambda: "reachable" in card.model_search_status.text())
+            self.save_model_card(card)
             self.host.select_agent("saved-model")
             self.send(self.host, "Tell me the latest facts")
             self.wait(lambda: not self.host.chats["saved-model"]["pending"])
@@ -477,17 +558,37 @@ class WorkspaceUITests(unittest.TestCase):
 
     def test_new_search_setup_defaults_to_hosted_and_explains_missing_key(self):
         """Verify new connections default to hosted search and focus a missing key error."""
-        dialog = AgentDialog(self.host)
-        dialog.show()
-        self.assertFalse(dialog.search_settings.isVisible())
-        dialog.internet.setChecked(True)
-        self.assertEqual(dialog.search_provider.currentData(), "ollama")
-        dialog.save_button.click()
-        self.assertTrue(dialog.isVisible())
-        self.assertIn("Search API key", dialog.error.text())
-        self.app.processEvents()
-        self.assertTrue(dialog.search_key.hasFocus())
-        dialog.close()
+        card = self.model_card()
+        # Checked before anything is touched. A blank card is set up for hosted
+        # search, so a reader is not expected to know that SearXNG needs a server
+        # of their own before they can search at all.
+        self.assertEqual(card.model_search_provider.currentData(), "ollama",
+                         "a new agent does not start out set up for hosted search")
+        card.model_name.setText("searching-model")
+        card.model_provider.setCurrentIndex(card.model_provider.findData("ollama"))
+        card.change_model_provider()
+        card.model_base.setText("http://127.0.0.1:11434")
+        card.model_id.setCurrentText("llama3")
+        card.model_internet.setChecked(True)
+        self.save_model_card(card, expect_error=True)
+
+        # The error has to be about the key. Waiting for "some error text" is
+        # not a test of that, and this card does ask Ollama for its installed
+        # models before saving -- so on a machine without Ollama a model error
+        # would satisfy the same wait and this would pass with the key check
+        # broken. It cannot actually reach that: save_model validates the search
+        # settings and returns before save_agent is ever called, and the
+        # blank-key allowance only applies when editing a saved profile, which
+        # this is not. So no Ollama stand-in is needed, and adding one would be
+        # answering a problem this code path does not have.
+        self.assertIn("key", self.model_error_text(card).lower(),
+                      f"the error does not name what is missing: {self.model_error_text(card)!r}")
+        self.assertTrue(card.model_search_key.hasFocus(),
+                        "the field that needs filling in is not the one focused")
+        saved = [agent["id"] for agent in
+                 self.host.network.runtime.storage.settings.get("agents", [])]
+        self.assertNotIn("searching-model", saved,
+                         "a refused save left the agent in the settings")
 
     def test_periodic_agent_refresh_keeps_overview_at_the_user_scroll_position(self):
         """Verify polling preserves cards and scroll position while actual state changes render."""
@@ -569,11 +670,9 @@ class WorkspaceUITests(unittest.TestCase):
         self.wait(lambda: bool(invite.result.toPlainText()))
         room_id = invite.conversation_id
         self.guest = self.open_window("guest", MemoryVault())
-        join = JoinDialog(self.guest)
-        join.show()
-        join.invitation.setPlainText(invite.result.toPlainText())
-        join.connect_button.click()
-        self.wait(lambda: not join.isVisible() and self.guest.selected == room_id)
+        self.join_workspace(self.guest, invite.result.toPlainText())
+        self.wait(lambda: self.guest.selected == room_id)
+        self.wait_for_agent(self.guest)
         self.assertEqual(self.guest.stat_values[0].text(), "1")
         self.assertEqual(self.guest.chat_agent_count.text(), "1 agent")
         files = make_files(Path(self.directory.name))

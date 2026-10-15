@@ -141,6 +141,26 @@ def test_every_theme_declares_the_interaction_states() -> None:
         "QPushButton#nav:checked",
         "QPushButton#ghost:hover",
         "QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus",
+        # Buttons and checkboxes. An application stylesheet replaces Qt's own
+        # painting, so a widget the sheet says nothing about :focus for draws
+        # no focus at all -- and the sheet covered inputs only. Tabbing the nav
+        # rail or the top bar gave no indication of where the reader was.
+        "QPushButton:focus",
+        "QPushButton#nav:focus",
+        "QPushButton#ghost:focus",
+        "QPushButton#workspace:focus",
+        "QListWidget:focus",
+        # The danger button, which carries the most consequential actions in
+        # the app -- leave, delete, reset identity, remove member -- and had a
+        # resting rule and nothing else.
+        "QPushButton#danger:hover",
+        "QPushButton#danger:pressed",
+        "QPushButton#danger:disabled",
+        # The one way to clear a card error is this button, and it is named, so
+        # its own border: none outranked the plain :focus rule and it was left
+        # with no visible focus like every other button was before the rules
+        # above.
+        "QPushButton#errorDismiss:focus",
         "QListWidget::item:selected",
         "QListWidget::item:hover",
         "QMenu::item:selected",
@@ -337,3 +357,59 @@ def test_unknown_provider_falls_back_without_raising() -> None:
     assert entry[0] == "Connectivity agent"
     assert entry[2] == "⌘"  # preserved from the pre-theme agent list
     assert entry[3] == theme.color(theme.LIGHT, "provider_fallback")
+
+
+def test_every_theme_is_offered_under_a_name_a_reader_can_use():
+    """One of the choices was labelled "39".
+
+    That is the song the palette was drawn from. It is not what anybody
+    looking at a dropdown is meant to recognise it by, and the hint under the
+    picker now has to say the name back.
+    """
+    for name, _ in theme.THEME_CHOICES:
+        assert not name.isdigit(), (
+            f"{name!r} is where the palette comes from, not a name for it")
+        assert len(name) > 1, f"{name!r} is not something a reader can choose"
+
+
+def test_every_button_reachable_by_keyboard_advertises_that_it_is_focused() -> None:
+    """A focus rule the sheet does not declare is not drawn by Qt.
+
+    An application stylesheet replaces the widget's own painting, so a control
+    the sheet has no :focus rule for is painted exactly as it is at rest. The
+    sheet covered text inputs and the stat readouts and nothing else, which
+    left every button in the app with no visible focus -- and the nav rail,
+    the top bar and the composers are all used without a mouse.
+    """
+    for name in theme.THEME_NAMES:
+        sheet = theme.THEMES[name]
+        assert "QPushButton:focus" in sheet, f"{name}: no focus rule for a button"
+        assert "QPushButton#nav:focus" in sheet, f"{name}: the nav rail has no focus rule"
+        assert "QPushButton#ghost:focus" in sheet, f"{name}: ghost buttons have no focus rule"
+        # No checkbox focus ring, on purpose. See the note in theme.py:
+        # outlining each indicator put a ring beside every option, and a card
+        # carrying four settings read as four boxes to step through. Asserted
+        # so the ring cannot quietly come back.
+        assert "QCheckBox:focus" not in sheet, (
+            f"{name} puts a focus ring on every checkbox option, which on a card "
+            f"with several settings reads as a box per setting")
+        assert "QListWidget:focus" in sheet, f"{name}: the activity list has no focus rule"
+
+
+def test_the_danger_button_is_not_the_one_with_no_states() -> None:
+    """Its resting rule was the whole of it.
+
+    Leave workspace, Delete workspace, Reset local identity and every Remove
+    member button use this style, so the buttons a reader is most likely to
+    regret pressing gave no feedback at all under the cursor.
+    """
+    for name in theme.THEME_NAMES:
+        sheet = theme.THEMES[name]
+        resting = sheet.split("QPushButton#danger {")[1].split("}")[0].strip()
+        for state in (":hover", ":pressed", ":disabled"):
+            rule = "QPushButton#danger" + state + " {"
+            assert rule in sheet, f"{name}: the danger button has no {state} rule"
+            body = sheet.split(rule)[1].split("}")[0].strip()
+            assert body != resting, (
+                f"{name}: QPushButton#danger{state} paints exactly what it paints "
+                f"at rest, so the state is invisible")

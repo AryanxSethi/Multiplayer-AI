@@ -3922,11 +3922,15 @@ def test_the_dialog_dropdowns_ignore_the_wheel(window, qt_app) -> None:
     Scroll inside a dialog and the provider silently changes, which is
     worse than no scroll at all because the choice is what gets sent.
     """
-    from desktop_app.dialogs import AgentDialog, InviteDialog
+    from desktop_app.dialogs import InviteDialog
 
-    dialogs = [AgentDialog(window, "ollama", {}), InviteDialog(window)]
+    # The connect-a-model dialog is gone. These are the dropdowns it used to
+    # own, now on the card that replaced it, plus the ones still in a dialog.
+    invite = InviteDialog(window)
+    combos = [window.model_provider, window.model_id,
+              window.model_search_provider, window.model_search_mode]
+    combos += invite.findChildren(win.Select)
     try:
-        combos = [c for d in dialogs for c in d.findChildren(win.Select)]
         assert len(combos) >= 4, f"only {len(combos)} dropdowns were found"
         for combo in combos:
             assert isinstance(combo, win.Select), (
@@ -3946,8 +3950,7 @@ def test_the_dialog_dropdowns_ignore_the_wheel(window, qt_app) -> None:
                     f"a {type(combo.parent()).__name__} dropdown moved "
                     f"on a {delta:+d} notch")
     finally:
-        for dialog in dialogs:
-            dialog.deleteLater()
+        invite.deleteLater()
 
 
 def test_a_checkbox_paints_nothing_behind_itself(window, qt_app) -> None:
@@ -4907,3 +4910,413 @@ def test_a_failure_in_an_unknown_workspace_is_dropped_rather_than_guessed(window
         "the failure landed in the workspace on screen")
     assert "send_error" not in store.load("ui")["state"]["chats"]["gone-model"], (
         "the failure was written into a workspace the user has left")
+
+
+def test_the_page_title_is_a_title_and_not_a_markdown_heading(window) -> None:
+    """The "#  " was painted, never parsed.
+
+    label() pins Qt.TextFormat.PlainText, so a heading marker in the source
+    became a character in the largest text in the window -- on every page, of
+    every session -- and a screen reader announced "hash, overview".
+    """
+    for title in win.PAGE_TITLES:
+        assert not title.startswith("#"), f"{title!r} is drawn with its marker showing"
+    window.navigate(win.OVERVIEW_PAGE)
+    assert not window.page_title.text().startswith("#"), window.page_title.text()
+
+
+def test_a_startup_that_failed_is_not_painted_as_a_healthy_one(window) -> None:
+    """One label, one colour, three different facts.
+
+    The connection line was created as "online" and only ever had its text
+    replaced, so "Relay unavailable" and "Startup needs attention" were both
+    drawn in the success green. It is the one status always on screen, and the
+    leading glyph does not change, so colour was carrying the whole meaning.
+    """
+    window.network_event("offline", None)
+    assert window.connection_status.objectName() == "statusBad", (
+        f"the relay is down and the line reads {window.connection_status.text()!r} "
+        f"in the state {window.connection_status.objectName()!r}")
+
+    window.network_event("agents", {"agents": [], "connected": True})
+    assert window.connection_status.objectName() == "statusOk", window.connection_status.text()
+
+    window.network_event("agents", {"agents": [], "connected": False})
+    assert window.connection_status.objectName() == "statusWarn", window.connection_status.text()
+
+
+def test_a_failed_startup_is_stated_and_not_only_toasted(window) -> None:
+    """The toast is gone in seven seconds; a fatal cannot be undone.
+
+    Everything the fatal disables stays disabled, so after the toast expired the
+    window was full of controls that would not work and nothing saying why.
+    """
+    assert window.startup_error.isHidden(), "the fatal surface should start hidden"
+    window.network_event("fatal", "The credential store is locked.")
+    assert not window.startup_error.isHidden(), (
+        "a fatal startup error has no lasting surface, so the reason is lost "
+        "as soon as the toast expires")
+    assert "credential store" in window.startup_error.text()
+
+
+def test_a_search_that_matched_nothing_does_not_claim_the_team_is_empty(window) -> None:
+    """"Your team is getting ready" is a claim about the reader's own setup.
+
+    With the search box open it was being made while a model was connected and
+    simply had not matched what was typed, which is the one thing the Cookbook's
+    empty_reason() discipline exists to prevent: one state standing in for
+    another.
+    """
+    window.agents = [{"id": "local-llama", "kind": "model", "online": True,
+                      "model": "llama3.2", "provider": "ollama"}]
+    window.search.setText("nothing-matches-this")
+    window.render_agents()
+
+    grid = window.agent_cards
+    cards = [grid.itemAt(index).widget() for index in range(grid.count())
+             if grid.itemAt(index).widget() is not None]
+    said = [label.text() for card in cards
+            for label in card.findChildren(QLabel) if label.text()]
+    buttons = [button.text() for card in cards
+               for button in card.findChildren(QPushButton)]
+
+    assert said, "the page said nothing at all"
+    assert not any("getting ready" in text for text in said), (
+        f"a connected team was reported as empty: {said}")
+    assert any("nothing-matches-this" in text for text in said), (
+        f"the empty state does not echo what was searched for: {said}")
+    assert "Clear search" in buttons, (
+        f"nothing offers to undo the search that hid the reader's team: {buttons}")
+
+
+def test_a_control_a_screen_reader_cannot_name_is_named(window) -> None:
+    """Four controls in the shell were announced as a glyph or as nothing.
+
+    The join button has no text at all and carries an icon, so it was skipped
+    over entirely; the others were announced as "M, button", "question mark,
+    button" and "multiplication sign, button". The Cookbook button already had
+    an accessible name, so the convention existed -- these had simply not had
+    it applied.
+    """
+    cases = [
+        (window.join_button, "Create or join a workspace"),
+        (window.help_button, "Project documentation"),
+        (window.sidebar_close, "Close the sidebar"),
+    ]
+    for widget, expected in cases:
+        assert widget.accessibleName() == expected, (
+            f"a control announced as {widget.accessibleName()!r} instead of "
+            f"{expected!r}")
+
+    agents = [{"id": "local-llama", "kind": "model", "online": True,
+               "model": "llama3.2", "provider": "ollama", "profile": {"id": "local-llama"},
+               "local": True}]
+    window.agents = agents
+    window.render_agents()
+
+    grid = window.agent_cards
+    cards = [grid.itemAt(index).widget() for index in range(grid.count())
+             if grid.itemAt(index).widget() is not None]
+    names = [button.accessibleName() for card in cards
+             for button in card.findChildren(QPushButton)]
+    for expected in ("Open a conversation with local-llama",
+                     "Edit the settings for local-llama",
+                     "Stop local-llama on this device"):
+        assert expected in names, (
+            f"no button on the agent card is called {expected!r}; it carries {names}")
+
+
+def test_the_smallest_controls_are_still_wide_enough_to_hit(window) -> None:
+    """The one way to clear a card error was a 20x20 target.
+
+    ErrorLine's dismiss button sits in a row spaced 6px, is the only way to
+    dismiss the message, and was small enough to miss with a pointer and hard
+    to reach with one. The sidebar's close button was 26px on the same window.
+    """
+    # Built by the window rather than by hand. ErrorLine takes a callable
+    # on_dismiss, so passing (window, "model:connect") bound the window as the
+    # callback and the key as the tone. The size assertions still passed, and
+    # clicking dismiss would have called the window object.
+    line = window.message_line("model:connect")
+    assert line.dismiss.width() >= 28 and line.dismiss.height() >= 28, (
+        f"the dismiss target is {line.dismiss.width()}x{line.dismiss.height()}")
+    assert window.sidebar_close.width() >= 28 and window.sidebar_close.height() >= 28, (
+        f"the sidebar close target is {window.sidebar_close.width()}x"
+        f"{window.sidebar_close.height()}")
+
+
+def test_an_unrelated_membership_change_keeps_the_focused_invitation_button(window) -> None:
+    """A member going online must not rebuild the invitation rows.
+
+    refresh() runs whenever the membership changes, and it calls
+    refresh_invitations on the way through. Rebuilding deleted the rows, so a
+    reader part-way through tabbing to "Show invitation" had the button vanish
+    under them -- the same thing the signature guard on refresh() exists to
+    stop, one call down.
+    """
+    from desktop_app.workspace_dialog import WorkspaceDialog
+
+    window.outstanding_invitations = ["laptop-one"]
+    dialog = WorkspaceDialog(window)
+    dialog.refresh_invitations()
+    button = dialog.invitation_rows.itemAt(0).widget().findChildren(QPushButton)[0]
+    assert button is not None, "no button was built for the invitation"
+    button.setFocus()
+
+    before = dialog.invitation_rows.itemAt(0).widget()
+    window.workspace_meta = dict(window.workspace_meta or {}, members=[
+        {"id": "laptop-one", "role": "Device", "online": True}])
+    dialog.refresh()
+    dialog.refresh_invitations()
+
+    assert dialog.invitation_rows.count() == 1, dialog.invitation_rows.count()
+    after = dialog.invitation_rows.itemAt(0).widget()
+    assert after is before, (
+        "the invitation row was rebuilt for an unrelated membership change, so "
+        "the button under the reader's focus was deleted")
+    # The button object itself, not whether Qt happens to have given it focus:
+    # the dialog is not shown here, and an inactive window grants focus to
+    # nothing. Keeping the widget is the part that matters -- focus survives a
+    # widget that is still there.
+
+
+def test_the_empty_agent_card_is_padded_like_the_ones_it_replaces(window) -> None:
+    """Qt's default margin, 11px, against 18/17 on the real cards below.
+
+    They sit in one grid on one screen, so the empty state was visibly the
+    tighter box of the two -- on the one screen where the difference is
+    easiest to notice, because it is the only card on it.
+    """
+    window.agents = []
+    window.search.clear()
+    window.render_agents()
+
+    grid = window.agent_cards
+    cards = [grid.itemAt(index).widget() for index in range(grid.count())
+             if grid.itemAt(index).widget() is not None]
+    assert cards, "nothing was drawn at all"
+    margins = cards[0].layout().contentsMargins()
+    assert margins.left() >= 18, (
+        f"the empty card's left padding is {margins.left()}px where an agent "
+        f"card uses 18")
+
+
+def test_the_sidebar_offers_a_retry_when_the_relay_is_gone(window) -> None:
+    """There was no retry anywhere in the app.
+
+    Not one -- a repo-wide search found the word only in error prose. So a
+    reader whose relay had gone had no way to ask again, and the poll's own
+    cadence was the only thing that could notice a host coming back.
+    """
+    assert window.connection_retry.isHidden(), "a Retry is offered before anything has gone wrong"
+
+    # The runtime is up and the relay had been answering, which is the state a
+    # Retry is for: something that worked and then stopped.
+    window.ready = True
+    window.network_event("agents", {"agents": [], "connected": True})
+    assert window.connection_retry.isHidden(), "a Retry is offered while the relay is answering"
+
+    window.network_event("offline", None)
+    assert not window.connection_retry.isHidden(), (
+        "the relay is unreachable and nothing in the app offers to ask again")
+
+    window.network_event("agents", {"agents": [], "connected": True})
+    assert window.connection_retry.isHidden(), (
+        "the relay answered and the Retry is still on screen")
+
+    # Not offered while starting, or after a fatal: there is nothing to retry.
+    window.ready = False
+    window.network_event("offline", None)
+    assert window.connection_retry.isHidden(), (
+        "a Retry is offered before the runtime is up, where it cannot work")
+    window.ready = True
+
+
+def test_a_retry_reports_the_relay_back_without_a_command(window, monkeypatch) -> None:
+    """The poll is backing off to five minutes, so a reader needs a way to poke it.
+
+    Otherwise a host that has just been restarted stays unnoticed until that
+    ceiling elapses, which is long enough to look like the button is broken.
+    """
+    asked = []
+    monkeypatch.setattr(window.network, "submit",
+                        lambda method, *args, **kwargs: asked.append(method) or "r1")
+    window.network_event("offline", None)
+    window.connection_retry.click()
+
+    assert asked == ["retry_poll"], f"the Retry button sent {asked}"
+    assert window.connection_status.objectName() == "statusWarn", (
+        "after pressing Retry the status still claims the relay is unavailable")
+
+
+def test_a_failed_relay_does_not_lock_the_reader_out(window, monkeypatch) -> None:
+    """Refusing commands while offline was tried and removed.
+
+    The poll backs off to a five minute ceiling, so a flag set by one offline
+    event during startup would keep refusing commands -- including the one that
+    would have fixed it -- long after the relay was fine again. A stale network
+    flag is worse than a failed request, because the failed request says what
+    went wrong.
+    """
+    submitted = []
+    monkeypatch.setattr(window.network, "submit",
+                        lambda method, *args, **kwargs: submitted.append(method) or "r1")
+    window.ready = True
+    window.network_event("offline", None)
+
+    window.command("create_workspace", "Still mine to make")
+
+    assert submitted == ["create_workspace"], (
+        f"a command was swallowed while offline: {submitted}")
+
+
+def test_the_members_table_keeps_the_keyboard_focus_it_was_given(window) -> None:
+    """It rebuilt itself every second, destroying any focus on a Remove button.
+
+    refresh() built a fresh button per member and handed it to setCellWidget,
+    which deletes the previous one. So tabbing onto Remove and waiting a second
+    meant the focused widget no longer existed. AgentListDialog already guarded
+    its refresh on a signature of the list; this one did not.
+    """
+    from desktop_app.workspace_dialog import WorkspaceDialog
+
+    window.workspace_meta = {"members": [
+        {"id": "guest-laptop", "role": "device", "online": True}]}
+    dialog = WorkspaceDialog(window)
+    dialog.show()
+
+    first = dialog.members.cellWidget(0, 3)
+    first.setFocus()
+    dialog.refresh()
+
+    assert dialog.members.cellWidget(0, 3) is first, (
+        "an unchanged membership rebuilt the row, so the focused Remove button "
+        "was deleted underneath the reader")
+
+    window.workspace_meta = {"members": [
+        {"id": "guest-laptop", "role": "device", "online": True},
+        {"id": "phone", "role": "device", "online": False}]}
+    dialog.refresh()
+    assert dialog.members.rowCount() == 2, (
+        "a member who actually arrived was not drawn, because the guard is "
+        "skipping real changes as well as repeats")
+
+    dialog.close()
+
+
+def test_the_cookbook_is_not_built_while_the_window_is(window) -> None:
+    """Building it runs nvidia-smi with a three second timeout, on the GUI thread.
+
+    Every page was constructed into the stack at start-up, so the Cookbook's
+    hardware probe ran inside build_ui before anything was drawn. On a machine
+    where nvidia-smi is slow that is up to three seconds of frozen window, on
+    every launch, to prepare a page most sessions never open.
+
+    Measured with the probe forced to take three seconds: 3.23s to construct
+    the window before, 0.11s after.
+    """
+    assert window.cookbook_panel is None, (
+        "the Cookbook page was built during start-up, which puts the graphics "
+        "card probe on the path that draws the window")
+    assert window.stack.widget(win.COOKBOOK_PAGE) is not None, (
+        "the stack must still have a widget in the Cookbook's slot, or "
+        "navigate() and the page shortcuts point at nothing")
+
+
+def test_opening_the_cookbook_builds_it_once(window) -> None:
+    """The cost moves rather than disappears, which is the point.
+
+    It is paid the first time the reader asks for the page, and only then.
+    """
+    window.navigate(win.OVERVIEW_PAGE)
+    assert window.cookbook_panel is None
+
+    window.navigate(win.COOKBOOK_PAGE)
+    panel = window.cookbook_panel
+    assert panel is not None, "navigating to the Cookbook did not build it"
+    assert window.stack.widget(win.COOKBOOK_PAGE) is panel, (
+        "the page was built but not put in the slot navigate() selects")
+
+    window.navigate(win.OVERVIEW_PAGE)
+    window.navigate(win.COOKBOOK_PAGE)
+    assert window.cookbook_panel is panel, (
+        "the page was rebuilt on a second visit, re-probing the hardware and "
+        "re-reading the catalogue for nothing")
+
+
+def test_refreshing_invitations_empties_the_rows_and_keeps_the_heading(window) -> None:
+    """A refresh should replace the invitations, not the whole section.
+
+    The list of invitations this device can reissue changes whenever the reader
+    makes or removes one, and the dialog redraws it in place. Clearing it by
+    emptying the container took the heading and the note with it, and the note's
+    text was then set on a widget no longer in the box, so the section lost its
+    explanation on the first open and every refresh after it.
+    """
+    from desktop_app.workspace_dialog import WorkspaceDialog
+
+    window.outstanding_invitations = []
+    dialog = WorkspaceDialog(window)
+    dialog.refresh_invitations()
+
+    window.outstanding_invitations = ["laptop-one", "laptop-two"]
+    dialog.refresh_invitations()
+    text = [child.text() for child in dialog.invitations_box.findChildren(win.QWidget)
+            if hasattr(child, "text")]
+    assert "Invitations already created" in text, f"the heading went missing: {text}"
+    assert "laptop-one" in text and "laptop-two" in text, f"rows missing: {text}"
+    assert any("credential store" in line for line in text), f"the note went missing: {text}"
+    assert dialog.invitation_rows.count() == 2, dialog.invitation_rows.count()
+
+    window.outstanding_invitations = ["laptop-three"]
+    dialog.refresh_invitations()
+    assert dialog.invitation_rows.count() == 1, dialog.invitation_rows.count()
+    text = [child.text() for child in dialog.invitations_box.findChildren(win.QWidget)
+            if hasattr(child, "text")]
+    assert "laptop-one" not in text, f"a removed invitation was still listed: {text}"
+    assert "Invitations already created" in text, "the heading went missing on refresh"
+
+def test_making_or_removing_an_invitation_reloads_the_list(window, monkeypatch) -> None:
+    """The invitations must follow the reader's changes without a reopen.
+
+    The dialog reads the list when it opens, and its own refresh() returns early
+    whenever membership is unchanged -- which is exactly what making an
+    invitation does, since nobody has joined yet. So a new invitation never
+    appeared, and a revoked one stayed, until the dialog was closed and opened
+    again.
+    """
+    from desktop_app import workspace_dialog as dialog_module
+
+    window.outstanding_invitations = []
+    dialog = dialog_module.WorkspaceDialog(window)
+
+    reloaded = []
+    monkeypatch.setattr(window, "reload_workspace_invitations",
+                        lambda target: reloaded.append(target))
+
+    class StubInvite:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(dialog_module, "InviteDialog", StubInvite)
+    dialog.invite()
+    assert reloaded == [dialog], "making an invitation did not re-read the list"
+
+    reloaded.clear()
+    monkeypatch.setattr(
+        dialog_module.QMessageBox, "question",
+        lambda *args, **kwargs: dialog_module.QMessageBox.StandardButton.Yes)
+    sent = []
+
+    def command(method, *args, **kwargs):
+        sent.append(method)
+        if kwargs.get("success"):
+            kwargs["success"](None)
+
+    monkeypatch.setattr(window, "command", command)
+    dialog.remove("guest-laptop")
+    assert sent == ["remove_member"], sent
+    assert reloaded == [dialog], "revoking an invitation did not re-read the list"

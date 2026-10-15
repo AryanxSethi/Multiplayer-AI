@@ -10,6 +10,7 @@ import httpx
 from desktop_app.runtime import DesktopRuntime, relay_http_url
 from desktop_app.storage import ABSENT, REMOVED, UNAVAILABLE, Storage
 import desktop_app.runtime as runtime_module
+from desktop_app.workspace_runtime import WorkspaceRuntime
 
 
 class MemoryVault:
@@ -770,6 +771,472 @@ class WorkspaceDurabilityTests(unittest.IsolatedAsyncioTestCase):
                          {"remote-token", "relay:guest"},
                          "the names the app does mint are still cleaned up")
         self.assertEqual(self.runtime.storage.read_pending_cleanup(), [])
+
+
+class BackgroundArchiveTests(unittest.IsolatedAsyncioTestCase):
+    """The archive of a workspace nobody is looking at.
+
+    Every workspace gets its own engine and its own poll, so this branch runs
+    three seconds apart for all of them, for as long as the app is open.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.events = []
+        self.runtime = DesktopRuntime(Storage(self.directory.name, self.vault),
+                                      lambda kind, data: self.events.append((kind, data)))
+        await self.runtime.start()
+        await self.runtime.create_workspace("Second")
+        self.other_id, self.other = next((i, engine) for i, engine in self.runtime.engines.items()
+                                         if i != self.runtime.active_workspace_id)
+        self.saves = []
+        original = self.other.history_store.save
+        def counted(*args, **kwargs):
+            self.saves.append(1)
+            return original(*args, **kwargs)
+        self.other.history_store.save = counted
+
+    async def asyncTearDown(self):
+        await self.runtime.close()
+        self.directory.cleanup()
+
+    def room(self, revision="r1", room_id="conversation-one"):
+        return {"id": room_id, "revision": revision, "pending": False,
+                "messages": [{"id": "m1", "role": "user", "from": "someone", "content": "hello"}]}
+
+    async def test_an_unchanged_room_is_not_rewritten_to_disk(self):
+        """The whole archive, twenty times a minute, to reproduce what is there.
+
+        The listing arrives on every poll tick whether or not anything moved,
+        and the rewrite below rebuilds every room and every message -- plus
+        state["conversations"], which keeps the rooms raw, so an attachment
+        still in. A revision is the room's own account of what has changed, so
+        an unchanged one means the copy on disk is already right.
+        """
+        self.runtime.forward(self.other_id, "conversations", [self.room()])
+        first = len(self.saves)
+        self.assertTrue(self.saves, "nothing was written even the first time")
+
+        self.runtime.forward(self.other_id, "conversations", [self.room()])
+        self.assertEqual(len(self.saves), first,
+                         "an unchanged room was rewritten to SQLite again")
+
+        self.runtime.forward(self.other_id, "conversations", [self.room(revision="r2")])
+        self.assertGreater(len(self.saves), first,
+                           "a room whose revision moved was not written at all")
+
+    async def test_a_room_deleted_elsewhere_is_still_removed_here(self):
+        """The skip must not also skip the cleanup.
+
+        Rooms that vanish from the listing are deleted from the archive, and
+        that is the only code that does it. A guard that only compared
+        revisions would leave a conversation deleted on another device in this
+        workspace's archive for ever, because nothing would ever remove it.
+        """
+        self.runtime.forward(self.other_id, "conversations",
+                             [self.room(), self.room("r1", "conversation-two")])
+        saved = self.other.history_store.load("ui")["state"]["chats"]
+        self.assertIn("conversation-two", saved)
+
+        self.runtime.forward(self.other_id, "conversations", [self.room()])
+        saved = self.other.history_store.load("ui")["state"]["chats"]
+        self.assertNotIn("conversation-two", saved,
+                         "a conversation deleted on another device was kept for good")
+        self.assertIn("conversation-one", saved)
+
+    async def test_a_locked_credential_store_is_not_reported_as_a_relay_failure(self):
+        """Vault.get raises when the OS store is locked, and the read was unguarded.
+
+        It escaped refresh() into the poll loop above it, which reported
+        "Relay connection interrupted" -- blaming the relay for a keyring
+        problem, and repeating it every three seconds.
+        """
+        class Locked:
+            def get(self, name):
+                raise RuntimeError("The OS credential store is unavailable.")
+
+        self.other.storage.vault = Locked()
+        # runners holds (client, task) pairs; only the client's ready event is
+        # read on this path, and teardown cancels the task, so both are given.
+        task = asyncio.ensure_future(asyncio.sleep(3600))
+        self.addAsyncCleanup(task.cancel)
+        self.other.runners["chat-agent"] = (unittest.mock.Mock(ready=asyncio.Event()), task)
+        profiles = {"chat-agent": {"id": "chat-agent", "provider": "ollama",
+                                   "model": "chat", "base_url": "http://127.0.0.1:1"}}
+
+        result = await self.other.refresh_ollama_availability(profiles)
+
+        self.assertNotIn("offline", [kind for kind, _ in self.events],
+                         "a locked keyring was reported as a lost relay")
+        self.assertIsInstance(result, dict)
+
+
+class InvitationRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """An invitation has to be showable more than once.
+
+    It used to be readable exactly once, in the dialog that created it. Close
+    it without copying and that device could never join, because the token was
+    minted, saved to the credential store, and never written anywhere the
+    reader could get at again -- and the only documented way out was to reset
+    their own identity, which destroys every other identity in the workspace.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.events = []
+        self.runtime = DesktopRuntime(Storage(self.directory.name, self.vault),
+                                      lambda kind, data: self.events.append((kind, data)))
+        await self.runtime.start()
+        self.engine = self.runtime.engine
+
+    async def asyncTearDown(self):
+        await self.runtime.close()
+        self.directory.cleanup()
+
+    async def test_an_invitation_can_be_shown_again_after_it_was_made(self):
+        made = await self.runtime.invite("guest-laptop", self.runtime.active_url)
+
+        assert await self.runtime.outstanding_invitations() == ["guest-laptop"], (
+            "an invitation that was just made cannot be listed, so it cannot be "
+            "shown again")
+
+        again = await self.runtime.invitation_for("guest-laptop")
+        assert again == made, (
+            f"the invitation shown again is not the one that was issued:\n"
+            f"  issued: {made}\n  again:  {again}")
+
+    async def test_the_token_is_read_back_from_the_credential_store_not_stored(self):
+        """A settings file copied off this machine must not carry anyone's access."""
+        await self.runtime.invite("guest-laptop", self.runtime.active_url)
+        recorded = self.engine.storage.settings["invitations"]["guest-laptop"]
+
+        assert "token" not in recorded, (
+            f"the token was written into settings.json: {recorded}")
+        assert self.engine.storage.vault.get("relay:guest-laptop"), (
+            "the token is not in the credential store, so it cannot be read back")
+
+        written = json.loads(Path(self.directory.name, "settings.json").read_text())
+        assert "guest-laptop" in written["invitations"], (
+            "the invitation was not recorded at all, so it cannot be recovered")
+        blob = json.dumps(written)
+        token = self.engine.storage.vault.get("relay:guest-laptop")
+        assert token not in blob, (
+            "the relay token appears in the settings file on disk")
+
+    async def test_a_removed_member_cannot_have_their_invitation_reissued(self):
+        await self.runtime.invite("guest-laptop", self.runtime.active_url)
+        await self.runtime.remove_member("guest-laptop")
+
+        assert await self.runtime.outstanding_invitations() == [], (
+            "a removed member is still offered an invitation, and the token it "
+            "would read back has been deleted, so the offer only fails on use")
+        with self.assertRaisesRegex(ValueError, "no saved invitation"):
+            await self.runtime.invitation_for("guest-laptop")
+
+    async def test_a_locked_credential_store_says_so_rather_than_issuing_a_broken_one(self):
+        """An invitation missing its token looks valid until the guest is refused."""
+        await self.runtime.invite("guest-laptop", self.runtime.active_url)
+
+        class Locked:
+            def get(self, name):
+                raise RuntimeError("The OS credential store is unavailable.")
+
+        self.engine.storage.vault = Locked()
+        with self.assertRaisesRegex(ValueError, "credential store"):
+            await self.runtime.invitation_for("guest-laptop")
+
+    async def test_a_guest_is_never_shown_another_device_token(self):
+        await self.runtime.invite("guest-laptop", self.runtime.active_url)
+        self.engine.remote = True
+
+        assert await self.runtime.outstanding_invitations() == [], (
+            "a guest can list the invitations its host made")
+        with self.assertRaisesRegex(ValueError, "host"):
+            await self.runtime.invitation_for("guest-laptop")
+
+
+class SettingsConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    """Two threads write the same dict the GUI reads.
+
+    Storage.save() took the lock around json.dumps, but nothing took it around
+    a mutation, and the dict is handed out by reference. A write landing inside
+    a serialisation raises RuntimeError: dictionary changed size during
+    iteration -- which surfaces at whichever command happened to be running
+    rather than as what it is.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.storage = Storage(self.directory.name, self.vault)
+        self.storage.update(theme="dark", relay_port=7000)
+        self.errors = []
+
+    async def asyncTearDown(self):
+        self.directory.cleanup()
+
+    def hammer(self, key, value):
+        """Write the same key from another thread, as the network loop does."""
+        for index in range(400):
+            try:
+                self.storage.update(**{key: f"{value}-{index}"})
+            except Exception as error:
+                self.errors.append(error)
+
+    async def test_a_write_from_the_network_thread_cannot_break_a_save(self):
+        import threading
+
+        thread = threading.Thread(target=self.hammer, args=("relay_port", "port"))
+        thread.start()
+        for index in range(400):
+            # What the GUI thread does while a chat is rendering.
+            self.storage.update(theme="light" if index % 2 else "dark")
+        thread.join()
+
+        assert not self.errors, (
+            f"{len(self.errors)} writes from the network thread failed against "
+            f"the GUI thread's: {self.errors[0]!r}")
+
+    async def test_every_guarded_entry_point_persists_what_it_changed(self):
+        """update/discard/change write under the lock, and the write is the point."""
+        self.storage.update(theme="light")
+        assert json.loads(Path(self.directory.name, "settings.json").read_text())["theme"] == "light"
+
+        self.storage.discard("theme")
+        assert "theme" not in json.loads(Path(self.directory.name, "settings.json").read_text())
+
+        self.storage.change(lambda settings: settings.__setitem__("theme", "light"))
+        on_disk = json.loads(Path(self.directory.name, "settings.json").read_text())
+        assert on_disk["theme"] == "light"
+
+    async def test_a_read_modify_write_is_one_locked_act(self):
+        """change() exists because the new value depends on the old one.
+
+        Reading the dict outside the lock and writing inside it leaves the
+        window in between, which is the bug; a caller that only has update()
+        will reach for it and split the act.
+        """
+        import inspect
+
+        signature = inspect.signature(Storage.change)
+        assert list(signature.parameters) == ["self", "mutate"], (
+            f"change() takes {list(signature.parameters)}, so it is not the "
+            f"single-callable form the migration relies on")
+
+    async def test_the_daemon_does_not_need_a_bare_assignment_to_persist(self):
+        """The point of the helpers: no bare assignment, no second call."""
+        self.storage.update(share_lan=True)
+        assert json.loads(Path(self.directory.name, "settings.json").read_text())["share_lan"] is True
+
+        # The old pattern, deliberately: change the dict, then remember to save.
+        # This is what the GUI thread was doing concurrently with the above.
+        self.storage.settings["reduce_motion"] = True
+        self.storage.save()
+        assert json.loads(Path(self.directory.name, "settings.json").read_text())["reduce_motion"] is True
+
+
+class _HeldPeers(dict):
+    """Relay peers that have not noticed a socket closing yet.
+
+    The relay drops an identity the moment its socket closes, which is
+    immediate, so a test that lets the real close happen is racing the thing it
+    is trying to measure. This refuses to release one identity until it is told
+    to -- which is precisely the condition the drain waits for.
+    """
+
+    held = False
+
+    def pop(self, key, *args, **kwargs):
+        if self.held and key == "researcher":
+            return self.get(key)
+        return super().pop(key, *args, **kwargs)
+
+    def __delitem__(self, key):
+        if self.held and key == "researcher":
+            return
+        super().__delitem__(key)
+
+
+class EditedProfileTests(unittest.IsolatedAsyncioTestCase):
+    """Reconnecting an agent that is already running.
+
+    Editing a profile reuses its identity, so the replacement connects while the
+    old registration may still be on the relay. Runner removal used to wait a
+    fixed 100ms rather than for the relay to drop the old peer, so when the peer
+    took longer than that to go -- a busy machine, a contended event loop -- the
+    replacement was refused as a duplicate identity, leaving a model that was
+    saved, listed as online, and not running, so every send came back "Target
+    agent is offline".
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.vault = MemoryVault()
+        self.events = []
+        self.runtime = DesktopRuntime(Storage(self.directory.name, self.vault),
+                                      lambda kind, data: self.events.append((kind, data)))
+        await self.runtime.start()
+        self.old_http = self.runtime.http
+        self.replies = []
+
+        async def transport(request):
+            if request.url.host == "model.example":
+                body = json.loads(request.content)
+                self.replies.append(body)
+                return httpx.Response(200, json={"choices": [
+                    {"message": {"content": "Replied"}, "finish_reason": "stop"}]})
+            return await self.old_http.send(request)
+
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+        self.profile = {"id": "researcher", "provider": "bionic", "model": "test-model",
+                        "base_url": "https://model.example/v1", "autostart": True}
+        await self.runtime.save_agent(self.profile, "private-provider-key")
+
+    async def asyncTearDown(self):
+        await self.runtime.close()
+        await self.old_http.aclose()
+        self.directory.cleanup()
+
+    async def test_removing_a_runner_waits_for_the_identity_to_be_released(self):
+        """The wait is for the condition, not for an interval.
+
+        Deterministic: the relay's peer table is told to keep the identity
+        registered, which a real socket close would not do, so the only thing
+        that can end the wait is the release itself. The old code slept 100ms
+        and returned, so at 300ms -- three times that -- it was long done, and
+        the replacement it was clearing the way for would be free to be refused
+        as a duplicate.
+        """
+        import asyncio
+
+        engine = self.runtime.engine
+        relay = engine.app.state.relay
+        original = relay.peers
+        held = _HeldPeers(original)
+        held.held = True
+        relay.peers = held
+        returned_early = None
+        try:
+            task = asyncio.ensure_future(engine._remove_runner("researcher"))
+            await asyncio.sleep(.3)
+            returned_early = task.done()
+            held.held = False
+            held.pop("researcher", None)
+            await task
+        finally:
+            relay.peers = original
+
+        self.assertFalse(returned_early,
+                         "removing a runner returned while the relay still had "
+                         "the identity registered, so the replacement was free "
+                         "to be refused as a duplicate")
+
+    async def test_an_edited_profile_is_left_running_and_able_to_answer(self):
+        """The whole point: save an edit, then use the agent it edited."""
+        edited = {**self.profile, "system_prompt": "Answer in one word."}
+        await self.runtime.save_agent(edited, "private-provider-key")
+
+        self.assertIn("researcher", self.runtime.engine.runners,
+                      "the edited agent was saved but never launched, so the UI "
+                      "lists a model that nothing is running behind")
+        result = await self.runtime.send("researcher", {"text": "Hello after editing"})
+        self.assertEqual(result["text"], "Replied")
+        self.assertTrue(self.replies, "the agent was not actually called")
+
+    async def test_editing_twice_still_leaves_one_working_agent(self):
+        """Each edit replaces the last, and none of them is left half-attached."""
+        for attempt in range(3):
+            await self.runtime.save_agent(
+                {**self.profile, "system_prompt": f"Attempt {attempt}"},
+                "private-provider-key")
+            self.assertIn("researcher", self.runtime.engine.runners,
+                          f"attempt {attempt} left the agent not running")
+        result = await self.runtime.send("researcher", {"text": "Hello after three edits"})
+        self.assertEqual(result["text"], "Replied")
+
+class PollBackoffTests(unittest.IsolatedAsyncioTestCase):
+    """A repaired outage must not leave the poll quiet.
+
+    The backoff lived in a local of _poll, which loops forever, so within one
+    call it accumulated correctly and nothing outside could touch it. A guest
+    that rejoined after its host restarted therefore kept a backoff earned by a
+    fault that was already over and saw no agents at all while it waited out the
+    rest of it -- up to five minutes on a client that was already connected.
+
+    The state is on the engine now, so joining and Retry can both clear it.
+
+    Built directly instead of through DesktopRuntime.start(). start() populates
+    the engine and spawns the _poll loop, and that loop owns these same fields:
+    it resets them on a successful pass and doubles them on a failed one, either
+    of which lands between the setup and the assertion and decides the result.
+    Nothing here needs a relay, a socket or a clock.
+    """
+
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.engine = WorkspaceRuntime(Storage(self.directory.name, MemoryVault()),
+                                       lambda kind, data: None)
+
+    async def asyncTearDown(self):
+        self.directory.cleanup()
+
+    async def test_the_backoff_is_state_someone_else_can_reach(self):
+        """It starts on the engine, not inside the loop that owns it."""
+        self.assertEqual(self.engine._poll_delay, 3)
+        self.assertEqual(self.engine._poll_failures, 0)
+
+    async def test_retry_clears_a_backoff_earned_by_an_outage_that_is_over(self):
+        """The reader pressing Retry should not wait out a repaired fault."""
+        called = []
+
+        async def refresh():
+            called.append(True)
+
+        self.engine.refresh = refresh
+        self.engine._poll_delay, self.engine._poll_failures = 300, 9
+        await self.engine.retry_poll()
+        self.assertTrue(called, "the stubbed refresh was never used")
+        self.assertEqual(self.engine._poll_delay, 3)
+        self.assertEqual(self.engine._poll_failures, 0)
+
+    async def test_a_retry_that_fails_leaves_the_backoff_where_it_was(self):
+        """Otherwise Retry would promise a cadence the relay cannot keep.
+
+        Clearing on a failed retry would put the poll straight back to hammering
+        a relay that is still gone, which is what the backoff is for.
+        """
+        async def refresh():
+            raise OSError("relay still gone")
+
+        self.engine.refresh = refresh
+        self.engine._poll_delay, self.engine._poll_failures = 48, 5
+        await self.engine.retry_poll()
+        self.assertEqual(self.engine._poll_delay, 48)
+        self.assertEqual(self.engine._poll_failures, 5)
+        self.assertFalse(self.engine._poll_wake.is_set(),
+                         "a failed Retry woke the loop into the same dead relay")
+
+    async def test_retry_wakes_the_sleeping_loop_not_just_its_delay(self):
+        """Clearing the stored delay does not reach a loop already asleep in it.
+
+        The loop reads the delay at the top of a pass and sleeps it at the
+        bottom, so a Retry that only reset the number left the loop in the old
+        wait: one manual refresh, then up to five more minutes of silence from
+        the loop that is meant to be watching the relay.
+        """
+        called = []
+
+        async def refresh():
+            called.append(True)
+
+        self.engine.refresh = refresh
+        self.engine._poll_delay, self.engine._poll_failures = 300, 9
+        await self.engine.retry_poll()
+        self.assertTrue(called, "the stubbed refresh was never used")
+        self.assertTrue(self.engine._poll_wake.is_set(),
+                        "the sleeping poll loop was not woken")
 
 
 if __name__ == "__main__":

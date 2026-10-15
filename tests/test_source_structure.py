@@ -292,3 +292,41 @@ def test_the_cookbook_has_exactly_one_ungated_path_to_the_network():
     assert not stray, (
         f"cookbook_panel.py calls do_refresh outside ask_to_refresh, on lines "
         f"{stray}; it is meant to be reachable only from there")
+
+
+def test_dialogs_module_holds_only_the_dialogs_the_app_can_open():
+    """Keep the orphaned dialogs from quietly growing back.
+
+    AgentDialog and JoinDialog were unreachable: nothing in the app constructed
+    them, but three test modules still did, which kept roughly 400 lines of a
+    second, stale implementation of the model card and the join form alive and
+    passing. Deleting them was only safe once those tests went through the real
+    widgets, and nothing else stops the next one from importing them again.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    source = (root / "desktop_app" / "dialogs.py").read_text(encoding="utf-8")
+    names = {n.name for n in ast.parse(source).body
+             if isinstance(n, (ast.ClassDef, ast.FunctionDef))}
+    live = {"available_agent_name", "parse_invitation", "InviteDialog",
+            "RefreshDisclosure"}
+    assert names == live, f"dialogs.py now defines {sorted(names - live)}"
+
+    # Matched on names, not text: prose that explains why these were deleted
+    # still names them, and that is not a reference.
+    removed = {"AgentDialog", "JoinDialog", "_style_error"}
+    offenders = []
+    for path in list((root / "desktop_app").rglob("*.py")) + list((root / "tests").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            found = set()
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                found = {(a.asname or a.name).split(".")[0] for a in node.names} & removed
+            elif isinstance(node, ast.Name):
+                found = {node.id} & removed
+            elif isinstance(node, ast.Attribute):
+                found = {node.attr} & removed
+            offenders += [f"{path.relative_to(root)}: {name}" for name in sorted(found)]
+    assert not offenders, "deleted dialog code is referenced again: " + ", ".join(offenders)

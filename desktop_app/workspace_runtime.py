@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import json
+import random
 import re
 import secrets
 import socket
@@ -52,6 +53,19 @@ class WorkspaceRuntime:
         self.active_id = None
         self.remote = False
         self.sharing = False
+        # How long the poll waits before trying again, and how many attempts
+        # have failed in a row. On the instance rather than local to _poll, so
+        # that reconnecting can clear them: a device that was backing off
+        # because the other end went away should start listening again the
+        # moment it is reachable, not sit out a backoff earned by a fault that
+        # has already been repaired.
+        self._poll_delay, self._poll_failures = 3, 0
+        # Set to cut the poll's wait short. The loop reads the delay at the top
+        # of a pass and sleeps it at the bottom, so clearing the stored delay
+        # while it is already asleep changes nothing about that wait: on a relay
+        # that had backed off, a reader pressing Retry would get one manual
+        # refresh and then five more minutes of silence from the loop.
+        self._poll_wake = asyncio.Event()
         self.port = None
         self.poller = None
         self.closed = False
@@ -73,7 +87,7 @@ class WorkspaceRuntime:
         device_id = self.storage.settings.get("device_id")
         if not device_id:
             device_id = "device-" + uuid4().hex[:8]
-            self.storage.settings["device_id"] = device_id
+            self.storage.update(device_id=device_id)
         if device_id not in self.credentials:
             self.credentials[device_id] = {"token": secrets.token_urlsafe(32), "group": "workspace"}
         Relay(self.credentials)
@@ -97,8 +111,7 @@ class WorkspaceRuntime:
         self.app.state.relay.member_remover = self.remove_member
         self.sharing = bool(self.storage.settings.get("share_lan", False))
         await self._start_server("0.0.0.0" if self.sharing else "127.0.0.1", self.storage.settings.get("relay_port", 0))
-        self.storage.settings["relay_port"] = self.port
-        self.storage.save()
+        self.storage.update(relay_port=self.port)
         saved = self.storage.settings.get("remote") if self.restore_remote else None
         await self.use_local(forget_remote=False)
         if saved:
@@ -226,8 +239,7 @@ class WorkspaceRuntime:
         self.active_id = self.storage.settings["device_id"]
         self.active_token = self.credentials[self.active_id]["token"]
         if forget_remote:
-            self.storage.settings.pop("remote", None)
-        self.storage.save()
+            self.storage.discard("remote")
         await self._attach(self.active_id, self.active_token, self._echo)
         await self._restore_profiles()
         self.emit("workspace", {"name": self.storage.settings.get("workspace_name", "My workspace"), "url": self.active_url, "self": self.active_id, "remote": False})
@@ -255,7 +267,7 @@ class WorkspaceRuntime:
             device_id = self.storage.settings.get("device_id")
             if not device_id:
                 device_id = "device-" + uuid4().hex[:8]
-                self.storage.settings["device_id"] = device_id
+                self.storage.update(device_id=device_id)
             fresh = {device_id: {"token": secrets.token_urlsafe(32), "group": "workspace"}}
             skipped = []
             for profile in self.storage.settings.get("agents", []):
@@ -358,6 +370,11 @@ class WorkspaceRuntime:
     async def join(self, url, token, allow_insecure=False, save=True, conversation_id=None):
         async with self.mutation:
             result = await self.inspect_invitation(url, token, allow_insecure, conversation_id)
+            # The relay answered, so any backoff was earned by an outage that
+            # has now been repaired. Left in place it would keep the poll quiet
+            # for up to five minutes on a device that is already connected --
+            # which is how a guest that had just rejoined saw no agents at all.
+            self._poll_delay, self._poll_failures = 3, 0
             if self.remote and self.active_url == url and self.active_token == token:
                 await self.refresh()
                 if conversation_id:
@@ -375,8 +392,7 @@ class WorkspaceRuntime:
                     await self.publish_profile(remote_profile, running=False)
                 if save:
                     self.storage.vault.set("remote-token", token)
-                    self.storage.settings["remote"] = {"url": url, "allow_insecure": allow_insecure}
-                    self.storage.save()
+                    self.storage.update(remote={"url": url, "allow_insecure": allow_insecure})
             except BaseException:
                 await self._stop_agents()
                 self.active_url, self.active_token, self.active_id, self.remote = previous
@@ -405,7 +421,22 @@ class WorkspaceRuntime:
             if client.socket:
                 with contextlib.suppress(Exception):
                     await client.socket.close()
-            await asyncio.sleep(.1)
+            # Wait for the relay to drop the old registration, rather than for
+            # a fixed interval. This used to sleep 100ms, which is long enough
+            # most of the time and not the rest: when the peer took longer than
+            # that to go, the relay refused the replacement as a duplicate
+            # identity, and the editor was left with a model that had been
+            # saved, was listed as online, and was not running -- so every send
+            # came back "Target agent is offline". Editing a profile reuses its
+            # identity, which is why only the edit path hit it.
+            #
+            # The same drain _stop_agents does, twenty lines below, for the
+            # same stated reason.
+            if self.active_url and not self.remote:
+                for _ in range(100):
+                    if agent_id not in self.app.state.relay.peers:
+                        break
+                    await asyncio.sleep(.02)
 
     def _config(self, profile, key, search_key=None):
         """Build validated provider settings from a profile and its separate vault keys."""
@@ -471,12 +502,18 @@ class WorkspaceRuntime:
                                 or self.app.state.relay.agent_description(configured)["kind"] != "model"):
             default = next((item["id"] for item in self.storage.settings.get("agents", [])
                             if self.app.state.relay.allowed(self.active_id, item["id"])), profile["id"])
-            previous = self.storage.settings
-            self.storage.settings = {**previous, "coordinator": default}
+            previous = self.storage.settings.get("coordinator")
             try:
-                self.storage.save()
+                self.storage.update(coordinator=default)
             except BaseException:
-                self.storage.settings = previous
+                # Put the one key back, in place. Restoring the whole dict by
+                # rebinding it would leave any reader holding the old object
+                # looking at settings nothing writes to again.
+                with contextlib.suppress(Exception):
+                    if previous is None:
+                        self.storage.discard("coordinator")
+                    else:
+                        self.storage.update(coordinator=previous)
                 raise
             self.app.state.relay.workspace["coordinator"] = default
 
@@ -552,8 +589,21 @@ class WorkspaceRuntime:
         runners = {identity: self.runners[identity] for identity in active}
         endpoints = {}
         for identity, profile in active.items():
+            # Guarded, because Vault.get raises when the OS credential store is
+            # locked or unavailable. It used to be read outside any try, so the
+            # error escaped refresh() into the poll loop above it, which
+            # reported the failure as "Relay connection interrupted" -- telling
+            # the reader their relay had gone when their keyring was the thing
+            # that had. It then repeated every three seconds.
+            #
+            # No key means no Ollama account, which is the same answer as a
+            # probe that could not reach the server: nothing available.
+            try:
+                key = self.storage.vault.get("provider:" + identity)
+            except (RuntimeError, OSError):
+                key = None
             endpoint = (profile.get("base_url") or PROVIDERS["ollama"].base_url,
-                        self.storage.vault.get("provider:" + identity), profile.get("allow_insecure", False))
+                        key, profile.get("allow_insecure", False))
             endpoints.setdefault(endpoint, []).append(identity)
 
         async def available(endpoint):
@@ -578,6 +628,25 @@ class WorkspaceRuntime:
                     if await self.publish_profile(active[identity], running=running):
                         self._ollama_availability[identity] = running
         return availability
+
+    async def retry_poll(self):
+        """One refresh now, because the reader asked for one.
+
+        The poll backs off to a five minute ceiling while the relay is gone, so
+        a host that has just come back would otherwise stay unnoticed until
+        that elapsed. Clearing the stored delay is not enough on its own: the
+        loop is asleep in the delay it read at the top of the pass it is on, so
+        this runs one pass, resets the backoff if that succeeded, and wakes the
+        loop so it resumes on the new cadence rather than the old one. A pass
+        that fails leaves the backoff alone and reports offline, exactly as the
+        loop would have: Retry is not a way to hammer a relay that is still gone.
+        """
+        try:
+            await self.refresh()
+            self._poll_delay, self._poll_failures = 3, 0
+            self._poll_wake.set()
+        except Exception:
+            self.emit("offline", "Relay connection interrupted. The app will keep trying to reconnect.")
 
     async def refresh(self):
         if not self.active_token:
@@ -621,7 +690,15 @@ class WorkspaceRuntime:
 
     async def _poll(self):
         next_join = time.monotonic() + 15
+        # How long to wait before the next attempt, and how many attempts have
+        # failed in a row. The cadence was a flat three seconds whatever had
+        # happened, which is right while things work and wrong the moment they
+        # do not: an unreachable host was asked for /agents, /conversations and
+        # /workspace every three seconds for as long as the app stayed open, and
+        # every desktop client sharing that host came back at the same moment
+        # and asked again together.
         while not self.closed:
+            delay, failures = self._poll_delay, self._poll_failures
             saved = self.storage.settings.get("remote") if self.restore_remote else None
             if saved and not self.remote and time.monotonic() >= next_join:
                 next_join = time.monotonic() + 15
@@ -633,9 +710,26 @@ class WorkspaceRuntime:
                     pass
             try:
                 await self.refresh()
+                # Back to the steady cadence on the first success, so a blip
+                # costs one slow moment rather than the rest of the session.
+                self._poll_delay, self._poll_failures = 3, 0
             except Exception:
+                self._poll_failures += 1
                 self.emit("offline", "Relay connection interrupted. The app will keep trying to reconnect.")
-            await asyncio.sleep(3)
+                # Doubling, to a ceiling of five minutes, with a little
+                # jitter so a room full of clients does not come back in step.
+                self._poll_delay = min(self._poll_delay * 2, 300)
+            try:
+                # Waiting on an event rather than sleeping, so a manual refresh
+                # can end the wait instead of only clearing the number for the
+                # next one. The event is only ever set to cut this short, so it
+                # is cleared here rather than when it is set.
+                await asyncio.wait_for(self._poll_wake.wait(),
+                                       delay * (0.9 + 0.2 * random.random()))
+            except asyncio.TimeoutError:
+                pass
+            else:
+                self._poll_wake.clear()
 
     async def send(self, target, payload):
         generation = self.generation
@@ -731,12 +825,15 @@ class WorkspaceRuntime:
             if agent_id and (not relay.allowed(self.active_id, agent_id)
                              or relay.agent_description(agent_id)["kind"] != "model"):
                 raise ValueError("Choose a model in this workspace as the default")
-            previous = dict(self.storage.settings)
-            self.storage.settings["coordinator"] = agent_id or None
+            previous = self.storage.settings.get("coordinator")
             try:
-                self.storage.save()
+                self.storage.update(coordinator=agent_id or None)
             except BaseException:
-                self.storage.settings = previous
+                with contextlib.suppress(Exception):
+                    if previous is None:
+                        self.storage.discard("coordinator")
+                    else:
+                        self.storage.update(coordinator=previous)
                 raise
             relay.workspace["coordinator"] = agent_id or None
             await self.refresh()
@@ -815,8 +912,7 @@ class WorkspaceRuntime:
                 self.server_socket.close()
                 await self._start_server("0.0.0.0", self.port)
                 self.sharing = True
-                self.storage.settings["share_lan"] = True
-                self.storage.save()
+                self.storage.update(share_lan=True)
                 await self._attach(self.active_id, self.active_token, self._echo)
                 await self._restore_profiles()
             updated = {**self.credentials, agent_id: {"token": secrets.token_urlsafe(32), "group": "workspace"}}
@@ -834,7 +930,70 @@ class WorkspaceRuntime:
             invitation["workspace_name"] = self.storage.settings.get("workspace_name", "My workspace")
             if conversation_id:
                 invitation["conversation_id"] = conversation_id
+            # Everything except the token, so the invitation can be shown again
+            # later. The token itself is not written here and never leaves the
+            # credential store: it is read back from the vault on demand, so a
+            # settings file that is copied off this machine does not carry
+            # anyone's access. An invitation used to be readable exactly once,
+            # in the dialog that created it, which meant a reader who closed
+            # it without copying had stranded the device they were inviting --
+            # and the only way out was to reset their own identity, which
+            # destroys every other identity in the workspace with it.
+            self.storage.change(lambda settings: settings.__setitem__(
+                "invitations", {**(settings.get("invitations") or {}), agent_id: {
+                    "url": public_url, "allow_insecure": bool(lan),
+                    "workspace_name": invitation["workspace_name"],
+                    "conversation_id": conversation_id or ""}}))
             return invitation
+
+    async def outstanding_invitations(self):
+        """Device identities this device minted, and can still issue an invite for.
+
+        Everything except the local identity and anything that is a connected
+        model agent: a model agent has a profile in settings["agents"] and was
+        connected rather than invited, so it has no invitation to reissue.
+        """
+        if self.remote:
+            return []
+        agents = {profile["id"] for profile in self.storage.settings.get("agents", [])}
+        recorded = self.storage.settings.get("invitations") or {}
+        return sorted(name for name in self.credentials
+                      if name != self.active_id and name not in agents
+                      and name in recorded)
+
+    async def invitation_for(self, agent_id):
+        """Rebuild one invitation, reading its token back from the credential store.
+
+        Raises rather than returning a partial invitation: an invitation
+        missing its token looks like a valid one until the guest is refused,
+        and the reader has no way to tell which of the two they are holding.
+        """
+        if self.remote:
+            raise ValueError("Only this workspace's host can issue invitations")
+        recorded = (self.storage.settings.get("invitations") or {}).get(agent_id)
+        if not recorded:
+            raise ValueError(f"There is no saved invitation for {agent_id}")
+        try:
+            token = self.storage.vault.get("relay:" + agent_id)
+        except (RuntimeError, OSError):
+            # The store is locked. Vault.get raises rather than returning
+            # nothing, and letting that through as a generic failure would say
+            # the operation failed, when what is actually true is that it has
+            # not been tried yet.
+            raise ValueError(
+                f"The saved invitation for {agent_id} cannot be read because "
+                f"your credential store is locked. Unlock it and try again."
+            ) from None
+        if not token:
+            raise ValueError(
+                f"The saved invitation for {agent_id} is no longer in your "
+                f"credential store. Create a new one.")
+        invitation = {"version": 1, "agent_id": agent_id, "url": recorded["url"],
+                      "token": token, "allow_insecure": bool(recorded["allow_insecure"])}
+        invitation["workspace_name"] = recorded["workspace_name"]
+        if recorded.get("conversation_id"):
+            invitation["conversation_id"] = recorded["conversation_id"]
+        return invitation
 
     async def remove_member(self, member):
         """Revoke a member's access and clean up its runner, history, and credentials."""
@@ -847,6 +1006,14 @@ class WorkspaceRuntime:
             if member not in self.credentials:
                 raise ValueError("This member is no longer in the workspace")
             updated = {name: config for name, config in self.credentials.items() if name != member}
+            # The invitation record goes with the credential, or the Workspaces
+            # page would keep offering to reissue an invitation for someone who
+            # has just been removed -- and the token it would read back has
+            # been deleted below, so the offer would only fail when used.
+            self.storage.change(lambda settings: settings.__setitem__(
+                "invitations", {name: saved for name, saved
+                                in (settings.get("invitations") or {}).items()
+                                if name != member}))
             self.storage.save_credentials(updated)
             self.credentials = updated
             self.app.state.relay.credentials = updated
@@ -855,11 +1022,12 @@ class WorkspaceRuntime:
             if peer:
                 await peer.socket.close(code=1008, reason="Removed from workspace")
             await self._remove_runner(member)
-            self.storage.settings["agents"] = [profile for profile in self.storage.settings.get("agents", []) if profile["id"] != member]
+            self.storage.change(lambda settings: settings.__setitem__(
+                "agents", [profile for profile in settings.get("agents", [])
+                           if profile["id"] != member]))
             if self.storage.settings.get("coordinator") == member:
-                self.storage.settings["coordinator"] = None
+                self.storage.update(coordinator=None)
                 self.app.state.relay.workspace["coordinator"] = None
-            self.storage.save()
             # The member is out of the workspace either way, but a token left
             # in the OS credential store would still be a secret this device
             # holds for someone who no longer has access, so say so rather

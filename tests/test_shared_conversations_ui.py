@@ -16,7 +16,8 @@ from PySide6.QtWidgets import QApplication, QLabel
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from desktop_app.dialogs import AgentDialog, InviteDialog, JoinDialog
+from desktop_app.dialogs import InviteDialog
+from tests.model_card import connect_model, join_workspace
 from desktop_app.markdown import MarkdownMessage
 from desktop_app.storage import Storage
 from desktop_app.window import MainWindow
@@ -70,16 +71,7 @@ class SharedConversationUITests(unittest.TestCase):
             body = await request.json()
             return JSONResponse({"choices": [{"message": {"content": "AI: " + body["messages"][-1]["content"]},
                                                "finish_reason": "stop"}]})
-        self.host.network.runtime.app.router.routes.append(Route("/mock/v1/chat/completions", model, methods=["POST"]))
-        provider = AgentDialog(self.host, "bionic")
-        provider.show()
-        provider.name.setText("shared-model")
-        provider.base.setText(f"http://127.0.0.1:{self.host.port}/mock/v1")
-        provider.model.setCurrentText("test-model")
-        provider.key.setText("test-key")
-        QTest.mouseClick(provider.save_button, Qt.MouseButton.LeftButton)
-        self.wait(lambda: not provider.isVisible())
-        self.host.select_agent("shared-model")
+        connect_model(self, self.host, "shared-model", handler=model)
         self.send(self.host, "Before the guest joined")
         history = [{"role": role, "content": text}
                    for role, text in self.host.chats["shared-model"]["messages"]]
@@ -91,12 +83,8 @@ class SharedConversationUITests(unittest.TestCase):
         self.wait(lambda: bool(invite.result.toPlainText()))
         room_id = invite.conversation_id
         self.assertEqual(self.host.selected, room_id)
-        join = JoinDialog(self.guest)
-        join.show()
-        join.invitation.setPlainText(invite.result.toPlainText())
-        QTest.mouseClick(join.connect_button, Qt.MouseButton.LeftButton)
-        self.wait(lambda: not join.isVisible())
-        self.assertEqual(self.guest.selected, room_id)
+        join_workspace(self, self.guest, invite.result.toPlainText())
+        self.wait(lambda: self.guest.selected == room_id)
         for window in (self.host, self.guest):
             self.assertIn(room_id, window.conversations)
             self.assertGreaterEqual(window.conversation_picker.findData(room_id), 0)

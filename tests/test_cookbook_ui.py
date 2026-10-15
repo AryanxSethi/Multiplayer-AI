@@ -20,8 +20,9 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,  # noqa: E
                              QPushButton, QScrollArea, QWidget)
 
 from desktop_app import window as win  # noqa: E402
-from desktop_app.cookbook import (human_bytes, load_catalog,  # noqa: E402
-                                 pick_graphics_adapter, recommend)
+from desktop_app.cookbook import (Hardware, human_bytes,  # noqa: E402
+                                 load_catalog, pick_graphics_adapter,
+                                 recommend)
 from desktop_app.cookbook_panel import CARD  # noqa: E402
 
 # Every card frame the page can put on screen.
@@ -1342,7 +1343,12 @@ def test_a_refused_consent_is_not_left_half_remembered(window, monkeypatch) -> N
     def refuse_save():
         raise OSError("the preferences file is not writable")
 
-    monkeypatch.setattr(window.storage, "save", refuse_save)
+    # Patched at every guarded entry point rather than at save(). Settings are
+    # changed through update/discard/change now, which is what makes the write
+    # atomic with the mutation, so failing save() alone no longer reaches the
+    # path being tested here.
+    for name in ("save", "change", "update", "discard"):
+        monkeypatch.setattr(window.storage, name, refuse_save)
     window.command = lambda name, *args, **kwargs: None
     panel.refresh.click()
     settle()
@@ -3221,3 +3227,197 @@ def test_a_member_is_offered_no_way_to_invite_a_device(window, monkeypatch) -> N
     assert not opened, "a member opened the invitation dialog"
     assert window.stack.currentIndex() == before, (
         "a member was sent somewhere from an action that is not theirs to take")
+
+
+def test_a_refresh_reads_only_the_models_it_was_started_with(window) -> None:
+    """The step used to index the live catalogue, with a hard-coded fallback.
+
+    If the catalogue was shorter than the step's index -- which a Restore
+    pressed mid-refresh could arrange -- the step fell through to a literal
+    Qwen repository and fetched, attributed and merged a model nobody asked
+    for. With the target list fixed at the press there is no index to be out
+    of range of, and no fallback left to reach.
+    """
+    import inspect
+
+    from desktop_app import cookbook_panel
+
+    source = inspect.getsource(cookbook_panel.CookbookPanel._refresh_step)
+    assert "self.catalog[index]" not in source, (
+        "the step re-reads the live catalogue rather than the list it was given")
+    assert "Qwen/Qwen2.5-0.5B-Instruct" not in source, (
+        "the step still holds a fallback repository to fetch when it has no model")
+
+def test_a_refresh_can_be_stopped_and_keeps_what_it_already_read(window) -> None:
+    """A refresh is up to three requests a model at fifteen seconds each.
+
+    Four models is a minute and a half with no way to end it early, and the
+    Restore button stayed live throughout -- which is how a restore could
+    shorten the catalogue underneath the request in progress.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+
+    assert panel.refresh.isVisible(), "there is no way to see what refreshes"
+    assert panel.stop_refresh.isHidden(), "a Stop is offered when nothing is running"
+
+    asked = []
+    panel.window.command = lambda method, *args, **kwargs: (
+        asked.append(args[0]) if method == "cookbook_refresh" else None,
+        setattr(panel.window, "_pending", kwargs.get("failure")))[1]
+
+    panel.do_refresh()
+    assert not panel.refresh.isVisible(), (
+        "Refresh stayed on screen while a refresh was running, so there was "
+        "nothing to say the second press would do anything")
+    assert panel.stop_refresh.isVisible(), "a running refresh cannot be stopped"
+    assert not panel.restore.isEnabled(), (
+        "Restore stayed live during a refresh, and a restore can shorten the "
+        "catalogue the requests in flight are indexed against")
+    assert not panel.task_picker.isEnabled(), (
+        "the task filter stayed live during a refresh, which changes what the "
+        "page is showing while it is being re-read")
+
+    panel.cancel_refresh()
+    assert panel._cancelled, "Stop did not ask the refresh to end"
+
+    # Draining the remaining steps ends the run and hands the page back. Only
+    # the steps still outstanding: arriving at the end of the targets is a
+    # completed refresh, not a stopped one, so driving past it asserted that a
+    # Stop during the final request had ended the run early when it had not.
+    targets = repopulate(panel, 3)
+    for index in range(len(targets)):
+        panel._refresh_step(index, targets, {}, {}, targets)
+    assert panel.refresh.isVisible(), "the page was not handed back after a stop"
+    assert panel.refresh.isEnabled()
+    assert "stopped" in panel.catalog_note.text().lower(), (
+        f"a stopped refresh reports nothing about stopping: "
+        f"{panel.catalog_note.text()!r}")
+
+
+def test_a_stopped_refresh_still_reports_what_the_host_refused(window) -> None:
+    """Pressing Stop does not make the refusals go away.
+
+    The note dropped refused when the run was stopped, so it read the same
+    whether a model had been refused or had simply never been asked about --
+    which is the one distinction that tells a reader whether to expect the
+    model back on a later press.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    targets = repopulate(panel, 3)
+
+    panel._busy = True
+    panel._cancelled = True
+    refused = {targets[0].repo: "the host said no"}
+    panel._refresh_step(1, targets, {targets[1].repo: targets[1]}, refused, targets)
+    note = panel.catalog_note.text()
+    assert "Stopped after 1 of 3" in note, f"the count is wrong: {note!r}"
+    assert "the host said no" in note, (
+        f"a stopped refresh does not say what the host refused: {note!r}")
+
+
+def test_stopping_during_the_last_request_finishes_the_refresh(window) -> None:
+    """The last request is already in flight before Stop can be pressed.
+
+    Reaching the end of the targets is a refresh that completed. The
+    cancellation was checked first, so arriving there said stopped -- telling a
+    reader who pressed Stop just as the final model came back that the run had
+    been cut short when every model had in fact been read.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    targets = repopulate(panel, 3)
+
+    panel._busy = True
+    panel._cancelled = True
+    panel._refresh_step(len(targets), targets, {t.repo: t for t in targets}, {}, targets)
+    note = panel.catalog_note.text()
+    assert "Stopped" not in note, (
+        f"a refresh that read every target is reported as stopped: {note!r}")
+    assert panel.refresh.isVisible(), "the page was not handed back"
+
+
+def test_a_stopped_refresh_reports_against_the_whole_catalogue(window) -> None:
+    """A stop must not claim the catalogue was read to the end.
+
+    The note reports what was read out of what could have been. It was being
+    handed the number completed as its denominator, so stopping after one of
+    four said "Stopped after 1 of 1" -- the one claim on this page the reader
+    cannot check for themselves, and the one most likely to be acted on.
+    """
+    panel = panel_of(window)
+    window.show()
+    settle()
+    targets = repopulate(panel, 4)
+
+    panel._busy = True
+    panel._cancelled = True
+    panel._refresh_step(1, targets, {targets[0].repo: targets[0]}, {}, targets)
+    note = panel.catalog_note.text()
+    assert f"Stopped after 1 of {len(targets)}" in note, (
+        f"a stopped refresh does not say how much was left unread: {note!r}")
+
+
+def test_arriving_on_the_page_re_reads_what_this_device_has_free(window) -> None:
+    """The page ranks models by free memory, and read it once, at construction.
+
+    So the reader could open a browser after the app started and every "likely
+    to run" on the page would still be sized against whatever happened to be
+    free at launch -- the page making a claim about the machine that has
+    quietly stopped being true. Only showEvent re-read it, and only by then.
+    """
+    panel = panel_of(window)
+    before = panel.hardware
+    freed = Hardware(
+        platform=before.platform, architecture=before.architecture,
+        cpu_cores=before.cpu_cores,
+        memory_total=before.memory_total,
+        # A quarter of what it was: a browser and a build have opened since.
+        memory_available=int(before.memory_available * 0.75),
+        disk_free=before.disk_free, vram=before.vram,
+        unified_memory=before.unified_memory, sources=before.sources)
+
+    import desktop_app.cookbook_panel as module
+    original = module.detect_hardware
+    module.detect_hardware = lambda directory=None: freed
+    try:
+        panel._reread_hardware()
+    finally:
+        module.detect_hardware = original
+
+    assert panel.hardware is freed, (
+        "the page is still ranking models against the memory that was free "
+        "when it was built")
+    assert panel.hardware_label.text() == freed.describe(), (
+        f"the label still describes the panel that was built earlier: "
+        f"{panel.hardware_label.text()!r}")
+    assert panel.hardware.memory_available == freed.memory_available
+
+
+def test_a_visit_that_finds_nothing_changed_does_not_redraw(window) -> None:
+    """Re-detecting rebuilds every card and re-classifies the catalogue.
+
+    Arriving on a page should not visibly redraw it, and the common case is
+    that nothing has changed since last time -- so the figure has to move by
+    more than a rounding difference before anything is redrawn.
+    """
+    panel = panel_of(window)
+    use_a_stated_device(panel)
+    pinned = panel.hardware
+
+    import desktop_app.cookbook_panel as module
+    original = module.detect_hardware
+    # One per cent less: a rounding difference, not a change.
+    module.detect_hardware = lambda directory=None: Hardware(
+        **{**pinned.__dict__, "memory_available": int(pinned.memory_available * 0.99)})
+    try:
+        panel._reread_hardware()
+    finally:
+        module.detect_hardware = original
+
+    assert panel.hardware is pinned, (
+        "a one per cent difference in free memory rebuilt the whole page")

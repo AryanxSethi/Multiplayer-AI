@@ -40,7 +40,12 @@ class ProviderConfig:
     def __post_init__(self):
         """Reject invalid model, endpoint, limits, and enabled web search settings."""
         if not isinstance(self.model, str) or not self.model.strip():
-            raise ValueError("Choose a model with --model or A2A_MODEL")
+            # Said without naming --model or A2A_MODEL, because this object is
+            # also built from the desktop app's connection form, where a reader
+            # has never seen a command line and cannot act on either. The
+            # command-line caller rewrites this in adapters/__init__.py, which
+            # is the only place that knows there are flags to mention.
+            raise ValueError("Choose a model")
         if not isinstance(self.base_url, str):
             raise ValueError("Provider base URL is required")
         url = urlsplit(self.base_url)

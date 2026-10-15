@@ -159,6 +159,7 @@ class CookbookPanel(QWidget):
         super().__init__()
         self.window = window
         self._busy = False
+        self._cancelled = False
         self._page = 0
         # Set while a change to "Looking for" is waiting for its turn of the
         # event loop, so repeated presses collapse into one rebuild.
@@ -338,8 +339,15 @@ class CookbookPanel(QWidget):
         self.restore_mirror.setToolTip(
             "Go back to reading from huggingface.co. Only appears once a "
             "mirror has been set.")
+        # Takes Refresh's place while a refresh runs. A refresh is up to three
+        # requests per model at fifteen seconds each, so four models is a
+        # minute and a half with no way to stop it.
+        self.stop_refresh = action("Stop", self.cancel_refresh, name="ghost")
+        self.stop_refresh.setToolTip("Stop after the model currently being read.")
+        self.stop_refresh.setVisible(False)
         footer = QHBoxLayout()
         footer.addWidget(self.refresh)
+        footer.addWidget(self.stop_refresh)
         footer.addWidget(self.restore)
         footer.addWidget(self.restore_mirror)
         footer.addStretch()
@@ -374,12 +382,23 @@ class CookbookPanel(QWidget):
         self.load()
 
     def showEvent(self, event):
-        """Re-read the mirror each time the page is shown.
+        """Re-read the mirror and this device's memory each time the page is shown.
 
         A setting changed while this page was not on screen should not leave it
         describing a host it has stopped using -- the box, the button and the
         disclosure all name where the next request will go, and a stale name on
         those is the page making a claim it cannot keep.
+
+        The hardware is re-read for the same reason, and it matters more here.
+        The page ranks models by how much memory is free, and it read that once,
+        at construction, and never again -- so the reader could open a browser
+        after the app started and every "likely to run" on the page would still
+        be sized against whatever happened to be free at launch. It is a page
+        making a claim about the machine that has quietly stopped being true.
+
+        Only when the figure has actually moved, because re-detecting rebuilds
+        every card and re-classifies the catalogue, and arriving on a page
+        should not visibly redraw it.
 
         Skipped while the box has focus, so that arriving on the page does not
         overwrite what somebody is in the middle of typing.
@@ -395,6 +414,25 @@ class CookbookPanel(QWidget):
             f"Re-read model details from {self.host_name()}. Sends your network "
             "address and the model names being shown. Nothing is requested "
             "until you press this.")
+        self._reread_hardware()
+
+    def _reread_hardware(self, force=False):
+        """Re-detect this device, and redraw only if the memory has moved.
+
+        A percentage rather than an absolute figure, because "1% of 32GB" is a
+        rounding difference and "20% of 32GB" is a laptop having closed four
+        things. Two per cent keeps a slowly drifting background process from
+        repainting the page on every visit.
+        """
+        fresh = detect_hardware(
+            self.window.storage.directory if hasattr(self.window, "storage") else None)
+        before, after = self.hardware.memory_available, fresh.memory_available
+        if not force and before and after:
+            if abs(after - before) < before * 0.02:
+                return
+        self.hardware = fresh
+        self.hardware_label.setText(self.hardware.describe())
+        self.render_models()
 
     @property
     def base(self):
@@ -440,15 +478,22 @@ class CookbookPanel(QWidget):
             return
         self.mirror_error.setVisible(False)
 
-        previous = dict(self.window.storage.settings)
-        self.window.storage.settings["cookbook_source"] = None if not typed else host
+        settings = self.window.storage.settings
+        had_source = "cookbook_source" in settings
+        previous = settings.get("cookbook_source")
         try:
-            self.window.storage.save()
+            # update() persists under the storage lock itself, so this is the
+            # only write, and the only one that can fail.
+            self.window.storage.update(cookbook_source=None if not typed else host)
         except Exception as error:
             # Put the setting back rather than leaving the box showing a host
             # that was never saved, which would survive a restart and read as
-            # though it had taken.
-            self.window.storage.settings = previous
+            # though it had taken. Only this key, and only if it was there: a
+            # profile that never had a mirror must not gain one holding None.
+            if had_source:
+                settings["cookbook_source"] = previous
+            else:
+                settings.pop("cookbook_source", None)
             self.mirror_error.setText(f"That could not be saved: {error}")
             self.mirror_error.setVisible(True)
             return
@@ -518,6 +563,52 @@ class CookbookPanel(QWidget):
         """Enable the actions that have something to act on."""
         self.restore.setEnabled(bool(self.directory and self.directory.joinpath(
             PREVIOUS_NAME).is_file()))
+
+    def _set_busy(self, busy):
+        """Lock the page while a refresh is in flight, and swap Refresh for Stop.
+
+        Restore and the mirror box stayed live throughout a refresh before, which
+        is how a restore could shorten the catalogue underneath the request in
+        progress. They are controls that change what the refresh is reading, so
+        they are disabled for its duration rather than trusted to behave.
+        """
+        self._busy = busy
+        self.refresh.setEnabled(not busy)
+        self.refresh.setVisible(not busy)
+        if busy:
+            # cancel_refresh disables Stop and relabels it "Stopping." so a
+            # second press cannot queue another. That state outlived the run,
+            # so the next refresh began with a visible Stop that was dead and
+            # still said it was stopping: a run that could not be stopped.
+            self.stop_refresh.setEnabled(True)
+            self.stop_refresh.setText("Stop")
+        self.stop_refresh.setVisible(busy)
+        # The button carries the progress while it runs, so putting it back is
+        # part of ending the run rather than something the caller has to
+        # remember to do on each path out.
+        if not busy:
+            self.refresh.setText(f"Refresh from {self.host_name()}")
+        self.restore.setEnabled(not busy and bool(self.directory and
+                                                 self.directory.joinpath(PREVIOUS_NAME).is_file()))
+        self.restore_mirror.setEnabled(not busy)
+        # The two controls that change the mirror itself, rather than undoing
+        # a save of it. They change what the refresh is reading, which is the
+        # same reason restore is off: the requests in flight are answered
+        # against the host that was set when they were issued.
+        self.mirror.setEnabled(not busy)
+        self.use_mirror.setEnabled(not busy)
+        self.task_picker.setEnabled(not busy)
+
+    def cancel_refresh(self):
+        """Ask the refresh to stop after the model it is reading.
+
+        The request in flight is not abandoned -- there is nothing to abandon
+        it with -- but no further ones are issued, and whatever has already
+        come back is kept.
+        """
+        self._cancelled = True
+        self.stop_refresh.setEnabled(False)
+        self.stop_refresh.setText("Stopping.")
 
     def render_models(self):
         """Rebuild the list from the first page.
@@ -1263,22 +1354,25 @@ class CookbookPanel(QWidget):
 
     def remember_consent(self, host):
         """Record the agreement, and refuse to keep it if it cannot be saved."""
-        settings = self.window.storage.settings
-        previous = settings.get("cookbook_refresh_ok")
-        agreed = dict(previous) if isinstance(previous, dict) else {}
-        agreed[host] = True
-        settings["cookbook_refresh_ok"] = agreed
+        storage = self.window.storage
+        previous = storage.settings.get("cookbook_refresh_ok")
         try:
-            self.window.storage.save()
+            storage.change(lambda settings: settings.__setitem__(
+                "cookbook_refresh_ok",
+                {**(previous if isinstance(previous, dict) else {}), host: True}))
         except Exception as error:
             # Put it back rather than leaving a remembered agreement that did
             # not survive a restart: the reader would not be warned again this
             # session and would be warned again next time, which is worse than
-            # not remembering at all.
-            if previous is None:
-                settings.pop("cookbook_refresh_ok", None)
-            else:
-                settings["cookbook_refresh_ok"] = previous
+            # not remembering at all. Guarded again, because this is a second
+            # write to the dict another thread may be reading.
+            try:
+                if previous is None:
+                    storage.discard("cookbook_refresh_ok")
+                else:
+                    storage.update(cookbook_refresh_ok=previous)
+            except Exception:
+                pass
             self.catalog_note.setText(f"That could not be saved: {error}")
 
     def do_refresh(self):
@@ -1318,24 +1412,46 @@ class CookbookPanel(QWidget):
         updated = {}
         refused = {}
         self._busy = True
-        self.refresh.setEnabled(False)
-        self._refresh_step(0, len(targets), updated, refused, before)
+        self._cancelled = False
+        # targets is passed down rather than re-read from self.catalog at each
+        # step. The step used to index the live list, and the Restore button
+        # stayed enabled throughout a refresh, so a restore mid-refresh could
+        # shorten the catalogue and leave the step out of range -- at which
+        # point it fell back to a hard-coded Qwen repo and fetched, attributed
+        # and merged a model nobody asked for.
+        self._set_busy(True)
+        self._refresh_step(0, targets, updated, refused, before)
 
-    def _refresh_step(self, index, total, updated, refused, before):
+    def _refresh_step(self, index, targets, updated, refused, before):
         """Re-read one model, then either finish or ask for the next.
 
         Sequential rather than concurrent, so the host sees one request at a
         time from a button press, and so the progress on the button means
         something: "2 of 4" is a fact about work already done.
+
+        With no fallback branch, because there is no longer any way to reach
+        this line without a model: targets is fixed when the press began, so
+        index < len(targets) always holds.
         """
+        total = len(targets)
         if index >= total:
+            # Checked before the cancellation, because the last request is
+            # issued before the button can be pressed. Stop during it and this
+            # is reached with index == total: the refresh did finish, and calling
+            # it a stop told the reader it ended early when it did not.
             self._finish_refresh(total, updated, refused, before)
             return
+        if self._cancelled:
+            # index, not total: the note reports what was read out of what could
+            # have been, and index is how many were. Passing total there made a
+            # stop after 3 of 4 say "Stopped after 3 of 3" -- the one claim the
+            # reader cannot check and is most likely to believe.
+            self._finish_refresh(total, updated, refused, before, stopped=True)
+            return
 
-        model = self.catalog[index] if index < len(self.catalog) else None
-        repo = model.repo if model else "Qwen/Qwen2.5-0.5B-Instruct"
-        artifacts = (model.artifact_repo if model
-                     else "bartowski/Qwen2.5-0.5B-Instruct-GGUF")
+        model = targets[index]
+        repo = model.repo
+        artifacts = model.artifact_repo
 
         def landed(result):
             try:
@@ -1345,24 +1461,33 @@ class CookbookPanel(QWidget):
                                  f"{error}")
             else:
                 updated[record.repo] = record
-            self._refresh_step(index + 1, total, updated, refused, before)
+            self._refresh_step(index + 1, targets, updated, refused, before)
 
         def missed(reason):
             refused[repo] = reason
-            self._refresh_step(index + 1, total, updated, refused, before)
+            self._refresh_step(index + 1, targets, updated, refused, before)
 
         self.refresh.setText(f"Refreshing {index + 1} of {total} from "
                              f"{self.host_name()}.")
         self.window.command("cookbook_refresh", repo, artifacts, self.base,
                             success=landed, failure=missed)
 
-    def _finish_refresh(self, total, updated, refused, before):
-        """Merge what came back, say what did not, and save it once."""
+    def _finish_refresh(self, total, updated, refused, before, stopped=False):
+        """Merge what came back, say what did not, and save it once.
+
+        ``stopped`` means the reader pressed Stop, not that the host refused.
+        Whatever had already arrived is kept and saved, because discarding a
+        successful read because the reader changed their mind about the rest
+        would throw away work that cost a request to obtain.
+        """
         self._busy = False
-        self.refresh.setEnabled(True)
-        self.refresh.setText(f"Refresh from {self.host_name()}")
+        self._set_busy(False)
 
         if not updated:
+            if stopped:
+                self.catalog_note.setText("Refresh stopped before anything came back.")
+                self.refresh_controls()
+                return
             first = next(iter(refused.values()), "the request was refused")
             self.catalog_note.setText(
                 f"{self.host_name()} could not be read: {first}")
@@ -1391,11 +1516,11 @@ class CookbookPanel(QWidget):
 
         self.catalog = merged
         self.catalog_note.setText(self._refresh_note(total, updated, refused,
-                                                     read, note, saved))
+                                                     read, note, saved, stopped))
         self.refresh_controls()
         self.render_models()
 
-    def _refresh_note(self, total, updated, refused, read, note, saved):
+    def _refresh_note(self, total, updated, refused, read, note, saved, stopped=False):
         """One sentence saying what this press actually achieved.
 
         A partial refresh that reported plain success would be the wrong claim
@@ -1403,10 +1528,19 @@ class CookbookPanel(QWidget):
         some models and not others, and the reader would otherwise assume the
         whole list is current.
         """
-        if not refused:
-            return (f"Read {read} from {self.host_name()}. {note}{saved}")
         problems = "; ".join(f"{repo}: {reason}" for repo, reason
                              in sorted(refused.items()))
+        if stopped:
+            # The refusals happened before the reader pressed Stop, and a note
+            # that dropped them read the same whether a model had been refused
+            # or had never been asked about. They are part of what this press
+            # achieved, so they are reported however it ended.
+            also = (f", but {len(refused)} could not be: {problems}"
+                    if refused else "")
+            return (f"Stopped after {len(updated)} of {total}. Read {read} from "
+                    f"{self.host_name()}{also}. {note}{saved}")
+        if not refused:
+            return (f"Read {read} from {self.host_name()}. {note}{saved}")
         return (f"Read {read} from {self.host_name()}, but {len(refused)} of "
                 f"{total} could not be: {problems}. {note}{saved}")
 

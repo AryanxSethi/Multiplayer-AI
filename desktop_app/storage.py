@@ -274,8 +274,48 @@ class Storage:
         return self.root.directory / "pending-deletions.json"
 
     def save(self):
-        """Atomically persist preferences and report whether durability was confirmed."""
+        """Atomically persist preferences and report whether durability was confirmed.
+
+        Takes the lock so the serialisation cannot interleave with another
+        thread's write, but it cannot guard a mutation that already happened --
+        the dict is handed out by reference and the GUI thread and the network
+        loop both hold it. Settings are therefore changed through update(),
+        discard() and change(), which take the same lock around the mutation
+        and the write together. Calling save() on its own is right only when
+        the change was made by a collaborator already holding the lock.
+        """
         with self.lock:
+            return write_json_durably(self.path, json.dumps(self.settings, indent=2))
+
+    def update(self, **changes):
+        """Set keys and persist, holding one lock across both.
+
+        The lock has to cover the mutation and the serialisation together, not
+        each separately: taking it twice leaves the window between them, and a
+        write landing in that window is a RuntimeError out of json.dumps --
+        "dictionary changed size during iteration" -- which surfaces at
+        whichever command happened to be running, rather than as what it is.
+        """
+        with self.lock:
+            self.settings.update(changes)
+            return write_json_durably(self.path, json.dumps(self.settings, indent=2))
+
+    def discard(self, *keys):
+        """Remove keys and persist, under the same single lock."""
+        with self.lock:
+            for key in keys:
+                self.settings.pop(key, None)
+            return write_json_durably(self.path, json.dumps(self.settings, indent=2))
+
+    def change(self, mutate):
+        """Apply a read-modify-write to settings and persist, under one lock.
+
+        For the cases where the new value depends on the old one, which
+        update() cannot express and which must not be split into a read
+        outside the lock and a write inside it.
+        """
+        with self.lock:
+            outcome = mutate(self.settings)
             return write_json_durably(self.path, json.dumps(self.settings, indent=2))
 
     @property
@@ -512,8 +552,11 @@ class Storage:
         self.recover_agent_save()
         for agent_id, config in credentials.items():
             self.vault.set("relay:" + agent_id, config["token"])
-        self.settings["identities"] = {agent_id: config["group"] for agent_id, config in credentials.items()}
-        self.save()
+        # Through update(), not a bare assignment plus save(): the identity
+        # write happens on the network thread while the GUI thread may be
+        # changing the theme in this same dict.
+        self.update(identities={agent_id: config["group"]
+                                for agent_id, config in credentials.items()})
 
     # --- credentials that could not be deleted ---------------------------
     #

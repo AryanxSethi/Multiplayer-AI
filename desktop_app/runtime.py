@@ -158,14 +158,45 @@ class DesktopRuntime:
                 engine = self.engines[workspace_id]
                 state = engine.history_store.load("ui").get("state", {})
                 previous = state.get("conversations", {})
-                state["conversations"] = {room["id"]: room for room in data}
                 chats = state.setdefault("chats", {})
+                # Nothing to do when every room already carries the revision we
+                # last wrote. This branch runs for every workspace on every poll
+                # tick, three seconds apart, for as long as the app is open --
+                # and the rewrite below is the whole archive: every room, every
+                # message, plus state["conversations"], which keeps the rooms
+                # raw so attachments stay as the base64 they arrived as. On a
+                # workspace holding a few images that is megabytes re-encoded
+                # into SQLite twenty times a minute to reproduce what was
+                # already on disk.
+                #
+                # The same guard the window applies to the workspace on screen
+                # (network_event, "conversations"). A revision is the room's
+                # own account of what has changed, so an unchanged one means
+                # the copy on disk is already correct.
+                rooms = {room["id"]: room for room in data}
+                # A room that has vanished is a change too. Leaving it out of
+                # the guard would mean a conversation deleted on another device
+                # stayed in this workspace's archive for ever, because the only
+                # code that removes it is the code this guard now skips.
+                dropped = [key for key in chats
+                           if key.startswith("conversation-") and key not in rooms]
+                # previous == rooms as well. The revisions are the rooms' own
+                # account of themselves, but state["conversations"] is stored
+                # separately, and a switch of the room on screen does not go
+                # through this. So the two can disagree while every revision
+                # still matches, and returning here is what stops them ever
+                # agreeing again: the write this guard skips is the only one
+                # that would copy the rooms across.
+                if (not dropped and previous == rooms
+                        and all(chats.get(room_id, {}).get("revision") == room["revision"]
+                                for room_id, room in rooms.items())):
+                    return
+                state["conversations"] = rooms
                 # Rooms that dropped off the listing are gone, and their saved
                 # chats go with them. Only added to before, so a conversation
                 # deleted on another device stayed in this workspace's archive
                 # for good, and came back if the room ever reappeared.
-                for target in [key for key in chats
-                               if key.startswith("conversation-") and key not in state["conversations"]]:
+                for target in dropped:
                     del chats[target]
                 for room in data:
                     chat = chats.setdefault(room["id"], {"messages": [], "history": []})
@@ -198,9 +229,7 @@ class DesktopRuntime:
         if entry["id"] in self.engines:
             return self.engines[entry["id"]]
         scoped = self.scoped_storage(entry)
-        scoped.settings["workspace_name"] = entry["name"]
-        scoped.settings["workspace_id"] = entry["id"]
-        scoped.save()
+        scoped.update(workspace_name=entry["name"], workspace_id=entry["id"])
         engine = WorkspaceRuntime(scoped, lambda event, data: self.forward(entry["id"], event, data),
                                   restore_remote=entry["kind"] == "remote", ollama_service=self.ollama_service)
         self.engines[entry["id"]] = engine
@@ -242,11 +271,11 @@ class DesktopRuntime:
         if not self.catalog_path.exists() and saved and self.storage.vault.get("remote-token"):
             entry = {"id": "workspace-" + uuid4().hex, "name": "Shared workspace", "kind": "remote", "url": saved["url"]}
             scoped = self.scoped_storage(entry)
-            scoped.settings["remote"] = saved
+            scoped.update(remote=saved)
             scoped.vault.set("remote-token", self.storage.vault.get("remote-token"))
             profile = self.storage.settings.get("remote_agent")
             if profile:
-                scoped.settings["remote_agent"] = profile
+                scoped.update(remote_agent=profile)
                 for prefix in ("provider:", "search:"):
                     key = self.storage.vault.get(prefix + profile["id"])
                     if key:
@@ -303,8 +332,7 @@ class DesktopRuntime:
             if self.entry()["kind"] != "local":
                 raise ValueError("Only the workspace owner can rename it")
             self.entry()["name"] = name
-            self.engine.storage.settings["workspace_name"] = name
-            self.engine.storage.save()
+            self.engine.storage.update(workspace_name=name)
             self.save_catalog()
             await self.snapshot()
 
@@ -313,8 +341,7 @@ class DesktopRuntime:
         if not local:
             return await self.create_workspace("My workspace")
         if forget_remote:
-            self.storage.settings.pop("remote", None)
-            self.storage.save()
+            self.storage.discard("remote")
         await self.switch_workspace(local["id"])
 
     async def reset_identity(self):
@@ -378,9 +405,8 @@ class DesktopRuntime:
             self.active_workspace_id = entry["id"]
             self.catalog["active"] = entry["id"]
             if save:
-                self.storage.settings["remote"] = {"url": url, "allow_insecure": allow_insecure}
+                self.storage.update(remote={"url": url, "allow_insecure": allow_insecure})
                 self.storage.vault.set("remote-token", token)
-                self.storage.save()
             self.save_catalog()
             await self.snapshot()
             if conversation_id:
@@ -537,10 +563,9 @@ class DesktopRuntime:
         if directory is None:
             # Only the local workspace's own keys and its chat archive are
             # cleared; the root directory itself must survive.
-            for key in ("identities", "device_id", "agents", "remote", "remote_agent",
-                        "share_lan", "relay_port", "workspace_name", "workspace_id", "agent_save_revision"):
-                storage.settings.pop(key, None)
-            storage.save()
+            storage.discard("identities", "device_id", "agents", "remote",
+                            "remote_agent", "share_lan", "relay_port",
+                            "workspace_name", "workspace_id", "agent_save_revision")
             HistoryStore(storage.directory).clear()
         elif directory.exists():
             # settings.json and history.sqlite3 both live here. Errors are
@@ -581,9 +606,7 @@ class DesktopRuntime:
             return []
         remaining = [name for name in names
                      if self.storage.vault.delete(name) == UNAVAILABLE]
-        self.storage.settings.pop("remote", None)
-        self.storage.settings.pop("remote_agent", None)
-        self.storage.save()
+        self.storage.discard("remote", "remote_agent")
         return remaining
 
     def pending_cleanup_count(self):

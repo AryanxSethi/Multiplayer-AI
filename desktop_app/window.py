@@ -72,7 +72,12 @@ PAGES = (
     ("Cookbook", "cookbook"),
     ("Settings", "settings"),
 )
-PAGE_TITLES = tuple(f"#  {key}" for _, key in PAGES)
+# The titles are plain text and styled as a heading. They used to carry a
+# leading "#  ", which looked right in the source and was painted on screen:
+# label() pins Qt.TextFormat.PlainText, so the hash was never markdown, it was
+# a character in the largest text in the window, on every page, every session.
+# The two chat empty states had the same prefix for the same reason.
+PAGE_TITLES = tuple(key for _, key in PAGES)
 # Looked up by key rather than counted. Adding a page used to shift every
 # index below it, which broke the Ctrl+5 and Ctrl+, shortcuts without
 # anything failing: the numbers were still in range, just pointing at the
@@ -211,6 +216,13 @@ class MainWindow(QMainWindow):
         self.toast_error = False
         self.request_count = 0
         self.ready = False
+        # Whether the relay has answered since the runtime came up. None until
+        # it has, which is the case command() must not refuse on: "not heard
+        # from yet" and "heard from, and then lost" look identical from here
+        # but need opposite behaviour, and only the second one is worth a
+        # refusal. True on an agents event that reached the relay, False once an
+        # offline event arrives.
+        self.connected = None
         self.closing = False
         self.preparing_files = False
         self.setWindowTitle("Multiplayer AI")
@@ -261,6 +273,9 @@ class MainWindow(QMainWindow):
         rail_layout.setSpacing(16)
         home = WorkspaceButton("M")
         home.setToolTip("Your local workspace")
+        # The button's text is "M", which a screen reader announces as "M,
+        # button". The name it carries is the same sentence the tooltip does.
+        home.setAccessibleName("Your local workspace")
         home.clicked.connect(lambda: self.command("use_local"))
         rail_layout.addWidget(home)
         workspace_scroll = QScrollArea()
@@ -279,12 +294,17 @@ class MainWindow(QMainWindow):
         join.setIconSize(QSize(24, 24))
         join.set_ink("success")
         join.setToolTip("Create or join a workspace")
+        # Empty text and an icon, so without this it is announced as nothing at
+        # all -- a 48x48 control in the rail that a screen reader walks past.
+        join.setAccessibleName("Create or join a workspace")
         refresh_join_icon(self, self.theme)
         join.clicked.connect(self.add_workspace)
         rail_layout.addWidget(join)
         self.help_button = WorkspaceButton("?")
         self.help_button.clicked.connect(self.open_documentation)
         self.help_button.setToolTip("Project documentation")
+        # Announced as "question mark, button" otherwise.
+        self.help_button.setAccessibleName("Project documentation")
         rail_layout.addWidget(self.help_button)
         shell.addWidget(rail)
         sidebar, outer = frame("sidebar")
@@ -308,8 +328,9 @@ class MainWindow(QMainWindow):
         workspace_heading = QHBoxLayout()
         workspace_heading.addWidget(self.workspace_label, 1)
         self.sidebar_close = action("×", self.toggle_sidebar, name="ghost")
-        self.sidebar_close.setFixedSize(26, 26)
+        self.sidebar_close.setFixedSize(28, 28)
         self.sidebar_close.setToolTip("Close the sidebar")
+        self.sidebar_close.setAccessibleName("Close the sidebar")
         workspace_heading.addWidget(self.sidebar_close)
         side.addLayout(workspace_heading)
         self.workspace_settings_button = action("Workspace settings", self.manage_workspace, name="ghost")
@@ -336,10 +357,21 @@ class MainWindow(QMainWindow):
             if key != "cookbook":
                 side.addWidget(button)
         side.addStretch(1)
-        self.connection_status = label("●  Starting your network…", "online", True)
+        # statusWarn, not a success: this device has no relay yet, which is what
+        # starting up looks like. The four states are named rather than implied,
+        # because this line is the one piece of status always on screen and it
+        # used to be green through every failure it could report.
+        self.connection_status = label("●  Starting your network…", "statusWarn", True)
         self.connection_status.setToolTip(
             "Whether this device is talking to its own relay. Unlocked keys are needed to send.")
         side.addWidget(self.connection_status)
+        # The only retry anywhere in the app. Hidden unless the relay has been
+        # heard from and then lost; see set_connection_state.
+        self.connection_retry = action("Retry", self.retry_connection, name="ghost")
+        self.connection_retry.setAccessibleName("Retry the connection to the relay")
+        self.connection_retry.setToolTip("Ask the relay for an update now, without waiting")
+        self.connection_retry.setVisible(False)
+        side.addWidget(self.connection_retry)
         profile, row = frame("profile", QHBoxLayout)
         row.setContentsMargins(12, 11, 12, 12)
         row.setSpacing(10)
@@ -368,7 +400,7 @@ class MainWindow(QMainWindow):
         top, top_layout = frame("topbar", QHBoxLayout)
         top.setFixedHeight(68)
         top_layout.setContentsMargins(28, 0, 25, 0)
-        self.page_title = label("#  overview", "heading")
+        self.page_title = label("overview", "heading")
         self.sidebar_toggle = action("Menu", self.toggle_sidebar, name="ghost")
         self.sidebar_toggle.setToolTip("Show workspace navigation")
         top_layout.addWidget(self.sidebar_toggle)
@@ -427,7 +459,15 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.chat_page())
         self.stack.addWidget(self.providers_page())
         self.stack.addWidget(self.resources_page())
-        self.stack.addWidget(self.cookbook_page())
+        # A placeholder in the Cookbook's place, not the page itself. Building
+        # it costs a hardware probe, and that probe runs nvidia-smi with a
+        # three second timeout -- on the GUI thread, during build_ui, before
+        # anything is on screen. So every launch paid up to three seconds of
+        # frozen window, on a machine that has an NVIDIA card, to construct a
+        # page most sessions never open. It is built the first time it is
+        # navigated to instead.
+        self.stack.addWidget(self._cookbook_placeholder())
+        self.cookbook_panel = None
         self.stack.addWidget(self.settings_page())
         body_layout.addWidget(self.stack, 1)
         shell.addWidget(body, 1)
@@ -560,6 +600,19 @@ class MainWindow(QMainWindow):
         choices.addStretch()
         hero_words.addLayout(choices)
         layout.addWidget(self.welcome_card)
+        # State, not a toast, for a startup that failed. The toast is gone in
+        # seven and a half seconds, and a fatal is the one event the app cannot
+        # recover from by itself: the controls it disables stay disabled, so
+        # after the toast the window was full of things that would not work
+        # and no reason why. Shaped like pending_cleanup for the same reason.
+        #
+        # On the page rather than inside the welcome card, which hides itself
+        # as soon as there is a conversation to show, because a fatal must be
+        # readable whatever else the window holds.
+        self.startup_error = label("", "errorMessage", True)
+        self.startup_error.setVisible(False)
+        self.startup_error.setWordWrap(True)
+        layout.addWidget(self.startup_error)
 
         # Everything the welcome replaces, kept as one widget so it can be
         # hidden as a unit rather than six pieces.
@@ -576,6 +629,12 @@ class MainWindow(QMainWindow):
             column.setContentsMargins(18, 15, 18, 15)
             column.addWidget(label(title, "muted"))
             value = action("0", self.show_workspace_agents, name="statValue") if index == 0 else label("0", "statValue")
+            # The title and the subtitle are siblings of the value, not children
+            # of it, so the button's own name was the digit alone -- announced
+            # as "0, button". The subtitle is also the only place the click
+            # affordance is written down, and a pointer-only hint is a hint no
+            # keyboard or screen reader user ever receives.
+            value.setAccessibleName(f"{title}. {subtitle}.")
             if index == 0:
                 value.setFlat(True)
             column.addWidget(value)
@@ -627,6 +686,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("CONNECTED", "eyebrow"))
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search agents or models…")
+        # Without this the field is announced as an editable line with nothing
+        # but its placeholder, which is the one part of a screen reader's
+        # reading that can change under the reader's hands.
+        self.search.setAccessibleName("Search connected agents and models")
+        self.search.setAccessibleDescription(
+            "Filters the agents below by name, model or provider.")
         self.search.textChanged.connect(self.render_agents)
         layout.addWidget(self.search)
         self.agent_cards = QGridLayout()
@@ -952,7 +1017,12 @@ class MainWindow(QMainWindow):
             column.addWidget(label(info[0], "heading"))
             column.addWidget(label(info[1], "muted", True))
             column.addSpacing(10)
-            column.addWidget(action("Connect model  →", lambda checked=False, key=provider: self.add_agent(key), True))
+            # Ten of these, one per provider, all with the same text. A screen
+            # reader hears "Connect model, button" ten times and cannot tell
+            # them apart; the logo beside it is named, so the button should be.
+            connect = action("Connect model  →", lambda checked=False, key=provider: self.add_agent(key), True)
+            connect.setAccessibleName(f"Connect a {info[0]} model")
+            column.addWidget(connect)
             grid.addWidget(card, index // 2, index % 2)
         layout.addLayout(grid)
         layout.addStretch()
@@ -1246,7 +1316,20 @@ class MainWindow(QMainWindow):
                 "Pick a theme to override it."
             )
         else:
-            self.theme_hint.setText("Your choice is remembered and overrides the system.")
+            # Name the theme in force. "Your choice is remembered and overrides
+            # the system" describes the mechanism and never says what the reader
+            # is now looking at, so picking a theme from the list gave no way to
+            # confirm which one took effect.
+            #
+            # Kept no longer than the sentence it replaces. This sits on the
+            # Settings page, and a longer hint wraps, grows the card and moves
+            # the controls below it -- which is a page-wide layout change
+            # arriving as a theme feature.
+            picked = next((name for name, value in THEME_CHOICES if value == stored), None)
+            self.theme_hint.setText(
+                f"{picked} theme, remembered, overriding your system."
+                if picked else
+                "Your choice is remembered and overrides the system.")
 
     def theme_choice_changed(self, index):
         """Persist the picked theme and apply it.
@@ -1259,15 +1342,13 @@ class MainWindow(QMainWindow):
             return
         name = THEME_CHOICES[index][1]
         if name is None:
-            self.storage.settings.pop("theme", None)
-            # Saved here too, not just in the branch below: removing the
-            # preference must persist immediately, or the theme reappears
-            # on next launch because nothing else wrote the file yet.
-            self.storage.save()
+            # discard() persists under the lock, which is also why removing the
+            # preference takes effect at once: otherwise the theme reappears on
+            # next launch because nothing else wrote the file yet.
+            self.storage.discard("theme")
             self.apply_theme(resolve_theme({}))
         else:
-            self.storage.settings["theme"] = name
-            self.storage.save()
+            self.storage.update(theme=name)
             self.apply_theme(name)
         self.update_theme_hint()
 
@@ -1346,8 +1427,7 @@ class MainWindow(QMainWindow):
     def theme_changed(self, light):
         """Persist the theme chosen in the UI and apply it."""
         name = LIGHT if light else DARK
-        self.storage.settings["theme"] = name
-        self.storage.save()
+        self.storage.update(theme=name)
         self.apply_theme(name)
 
     def launch_screen_changed(self, wanted):
@@ -1357,12 +1437,10 @@ class MainWindow(QMainWindow):
         own. It only takes effect on the next start; the screen is
         already up or already gone by the time anybody can reach this.
         """
-        self.storage.settings["launch_screen"] = bool(wanted)
-        self.storage.save()
+        self.storage.update(launch_screen=bool(wanted))
 
     def motion_changed(self, reduced):
-        self.storage.settings["reduce_motion"] = reduced
-        self.storage.save()
+        self.storage.update(reduce_motion=reduced)
         if reduced and hasattr(self, "page_animation"):
             self.page_animation.stop()
             effect = self.stack.currentWidget().graphicsEffect()
@@ -1438,8 +1516,33 @@ class MainWindow(QMainWindow):
                 row.addWidget(label("Managed on its device", "muted"))
             self.imported_model_rows.addWidget(card)
 
+    def _cookbook_placeholder(self):
+        """The Cookbook's slot in the stack until somebody opens it.
+
+        A plain widget rather than None: QStackedWidget needs a real widget at
+        every index so that navigate() can select by index and the keyboard
+        shortcuts keep pointing at the right page.
+        """
+        placeholder = QWidget()
+        placeholder.setObjectName("cookbookPlaceholder")
+        return placeholder
+
+    def _build_cookbook_page(self):
+        """Build the Cookbook the first time it is opened, and only then."""
+        if self.cookbook_panel is not None:
+            return
+        placeholder = self.stack.widget(COOKBOOK_PAGE)
+        previous = self.stack.currentIndex()
+        self.stack.removeWidget(placeholder)
+        placeholder.deleteLater()
+        self.cookbook_panel = None
+        self.stack.insertWidget(COOKBOOK_PAGE, self.cookbook_page())
+        self.stack.setCurrentIndex(previous)
+
     def navigate(self, index):
         """Select a page, update navigation, and sample resources only while visible."""
+        if index == COOKBOOK_PAGE:
+            self._build_cookbook_page()
         self.sidebar_expanded = False
         self.apply_sidebar_density()
         self.stack.setCurrentIndex(index)
@@ -1465,11 +1568,21 @@ class MainWindow(QMainWindow):
             self.page_animation = animation
             animation.start()
 
+    def clear_agent_search(self):
+        """Empty the search box, from the empty state that offers to.
+
+        Clearing it rather than hiding the field: the reader can see that the
+        filter was what hid their team, rather than having it disappear and
+        leave them guessing.
+        """
+        self.search.clear()
+        self.search.setFocus()
+
     def render_agents(self):
         """Refresh model listings while retaining unchanged cards and scroll positions."""
         models = self.model_agents()
         for grid, agents in ((self.overview_cards, models[:3]),
-                             (self.agent_cards, [agent for agent in models if self.search.text().lower() in f"{agent['id']} {agent.get('model') or ''}".lower()])):
+                             (self.agent_cards, [agent for agent in models if self.search.text().lower() in f"{agent['id']} {agent.get('model') or ''} {agent.get('provider') or ''}".lower()])):
             signature = (self.workspace_id, self.theme, json.dumps(agents, sort_keys=True))
             if getattr(grid, "render_signature", None) == signature:
                 continue
@@ -1477,8 +1590,31 @@ class MainWindow(QMainWindow):
             clear_layout(grid)
             if not agents:
                 card, column = frame("card")
-                column.addWidget(label("Your team is getting ready.", "heading"))
-                column.addWidget(label("Connect a model or invite a device to collaborate.", "muted", True))
+                # Matches the agent cards below it in the same grid. It was
+                # left at Qt's default, which is 11px against their 18/17 --
+                # so the empty state sat in a visibly tighter box than the
+                # cards it stands in for, on the one screen where the
+                # difference is easiest to notice. The Cookbook fixed the same
+                # class of defect on its own page with a CARD_PADDING constant.
+                column.setContentsMargins(18, 17, 18, 17)
+                # Two different situations, and they are not interchangeable.
+                # "Your team is getting ready" is a claim about the reader's
+                # own setup, and with a search box open it was being made while
+                # a nine-model team was connected and simply did not match what
+                # was typed. This is the Cookbook's empty_reason() rule: say
+                # which situation this is, never let one stand in for another.
+                query = self.search.text().strip()
+                if query:
+                    column.addWidget(label(f"No agents match “{query}”.", "heading", True))
+                    column.addWidget(label(
+                        f"{len(self.agents)} are connected. The search looks at names, models and providers.",
+                        "muted", True))
+                    column.addSpacing(7)
+                    clear = action("Clear search", self.clear_agent_search, name="ghost")
+                    column.addWidget(clear)
+                else:
+                    column.addWidget(label("Your team is getting ready.", "heading"))
+                    column.addWidget(label("Connect a model or invite a device to collaborate.", "muted", True))
                 grid.addWidget(card, 0, 0)
             for index, agent in enumerate(agents):
                 card, column = frame("card")
@@ -1497,12 +1633,22 @@ class MainWindow(QMainWindow):
                 talk = action("Open conversation  →", lambda checked=False, id=agent["id"]: self.select_agent(id))
                 talk.setEnabled(agent["online"])
                 talk.setToolTip(f"Start a conversation with {agent['id']}")
+                talk.setAccessibleName(f"Open a conversation with {agent['id']}")
                 column.addWidget(talk)
                 if agent.get("profile"):
                     row = QHBoxLayout()
-                    row.addWidget(action("Edit", lambda checked=False, data=agent: self.edit_agent(data), name="ghost"))
+                    # A column of identical "Edit" and "Stop" buttons, one pair
+                    # per card. Each names the agent it belongs to, for the same
+                    # reason the Remove button on a file does.
+                    edit = action("Edit", lambda checked=False, data=agent: self.edit_agent(data), name="ghost")
+                    edit.setToolTip(f"Edit the settings for {agent['id']}")
+                    edit.setAccessibleName(f"Edit the settings for {agent['id']}")
+                    row.addWidget(edit)
                     if agent.get("local"):
-                        row.addWidget(action("Stop", lambda checked=False, id=agent["id"]: self.command("stop_agent", id), name="ghost"))
+                        stop = action("Stop", lambda checked=False, id=agent["id"]: self.command("stop_agent", id), name="ghost")
+                        stop.setToolTip(f"Stop {agent['id']} on this device")
+                        stop.setAccessibleName(f"Stop {agent['id']} on this device")
+                        row.addWidget(stop)
                     column.addLayout(row)
                 grid.addWidget(card, index // 3 if grid is self.overview_cards else index // 2,
                                index % 3 if grid is self.overview_cards else index % 2)
@@ -2216,12 +2362,12 @@ class MainWindow(QMainWindow):
             # agent" told a first-run user they had already started one.
             if self.selected:
                 self.messages.addWidget(
-                    label("#  This is the beginning of your collaboration.", "heading", True))
+                    label("This is the beginning of your collaboration.", "heading", True))
                 self.messages.addWidget(
                     label("Ask a question, explore an idea, or simply say hello.", "muted", True))
             else:
                 self.messages.addWidget(
-                    label("#  No conversation open", "heading", True))
+                    label("No conversation open", "heading", True))
                 self.messages.addWidget(
                     label("Choose a saved conversation above, open an agent from Agents, or connect a "
                           "model from Providers to start one.", "muted", True))
@@ -2569,6 +2715,15 @@ class MainWindow(QMainWindow):
             if failure:
                 failure("Networking is still starting")
             return
+        # Nothing here gates on whether the relay answered, which is worth
+        # recording because it was tried. Refusing commands while "offline"
+        # looked principled and was not: a single offline event during startup
+        # set the flag, and the poll backs off to a five minute ceiling, so the
+        # reader could be refused for minutes after the relay was fine again --
+        # including on the one command that would have fixed it. A stale network
+        # flag is worse than a failed request, because the failed request says
+        # what went wrong. What the reader gets instead is the honest status
+        # line and a Retry beside it.
         request_id = self.network.submit(method, *args)
         self.callbacks[request_id] = (success, failure)
         self.busy_changed(len(self.callbacks) + 1)
@@ -2695,7 +2850,14 @@ class MainWindow(QMainWindow):
                 self.persist_history()
         elif event == "agents":
             self.agents = data["agents"]
-            self.connection_status.setText("●  Relay connected" if data["connected"] else "●  Reconnecting…")
+            # The relay answered, so it is reachable. Tracked rather than
+            # inferred from the status label, because command() has to decide
+            # whether to submit, and a label is not a place to read an answer
+            # from.
+            self.connected = bool(data["connected"])
+            self.set_connection_state(
+                "statusOk" if data["connected"] else "statusWarn",
+                "●  Relay connected" if data["connected"] else "●  Reconnecting…")
             if not self.selected and any(agent["online"] for agent in self.model_agents()):
                 self.select_agent(GENERAL_TARGET)
             else:
@@ -2776,11 +2938,17 @@ class MainWindow(QMainWindow):
             self.notice(data)
             if event == "fatal":
                 self.progress.hide()
-                self.connection_status.setText("●  Startup needs attention")
+                self.set_connection_state("statusBad", "●  Startup needs attention")
+                # Stated, not toasted. See startup_error: this is the one event
+                # the app cannot undo, and a notice that disappears leaves a
+                # window of dead controls with nothing to explain them.
+                self.startup_error.setText(str(data))
+                self.startup_error.setVisible(True)
         elif event == "pending_cleanup":
             self.show_pending_cleanup(data["credentials"], data.get("files", 0))
         elif event == "offline":
-            self.connection_status.setText("●  Relay unavailable")
+            self.connected = False
+            self.set_connection_state("statusBad", "●  Relay unavailable")
             for agent in self.agents:
                 agent["online"] = False
             for member in self.workspace_meta.get("members", []):
@@ -3143,6 +3311,48 @@ class MainWindow(QMainWindow):
         self.navigate(AGENTS_PAGE)
         self.schedule_model_discovery()
         self.model_id.setFocus()
+
+    def set_connection_state(self, state, text):
+        """Name the connection state as well as writing what it says.
+
+        This label used to be created as "online" and have only its text
+        replaced, so "Startup needs attention" and "Relay unavailable" were both
+        painted in the success green. The line is always on screen and it is the
+        only status the app offers at a glance, so it was reporting a failure in
+        the colour of a success.
+
+        Colour is what carries the meaning here: the leading glyph does not
+        change, and the words need reading rather than glancing at. So the state
+        is a name the stylesheet can match, and it is changed with unpolish and
+        polish, because Qt does not re-match a selector when only the object
+        name moved -- the same three lines set_field_error uses, for the same
+        reason.
+
+        The Retry button appears only when the relay has been heard from and
+        then lost, which is the one state where waiting is not what the reader
+        should do. During startup and after a fatal there is nothing to retry
+        yet, and a button that does nothing is worse than none.
+        """
+        self.connection_status.setObjectName(state)
+        self.connection_status.style().unpolish(self.connection_status)
+        self.connection_status.style().polish(self.connection_status)
+        self.connection_status.setText(text)
+        self.connection_retry.setVisible(state == "statusBad" and self.ready)
+
+    def retry_connection(self):
+        """Ask the runtime to poll again now, rather than waiting out the backoff.
+
+        The poll backs off to a five minute ceiling while the relay is gone, so
+        a host that comes back would otherwise stay unnoticed for minutes after
+        the reader has put it right. This does not bypass the backoff for the
+        background loop; it runs one pass now.
+
+        This is the whole of the answer to "there is no retry in the app". What
+        it deliberately does not do is refuse commands while offline: see
+        command().
+        """
+        self.network.submit("retry_poll")
+        self.set_connection_state("statusWarn", "●  Reconnecting…")
 
     def set_field_error(self, widget, invalid):
         widget.setProperty("invalid", invalid)
@@ -3821,10 +4031,41 @@ class MainWindow(QMainWindow):
 
         self.command("delete_workspace", success=done, failure=failed)
 
+    def reload_workspace_invitations(self, dialog):
+        """Re-read the invitations this device can still issue, and show them.
+
+        The list is fetched once, when the dialog opens, and the dialog's own
+        refresh() returns early whenever the membership has not changed. Making
+        an invitation does not change who is in the workspace, so the section
+        went on showing what it had at open time -- a new invitation never
+        appeared, and a removed one stayed. Removing does change membership, but
+        it still read the names captured at open, so it stayed too.
+
+        So the two are driven separately: refresh() keeps its signature guard,
+        which is what stops the members table being rebuilt every second, and
+        the invitations are re-read by whoever changed them.
+        """
+        def loaded(names):
+            self.outstanding_invitations = names
+            dialog.refresh_invitations()
+
+        self.command("outstanding_invitations", success=loaded)
+
     def manage_workspace(self):
+        """Open workspace settings, with the invitations this device can reissue.
+
+        The list is fetched once, when the dialog opens, rather than polled:
+        it changes only when this reader creates or removes an invitation, and
+        both of those happen from this window rather than in the background.
+        Reading it through the network thread would mean a second poll ticking
+        every second for a list that is almost always empty.
+        """
         from .workspace_dialog import WorkspaceDialog
         if self.ready:
-            WorkspaceDialog(self).exec()
+            self.outstanding_invitations = []
+            dialog = WorkspaceDialog(self)
+            self.reload_workspace_invitations(dialog)
+            dialog.exec()
 
     def invite_device(self):
         """Go to the page's own invitation card, ready to fill in.

@@ -63,7 +63,16 @@ class OllamaService:
         return process
 
     async def models(self, http, config):
-        """Check first; start only unreachable loopback HTTP API roots."""
+        """Check first; start only unreachable loopback HTTP API roots.
+
+        Deliberately not cached. This was tried with a ten second TTL, on the
+        grounds that the poll asks the same question every three seconds. That
+        is true, and it is also the only way the app finds out that a model the
+        reader just imported in Ollama is now there: caching the answer means a
+        refresh after an import still reports it missing, which is precisely the
+        recovery the "recovers without import" test guards. A loopback GET every
+        few seconds is cheap, and buying it back with staleness is a bad trade.
+        """
         if self.closed:
             raise RuntimeError("The local model service is shutting down.")
         try:
@@ -77,7 +86,8 @@ class OllamaService:
                 raise RuntimeError("The local model service is shutting down.")
             # Another workspace or discovery request may have started it.
             try:
-                return await self._models(http, config)
+                models = await self._models(http, config)
+                return models
             except httpx.ConnectError:
                 pass
             retry_at, message = self.failures.get(address, (0, ""))
