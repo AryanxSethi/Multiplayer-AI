@@ -40,7 +40,14 @@ jobs:
             requirements-network.txt
 
       - name: Install
-        run: python -m pip install -r requirements-desktop.txt pytest pytest-asyncio ruff==0.16.8
+        # Every dependency comes from the requirements files rather than being
+        # listed here. This step used to name pytest and pytest-asyncio itself
+        # and install the rest from requirements-desktop.txt, and pydantic --
+        # which src/messages/envelope.py imports -- was in neither. So the suite
+        # never ran on a CI runner and pytest exited without collecting
+        # anything. tests/test_dependencies.py now fails the build if that
+        # happens again.
+        run: python -m pip install -r requirements-desktop.txt -r requirements-dev.txt
 
       - name: Tests
         run: python -m pytest tests
@@ -56,9 +63,8 @@ jobs:
       - name: Install
         run: python -m pip install ruff==0.16.8
       - name: Ruff
-        # Reads [tool.ruff] from pyproject.toml. Until that file is on main
-        # this reports Ruff's defaults, which find 348 findings on a codebase
-        # that was never written against them -- so this step is expected to be
-        # red until the rule-set change merges, and that is deliberate rather
-        # than a thing to work around by loosening it.
+        # Reads [tool.ruff] from pyproject.toml, which reaches main through the
+        # rule-set change. Ruff itself is a developer tool rather than something
+        # the app installs, so it is not in any requirements file; it is pinned
+        # here to the version the config was written against.
         run: python -m ruff check .

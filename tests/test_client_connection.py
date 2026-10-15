@@ -80,9 +80,9 @@ def test_a_second_socket_for_one_client_is_closed(client: TestClient, registry) 
     it, because a fix that only tidied the table would still leave the socket
     open, which is the half a reader can actually be hurt by.
     """
-    with client.websocket_connect("/ws/client-A") as first:
+    with client.websocket_connect("/ws/client-A"):
         stale = registry.get_client("client-A").connection_id
-        with client.websocket_connect("/ws/client-A") as second:
+        with client.websocket_connect("/ws/client-A"):
             live = registry.get_client("client-A").connection_id
             assert live != stale, (
                 "the registry still points at the socket that was replaced")
