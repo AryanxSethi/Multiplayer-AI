@@ -315,7 +315,7 @@ class Storage:
         outside the lock and a write inside it.
         """
         with self.lock:
-            outcome = mutate(self.settings)
+            mutate(self.settings)
             return write_json_durably(self.path, json.dumps(self.settings, indent=2))
 
     @property

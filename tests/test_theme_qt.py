@@ -28,9 +28,9 @@ from PySide6.QtGui import QPalette  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from desktop_app.storage import Storage  # noqa: E402
-from desktop_app.theme import DARK, LIGHT, MIKU, color, provider_entry, stylesheet  # noqa: E402
+from desktop_app.theme import DARK, LIGHT, MIKU, color, stylesheet  # noqa: E402
 from desktop_app.markdown import MarkdownMessage  # noqa: E402
-from desktop_app.widgets import OrbitArt, label  # noqa: E402
+from desktop_app.widgets import OrbitArt  # noqa: E402
 
 
 class MemoryVault:

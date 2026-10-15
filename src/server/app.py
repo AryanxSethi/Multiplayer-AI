@@ -235,7 +235,7 @@ async def _handle_frame(
             make_error(envelope.message_id, exc.code, str(exc))
         )
         return
-    except Exception as exc:
+    except Exception:
         logger.exception(
             "ERROR messageId=%s clientId=%s code=%s",
             envelope.message_id,

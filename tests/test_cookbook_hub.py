@@ -15,7 +15,7 @@ breaks here too.
 import httpx
 import pytest
 
-from desktop_app.cookbook import CatalogError, parse_model
+from desktop_app.cookbook import parse_model
 from desktop_app.cookbook_hub import (HubError, check_repo, fetch_entry,
                                       fetch_model, fetch_variants)
 
@@ -314,8 +314,8 @@ async def test_a_published_head_dim_is_taken_rather_than_derived() -> None:
                           "raw/main/config.json": stated}) as client:
         result = await fetch_model(client, "Qwen/Qwen2.5-Coder-7B-Instruct")
     assert result["head_dim"] == 96, (
-        f"the config publishes 96 and the derivation gives 128, so 128 means "
-        f"the publisher was overridden")
+        "the config publishes 96 and the derivation gives 128, so 128 means "
+        "the publisher was overridden")
 
     # Published but not a usable figure: back to the derivation, which is the
     # only case where division is honest.

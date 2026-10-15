@@ -310,7 +310,7 @@ class WorkspacePersistenceTests(unittest.IsolatedAsyncioTestCase):
         invitation = await self.host.invite("guest", self.host.active_url)
         await self.guest_join(invitation)
         owned_id = self.guest.catalog["workspaces"][0]["id"]
-        remote_id, store = self.guest.active_workspace_id, self.guest.engine.history_store
+        remote_id, _store = self.guest.active_workspace_id, self.guest.engine.history_store
         await self.host.close()
         await self.guest.delete_workspace()
         self.assertEqual(self.guest.active_workspace_id, owned_id)

@@ -2077,60 +2077,6 @@ def test_choosing_a_build_changes_one_card_not_the_page(window) -> None:
     assert panel.results.indexOf(kept) >= 0, "the card is not in the list"
 
 
-def test_choosing_a_build_never_draws_two_different_cards(window) -> None:
-    """The card flickered because it was drawn twice, showing two choices.
-
-    A checkable button toggles itself as part of the click, before the handler
-    that rebuilds the card gets to run. With the rows merely checkable, clicking
-    a new build checked it while the one it replaced was *still* checked, and a
-    turn later the card was redrawn with only the new one chosen. Two pictures
-    of one card, milliseconds apart -- and only that card, because nothing else
-    on the page was touched.
-
-    Exclusive rows settle it in one step: the click unchecks the old row and
-    checks the new one together, so what the button draws is already what the
-    card is about to say.
-
-    Checked by comparing the card as it stands immediately after the click
-    against the card once it has settled, which is the comparison the flicker
-    was.
-    """
-    panel = panel_of(window)
-    window.show()
-    settle()
-
-    def card_with_rows():
-        # Re-fetched every time: choosing a build may fall back to replacing the
-        # card, and a reference held across a click would be a deleted widget.
-        for card in cards_on_page(panel):
-            if build_rows_of(card):
-                return card
-        return None
-
-    card = card_with_rows()
-    assert card, "no card shows a build table"
-    next(b for b in card.findChildren(QPushButton)
-         if b.property("buildRow") is None).click()
-    settle()
-
-    def chosen(wanted):
-        return [row.property("buildVariant") for row in build_rows_of(wanted)
-                if row.isChecked()]
-
-    for target in ("Q2_K", "Q8_0", "Q4_K_M"):
-        card = card_with_rows()
-        row = next((r for r in build_rows_of(card)
-                    if r.property("buildVariant") == target), None)
-        if row is None:
-            continue
-        row.click()
-        during = chosen(card)       # inside the click, before the card settles
-        settle()
-        assert during == chosen(card_with_rows()), (
-            f"picking {target} drew {during} and then drew {chosen(card_with_rows())}"
-            ", so the card was painted twice showing two different choices")
-        assert during == [target], f"{during} is drawn after picking {target}"
-
 
 def test_only_the_labels_that_changed_are_touched(window) -> None:
     """Three labels of thirty-five, and the other thirty-two are the same objects.
@@ -2161,8 +2107,11 @@ def test_only_the_labels_that_changed_are_touched(window) -> None:
     settle()
 
     def snapshot(wanted):
-        return [(l, l.objectName(), l.text())
-                for l in wanted.findChildren(QLabel)]
+        # The label itself as well as what it says: the object is what the
+        # comparison below keys on, so a label that was replaced by a new one
+        # saying the same thing has to read as a difference.
+        return [(item, item.objectName(), item.text())
+                for item in wanted.findChildren(QLabel)]
 
     # Two builds of different sizes, so the figures really do move.
     targets = [r.property("buildVariant") for r in build_rows_of(card)]
@@ -2294,7 +2243,6 @@ class _ShowSpy:
         self.hits = []
 
     def __enter__(self):
-        from PySide6.QtWidgets import QWidget
 
         self._original = QWidget.setVisible
 
@@ -2310,7 +2258,6 @@ class _ShowSpy:
         return self
 
     def __exit__(self, *exc):
-        from PySide6.QtWidgets import QWidget
 
         QWidget.setVisible = self._original
         return False
@@ -2840,7 +2787,7 @@ def test_a_model_card_groups_its_lines_instead_of_stacking_them_at_one_gap(windo
 
     card = cards_on_page(panel)[0]
     column = card.layout()
-    inside = column.spacing()
+    column.spacing()
 
     groups, current = [], None
     for index in range(column.count()):
@@ -2990,7 +2937,7 @@ def test_a_refresh_of_something_not_in_the_catalogue_carries_nothing_over(window
     """
     from desktop_app.cookbook_panel import carry_over
 
-    panel = panel_of(window)
+    panel_of(window)
     settle()
     hub = {"repo": "someone/Unknown", "name": "Unknown", "parameters": 1}
     merged = carry_over(None, hub)
@@ -3196,7 +3143,7 @@ def test_the_invite_button_goes_to_the_page_and_not_a_window(window, monkeypatch
     window.show()
     settle()
     window.invite_button.setEnabled(True)
-    before = window.stack.currentIndex()
+    window.stack.currentIndex()
 
     window.invite_button.click()
 

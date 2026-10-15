@@ -50,7 +50,7 @@ def render_guide(key, filename):
 
 def main():
     """Build the offline documentation hub from all five project Markdown guides."""
-    app = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])
     cards = "".join(f'<a class="card" href="#{key}"><h2>{title}</h2><p>{description}</p></a>' for key, title, _, description in GUIDES)
     guides = "".join(f'<section class="guide" id="{key}"><a class="back" href="#start">Back to documentation</a>{render_guide(key, filename)}</section>'
                      for key, _, filename, _ in GUIDES)

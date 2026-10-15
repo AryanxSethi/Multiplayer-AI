@@ -698,7 +698,7 @@ class WorkspaceRuntime:
         # every desktop client sharing that host came back at the same moment
         # and asked again together.
         while not self.closed:
-            delay, failures = self._poll_delay, self._poll_failures
+            delay = self._poll_delay
             saved = self.storage.settings.get("remote") if self.restore_remote else None
             if saved and not self.remote and time.monotonic() >= next_join:
                 next_join = time.monotonic() + 15

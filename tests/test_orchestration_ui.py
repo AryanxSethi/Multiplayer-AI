@@ -109,7 +109,7 @@ class OrchestrationUITests(unittest.TestCase):
                     self.app.processEvents()
                     option = QStyleOptionButton()
                     enabled.initStyleOption(option)
-                    rect = enabled.style().subElementRect(
+                    enabled.style().subElementRect(
                         QStyle.SubElement.SE_CheckBoxIndicator, option, enabled)
 
                     # Rendered rather than grabbed, and that is the whole fix.
