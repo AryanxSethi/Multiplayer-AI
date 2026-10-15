@@ -96,6 +96,10 @@ jobs:
         # summary is on the page anyone can open. Output is captured to a file
         # and replayed rather than piped, so the exit status is pytest's own
         # rather than tee's.
+        # bash on both platforms. The default on a Windows runner is PowerShell,
+        # where this block is a syntax error, so it silently did nothing there:
+        # the run failed with an exit code and reported no test names at all.
+        shell: bash
         run: |
           python -m pytest tests -rf --tb=line > pytest-output.txt 2>&1
           status=$?
