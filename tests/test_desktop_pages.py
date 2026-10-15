@@ -2690,6 +2690,39 @@ def test_imported_ollama_row_reports_unavailability_and_automatic_reconnection(w
     assert any(child.text() == "Online" for child in card.findChildren(QLabel))
 
 
+@pytest.mark.parametrize("target", [win.GENERAL_TARGET, "saved-model"])
+def test_chat_can_start_local_ollama_without_waiting_for_a_health_poll(window, target) -> None:
+    window.ready = True
+    window.agents = [{"id": "saved-model", "provider": "ollama", "model": "chat",
+                      "kind": "model", "local": True, "online": False, "can_start": True}]
+    window.select_agent(target)
+    assert window.send_button.isEnabled()
+    assert "start Ollama automatically" in window.chat_subtitle.text()
+    submitted = []
+    window.command = lambda method, *args, **kwargs: submitted.append((method, args))
+    window.composer.setPlainText("Start and answer this request")
+    window.send_message()
+    assert submitted == [("send", (target, {"text": "Start and answer this request"}))]
+    assert window.chats[target]["pending"]
+    assert window.chat_subtitle.text() == "Starting Ollama…"
+
+
+def test_an_explicitly_stopped_ollama_model_starts_only_when_addressed_directly(window) -> None:
+    window.ready = True
+    window.agents = [{"id": "saved-model", "provider": "ollama", "model": "chat",
+                      "kind": "model", "local": False, "online": False, "can_start": True}]
+    window.select_agent(win.GENERAL_TARGET)
+    assert not window.send_button.isEnabled()
+    window.render_agents()
+    card = window.agent_cards.itemAt(0).widget()
+    talk = next(button for button in card.findChildren(QPushButton)
+                if button.text().startswith("Open conversation"))
+    assert talk.isEnabled()
+    talk.click()
+    assert window.selected == "saved-model"
+    assert window.send_button.isEnabled()
+
+
 def test_attachment_failure_returns_to_its_chat_and_preserves_the_draft(window) -> None:
     window.ready = True
     window.workspace_id = "test-workspace"

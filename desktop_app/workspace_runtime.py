@@ -13,7 +13,7 @@ from uuid import uuid4
 import httpx
 import uvicorn
 
-from network_a2a.adapters import PROVIDERS, ProviderConfig, create_adapter
+from network_a2a.adapters import PROVIDERS, ProviderConfig, ProviderError, create_adapter
 from network_a2a.client import AgentClient, direct_relay_connection
 from network_a2a.server import Relay, create_app
 from network_a2a.persistence import HistoryStore
@@ -48,6 +48,7 @@ class WorkspaceRuntime:
         self.http = None
         self.direct_http = None
         self.runners = {}
+        self.model_runners = set()
         self.active_url = None
         self.active_token = None
         self.active_id = None
@@ -109,6 +110,7 @@ class WorkspaceRuntime:
             "agent_profiles": {profile["id"]: self.public_profile(profile, running=False)
                                for profile in self.storage.settings.get("agents", [])}})
         self.app.state.relay.member_remover = self.remove_member
+        self.app.state.relay.model_preparer = self.prepare_models
         self.sharing = bool(self.storage.settings.get("share_lan", False))
         await self._start_server("0.0.0.0" if self.sharing else "127.0.0.1", self.storage.settings.get("relay_port", 0))
         self.storage.update(relay_port=self.port)
@@ -149,6 +151,8 @@ class WorkspaceRuntime:
         self.generation += 1
         entries = list(self.runners.values())
         self.runners.clear()
+        self.model_runners.clear()
+        self._ollama_availability.clear()
         owned = {client.agent_id for client, _ in entries}
         for client, _ in entries:
             if client.socket:
@@ -409,6 +413,8 @@ class WorkspaceRuntime:
 
     async def _remove_runner(self, agent_id):
         """Disconnect and cancel an agent runner, then wait for its task to finish."""
+        self.model_runners.discard(agent_id)
+        self._ollama_availability.pop(agent_id, None)
         entry = self.runners.pop(agent_id, None)
         if entry:
             client, task = entry
@@ -477,6 +483,18 @@ class WorkspaceRuntime:
         search_key = self.storage.vault.get("search:" + profile["id"]) if profile.get("search_provider") == "ollama" and profile.get("web_search", "off") != "off" else None
         config = self._config(profile, key, search_key)
         adapter = create_adapter(config, self.http)
+        handler = adapter
+        if profile["provider"] == "ollama":
+            async def handler(payload, source):
+                # Check before generation, including requests arriving from another
+                # device. A failed generation is never retried or replayed.
+                try:
+                    await self.ollama_service.ensure_model(self.http, config, retry=True)
+                except (RuntimeError, ValueError) as exc:
+                    raise ProviderError("connection", str(exc)) from None
+                except (httpx.HTTPError, OSError, KeyError, TypeError):
+                    raise ProviderError("connection", "Ollama is unavailable. Check its installation and model settings, then try again.") from None
+                return await adapter(payload, source)
         if profile["provider"] == "ollama" and ollama_available is None:
             try:
                 models = await self.ollama_service.models(self.http, config)
@@ -489,7 +507,8 @@ class WorkspaceRuntime:
         token = self.active_token if self.remote else self.credentials[profile["id"]]["token"]
         await self._remove_runner(profile["id"])
         await self.publish_profile(profile, running=False)
-        await self._attach(profile["id"], token, adapter, allow_insecure)
+        await self._attach(profile["id"], token, handler, allow_insecure)
+        self.model_runners.add(profile["id"])
         running = ollama_available if profile["provider"] == "ollama" else True
         published = await self.publish_profile(profile, running=running)
         if profile["provider"] == "ollama":
@@ -534,9 +553,7 @@ class WorkspaceRuntime:
             config = self._config(profile, saved_key, saved_search_key)
             create_adapter(config, self.http)  # validate before mutating storage
             if profile["provider"] == "ollama":
-                models = await self.ollama_service.models(self.http, config)
-                if not model_installed(profile["model"], models):
-                    raise ValueError(f"{profile['model']} is not installed in Ollama. Install it in Ollama, then choose an available model.")
+                await self.ollama_service.ensure_model(self.http, config, retry=True)
             updated = self.credentials
             if not self.remote:
                 if agent_id not in self.credentials:
@@ -581,11 +598,79 @@ class WorkspaceRuntime:
                                    self.storage.settings.get("remote", {}).get("allow_insecure", False))
             await self.refresh()
 
+    async def prepare_models(self, source, target=GENERAL_TARGET):
+        """Recover local Ollama models before routing an explicit chat request."""
+        saved = [self.storage.settings.get("remote_agent")] if self.remote else self.storage.settings.get("agents", [])
+        if not any(profile and profile.get("provider") == "ollama"
+                   and (profile["id"] in self.model_runners if target == GENERAL_TARGET else profile["id"] == target)
+                   and OllamaService.local_address(profile.get("base_url") or PROVIDERS["ollama"].base_url)
+                   for profile in saved):
+            return
+        generation = self.generation
+        async with self.mutation:
+            if self.closed or generation != self.generation:
+                raise ConnectionError("Workspace changed while starting the model; the request was not sent")
+            if self.remote:
+                if source != self.active_id:
+                    return
+                profile = self.storage.settings.get("remote_agent")
+                profiles = [profile] if profile and profile.get("relay") == self.active_url else []
+            else:
+                profiles = self.storage.settings.get("agents", [])
+            failures = []
+            changed = False
+            for profile in profiles:
+                identity = profile["id"]
+                base = profile.get("base_url") or PROVIDERS["ollama"].base_url
+                if profile["provider"] != "ollama" or OllamaService.local_address(base) is None:
+                    continue
+                if not self.remote and not self.app.state.relay.allowed(source, identity):
+                    continue
+                if target == GENERAL_TARGET:
+                    if identity not in self.model_runners:
+                        continue  # A manual stop stays stopped in automatic routing.
+                    if not self.remote and not self.app.state.relay.orchestration_authorized(identity):
+                        continue
+                elif target != identity:
+                    continue
+                runner = self.runners.get(identity)
+                connected = bool(runner and runner[0].ready.is_set() and not runner[1].done())
+                if target == GENERAL_TARGET and connected and self._ollama_availability.get(identity):
+                    continue
+                if not connected or not self._ollama_availability.get(identity):
+                    self.emit("activity", {"title": "Starting Ollama", "detail": profile["model"]})
+                try:
+                    key = self.storage.vault.get("provider:" + identity)
+                    config = ProviderConfig("ollama", profile["model"], base, api_key=key,
+                                            allow_insecure=profile.get("allow_insecure", False))
+                    await self.ollama_service.ensure_model(self.http, config, retry=True)
+                    if self.closed or generation != self.generation:
+                        raise ConnectionError("Workspace changed while starting the model; the request was not sent")
+                    if not connected or identity not in self.model_runners:
+                        await self._launch_profile(profile, self.storage.settings.get("remote", {}).get("allow_insecure", False),
+                                                   ollama_available=True)
+                        changed = True
+                    elif not self._ollama_availability.get(identity):
+                        if await self.publish_profile(profile, running=True):
+                            self._ollama_availability[identity] = True
+                        changed = True
+                except (httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                    if self.closed or generation != self.generation:
+                        raise ConnectionError("Workspace changed while starting the model; the request was not sent") from None
+                    message = str(exc) if isinstance(exc, (RuntimeError, ValueError)) else "Ollama is unavailable. Check its installation and model settings, then try again."
+                    if target != GENERAL_TARGET:
+                        raise ConnectionError(message) from None
+                    failures.append(message)
+            if changed:
+                self._poll_wake.set()
+            if failures and not self.remote and not any(model["online"] for model in self.app.state.relay.orchestrator.models(source)):
+                raise ConnectionError(failures[0])
+
     async def refresh_ollama_availability(self, profiles):
         """Publish actual provider availability, independently of relay connectivity."""
         generation = self.generation
         active = {identity: profile for identity, profile in profiles.items()
-                  if profile.get("provider") == "ollama" and identity in self.runners}
+                  if profile.get("provider") == "ollama" and identity in self.model_runners}
         runners = {identity: self.runners[identity] for identity in active}
         endpoints = {}
         for identity, profile in active.items():
@@ -672,7 +757,9 @@ class WorkspaceRuntime:
                            "online": item["online"] and availability.get(item["id"], True),
                            "provider": profile.get("provider", item.get("provider")), "model": profile.get("model", item.get("model")),
                            "vision": profile.get("vision", item.get("vision", False)),
-                           "local": item["id"] in self.runners, "profile": profile})
+                           "local": item["id"] in (self.model_runners if profile else self.runners),
+                           "can_start": bool(profile.get("provider") == "ollama" and OllamaService.local_address(
+                               profile.get("base_url") or PROVIDERS["ollama"].base_url)), "profile": profile})
         self.emit("agents", {"agents": agents, "self": self.active_id,
                             "connected": bool(self.runners.get(self.active_id, (None,))[0] and self.runners[self.active_id][0].ready.is_set())})
         response = await http.get(base + "/conversations", headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
@@ -733,11 +820,16 @@ class WorkspaceRuntime:
 
     async def send(self, target, payload):
         generation = self.generation
+        if self.remote:
+            await self.prepare_models(self.active_id, target)
+        if generation != self.generation:
+            raise RuntimeError("Workspace changed while the request was running; it was not replayed")
         base = relay_http_url(self.active_url, allow_insecure=True)
         try:
             general = target == GENERAL_TARGET
             response = await self.relay_http().post(base + ("/orchestrate" if general else f"/agents/{target}/invoke"), json=payload,
-                headers={"Authorization": "Bearer " + self.active_token}, timeout=ORCHESTRATION_TIMEOUT + 5 if general else 65)
+                headers={"Authorization": "Bearer " + self.active_token},
+                timeout=ORCHESTRATION_TIMEOUT + 5 if general else 65 + self.ollama_service.START_TIMEOUT + 4)
             result = response.json()
             if response.status_code != 200:
                 raise RuntimeError(result.get("error", "The agent could not complete this request"))
@@ -751,6 +843,10 @@ class WorkspaceRuntime:
 
     async def send_conversation(self, conversation_id, text):
         generation = self.generation
+        if self.remote:
+            await self.prepare_models(self.active_id, GENERAL_TARGET)
+        if generation != self.generation:
+            raise RuntimeError("Workspace changed while the request was running; it was not replayed")
         base = relay_http_url(self.active_url, allow_insecure=True)
         try:
             response = await self.relay_http().post(base + f"/conversations/{conversation_id}/messages",

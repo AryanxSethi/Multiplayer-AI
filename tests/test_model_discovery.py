@@ -17,6 +17,7 @@ class ModelDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         runtime.storage = SimpleNamespace(settings={"agents": list(profiles)}, vault=MemoryVault())
         runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         runtime.ollama_service = OllamaService()
+        runtime.model_runners = {profile["id"] for profile in profiles}
         runtime.ollama_service._start = Mock(side_effect=RuntimeError("Mock Ollama is unavailable"))
         self.addAsyncCleanup(runtime.http.aclose)
         return runtime
@@ -37,6 +38,7 @@ class ModelDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         runtime = self.runtime(provider, profiles)
         runtime.generation = 0
         runtime.runners = {"chat": object(), "missing": object()}
+        runtime.model_runners = set(runtime.runners)
         runtime._ollama_availability = {}
         async def publish(profile, running=True):
             changes.append((profile["id"], running))
@@ -60,6 +62,7 @@ class ModelDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         runtime = self.runtime(lambda request: None)
         runtime.generation = 0
         runtime.runners = {"chat": object()}
+        runtime.model_runners = set(runtime.runners)
         runtime._ollama_availability = {}
         changes = []
         def provider(request):

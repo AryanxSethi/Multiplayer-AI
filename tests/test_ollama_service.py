@@ -1,5 +1,6 @@
 """Automatic local startup, ownership, failures, and saved model restoration."""
 import asyncio
+import json
 import os
 import subprocess
 import tempfile
@@ -12,6 +13,7 @@ from desktop_app.ollama_service import OllamaService, model_installed
 from desktop_app.runtime import DesktopRuntime
 from desktop_app.storage import Storage
 from network_a2a.adapters import ProviderConfig
+from network_a2a.orchestration import GENERAL_TARGET
 from tests.test_desktop_runtime import MemoryVault
 
 
@@ -119,6 +121,29 @@ class OllamaServiceTests(unittest.IsolatedAsyncioTestCase):
         launch.assert_called_once()
         self.assertIs(self.service.processes["127.0.0.1:11434"], new)
 
+    async def test_explicit_retry_bypasses_failure_backoff_without_replaying_work(self):
+        ready = False
+        def provider(request):
+            if not ready:
+                raise httpx.ConnectError("stopped", request=request)
+            return httpx.Response(200, json={"models": [{"name": "chat:latest"}]})
+        http = self.client(provider)
+        with patch.object(self.service, "_start", side_effect=RuntimeError("Install Ollama")):
+            with self.assertRaisesRegex(RuntimeError, "Install Ollama"):
+                await self.service.models(http, self.config)
+        process = Mock()
+        process.poll.return_value = None
+        def start(address):
+            nonlocal ready
+            ready = True
+            self.service.processes[address] = process
+            return process
+        with patch.object(self.service, "_start", side_effect=start) as launch:
+            with self.assertRaisesRegex(RuntimeError, "Install Ollama"):
+                await self.service.models(http, self.config)
+            await asyncio.gather(*(self.service.ensure_model(http, self.config, retry=True) for _ in range(3)))
+        launch.assert_called_once()
+
     async def test_startup_timeout_is_bounded_and_owned_process_is_cleaned_up(self):
         def offline(request):
             raise httpx.ConnectError("stopped", request=request)
@@ -170,6 +195,146 @@ class SavedOllamaTests(unittest.IsolatedAsyncioTestCase):
         self.launch_patch.start()
         self.addCleanup(self.launch_patch.stop)
         self.profile = {"id": "chat-agent", "provider": "ollama", "model": "chat", "autostart": True}
+
+    async def mock_chat(self, status=200):
+        self.calls = []
+        async def provider(request):
+            self.calls.append(json.loads(request.content))
+            return httpx.Response(status, json={"message": {"content": "Ready to help"}, "done_reason": "stop"})
+        await self.runtime.http.aclose()
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+
+    def start_service(self, address):
+        self.ready = True
+        process = Mock()
+        process.poll.return_value = None
+        self.runtime.ollama_service.processes[address] = process
+        return process
+
+    async def test_import_retries_immediately_after_failed_background_discovery(self):
+        self.ready = False
+        config = self.runtime.engine._config(self.profile, None)
+        with self.assertRaisesRegex(RuntimeError, "Install Ollama"):
+            await self.runtime.ollama_service.models(self.runtime.http, config)
+        with patch.object(self.runtime.ollama_service, "_start", self.start_service):
+            await self.runtime.save_agent(self.profile)
+        self.assertTrue(self.runtime.app.state.relay.agent_description("chat-agent")["online"])
+
+    async def test_chat_starts_offline_ollama_before_general_routing_and_sends_once(self):
+        await self.mock_chat()
+        await self.runtime.save_agent(self.profile)
+        self.ready = False
+        await self.runtime.refresh()
+        self.assertFalse(self.runtime.app.state.relay.agent_description("chat-agent")["online"])
+        published = self.runtime.cache[self.runtime.active_workspace_id]["agents"]["agents"]
+        model = next(agent for agent in published if agent["id"] == "chat-agent")
+        self.assertTrue(model["can_start"])
+        self.assertTrue(model["local"])
+        with patch.object(self.runtime.ollama_service, "_start", self.start_service):
+            result = await self.runtime.send(GENERAL_TARGET, {"text": "Write a Python function"})
+        self.assertEqual(result["text"], "Ready to help")
+        self.assertEqual(result["responder"]["agent_id"], "chat-agent")
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]["messages"][-1]["content"], "Write a Python function")
+
+    async def test_direct_chat_recovers_a_server_that_stopped_since_the_last_poll(self):
+        await self.mock_chat()
+        await self.runtime.save_agent(self.profile)
+        self.ready = False
+        with patch.object(self.runtime.ollama_service, "_start", self.start_service):
+            result = await self.runtime.send("chat-agent", {"text": "Hello"})
+        self.assertEqual(result["text"], "Ready to help")
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_invited_device_can_wake_a_host_model_through_general_chat(self):
+        await self.mock_chat()
+        await self.runtime.save_agent(self.profile)
+        invitation = await self.runtime.invite("guest", self.runtime.active_url)
+        self.ready = False
+        await self.runtime.refresh()
+        with patch.object(self.runtime.ollama_service, "_start", self.start_service):
+            response = await self.runtime.direct_http.post(f"http://127.0.0.1:{self.runtime.port}/orchestrate",
+                json={"text": "Hello from another device"},
+                headers={"Authorization": "Bearer " + invitation["token"]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["text"], "Ready to help")
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_shared_general_chat_starts_ollama_before_its_availability_check(self):
+        await self.mock_chat()
+        await self.runtime.save_agent(self.profile)
+        room = self.runtime.app.state.relay.conversations.create(self.runtime.active_id, GENERAL_TARGET)
+        self.ready = False
+        await self.runtime.refresh()
+        with patch.object(self.runtime.ollama_service, "_start", self.start_service):
+            result = await self.runtime.send_conversation(room["id"], "Hello from the shared chat")
+        self.assertFalse(result["pending"])
+        self.assertEqual(result["messages"][-1]["content"], "Ready to help")
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_general_chat_respects_stop_and_direct_chat_can_start_that_model(self):
+        await self.mock_chat()
+        await self.runtime.save_agent(self.profile)
+        await self.runtime.save_agent({**self.profile, "id": "second-agent"})
+        await self.runtime.stop_agent("chat-agent")
+        result = await self.runtime.send(GENERAL_TARGET, {"text": "Hello"})
+        self.assertEqual(result["responder"]["agent_id"], "second-agent")
+        self.assertNotIn("chat-agent", self.runtime.model_runners)
+        result = await self.runtime.send("chat-agent", {"text": "Start this model"})
+        self.assertEqual(result["text"], "Ready to help")
+        self.assertIn("chat-agent", self.runtime.model_runners)
+        saved = next(profile for profile in self.storage.settings["agents"] if profile["id"] == "chat-agent")
+        self.assertFalse(saved["autostart"])
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_shared_chat_rejects_a_second_message_while_startup_is_waiting(self):
+        await self.mock_chat()
+        await self.runtime.save_agent(self.profile)
+        room = self.runtime.app.state.relay.conversations.create(self.runtime.active_id, GENERAL_TARGET)
+        self.ready = False
+        await self.runtime.refresh()
+        entered, released = asyncio.Event(), asyncio.Event()
+        ensure = self.runtime.ollama_service.ensure_model
+        async def slow_start(*args, **kwargs):
+            entered.set()
+            await released.wait()
+            return await ensure(*args, **kwargs)
+        with patch.object(self.runtime.ollama_service, "ensure_model", side_effect=slow_start), \
+                patch.object(self.runtime.ollama_service, "_start", self.start_service):
+            first = asyncio.create_task(self.runtime.send_conversation(room["id"], "First message"))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                with self.assertRaisesRegex(RuntimeError, "Wait for the current AI reply"):
+                    await self.runtime.send_conversation(room["id"], "Second message")
+            finally:
+                released.set()
+                await first
+        self.assertFalse(room["pending"])
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_failed_generation_is_not_replayed_after_startup(self):
+        await self.mock_chat(status=500)
+        await self.runtime.save_agent(self.profile)
+        self.ready = False
+        with patch.object(self.runtime.ollama_service, "_start", self.start_service):
+            with self.assertRaisesRegex(RuntimeError, "Remote provider error"):
+                await self.runtime.send("chat-agent", {"text": "Only send once"})
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_stopped_guest_model_stays_stopped_when_its_connectivity_agent_polls(self):
+        guest = DesktopRuntime(Storage(os.path.join(self.directory.name, "guest"), MemoryVault()))
+        self.addAsyncCleanup(guest.close)
+        await guest.start()
+        invitation = await self.runtime.invite("guest", self.runtime.active_url)
+        await guest.join(invitation["url"], invitation["token"])
+        await guest.save_agent({**self.profile, "id": "guest"})
+        await guest.stop_agent("guest")
+        with patch.object(guest.ollama_service, "models", side_effect=AssertionError("Stopped models must not start")) as catalog:
+            await guest.refresh()
+        catalog.assert_not_called()
+        self.assertIn("guest", guest.runners)
+        self.assertNotIn("guest", guest.model_runners)
+        self.assertFalse(self.runtime.app.state.relay.agent_description("guest")["online"])
 
     async def test_missing_import_is_rejected_before_writing_profiles_or_keys(self):
         self.models = []

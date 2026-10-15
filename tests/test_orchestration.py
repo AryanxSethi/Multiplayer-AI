@@ -1,8 +1,9 @@
 """Provider-independent planning, delegation policy, and contextual dispatch."""
+import asyncio
 import base64
 import json
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -34,6 +35,44 @@ class OrchestrationTests(unittest.IsolatedAsyncioTestCase):
 
     def task(self, agent="coder", task_type="coding"):
         return {"agent_id": agent, "task_type": task_type, "instruction": "Solve the user's original code problem"}
+
+    async def test_startup_completes_before_the_default_model_is_selected(self):
+        for profile in self.relay.agent_profiles.values():
+            profile["running"] = False
+        async def start(source, target):
+            self.relay.agent_profiles["planner"]["running"] = True
+        self.relay.model_preparer = AsyncMock(side_effect=start)
+        self.relay.invoke.return_value = {"text": "Hello"}
+        result = await self.relay.orchestrator.run("user", {"text": "Hello"})
+        self.assertEqual(result["responder"]["agent_id"], "planner")
+        self.relay.model_preparer.assert_awaited_once()
+
+    async def test_invalid_requests_and_forbidden_targets_do_not_start_models(self):
+        self.relay.model_preparer = AsyncMock()
+        with self.assertRaises(ValueError):
+            await self.relay.orchestrator.run("user", {"messages": []})
+        with self.assertRaises(PermissionError):
+            await self.relay.prepare_models("foreign", "planner")
+        with self.assertRaises(PermissionError):
+            await self.relay.prepare_models("unknown")
+        self.relay.model_preparer.assert_not_awaited()
+
+    async def test_startup_is_included_in_the_orchestration_deadline(self):
+        async def wait(source, target):
+            await asyncio.sleep(10)
+        self.relay.model_preparer = wait
+        with patch("network_a2a.orchestration.ORCHESTRATION_TIMEOUT", .01):
+            with self.assertRaises(TimeoutError):
+                await self.relay.orchestrator.run("user", {"text": "Hello"})
+        self.relay.invoke.assert_not_awaited()
+        self.assertEqual(self.relay.orchestrator.slots._value, 4)
+
+    async def test_recipient_grant_is_checked_again_after_startup_waits(self):
+        async def revoke(source, target):
+            self.relay.workspace.update(models=[], coordinator=None)
+        self.relay.model_preparer = revoke
+        with self.assertRaisesRegex(PermissionError, "no longer authorized"):
+            await type(self.relay).invoke(self.relay, "user", "planner", {"text": "Private history"})
 
     async def test_intent_and_code_reach_planner_and_selected_worker_without_name_rules(self):
         for task_type, request in (("coding", "Code x: a Python parser"), ("debugging", "Debug y: def f(): return 1 / 0"),

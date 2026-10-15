@@ -86,6 +86,12 @@ There is no generated terminal command or separate agent process to start.
 
 For Ollama, install Ollama and your chosen model first. The app starts a stopped
 local Ollama server automatically when loading or restoring models.
+Importing a model or sending it a message retries startup immediately, even after
+a failed background check. Chat remains usable while local Ollama is offline:
+send your message and the app starts the server, waits for it to become ready,
+and dispatches the request once. Shared chats can also start models on their host.
+General chat keeps explicitly stopped models stopped and uses another available
+model; addressing a stopped local Ollama model directly starts it for that session.
 Its dropdown refreshes while the import form is open and clears when Ollama
 cannot be reached. Removed models are also dropped from the choices.
 **Find models** refreshes installed Ollama models or available models from the

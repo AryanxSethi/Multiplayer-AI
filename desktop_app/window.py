@@ -1616,7 +1616,7 @@ class MainWindow(QMainWindow):
                 column.addWidget(label(self.model_purpose_summary(agent), "muted", True))
                 column.addSpacing(7)
                 talk = action("Open conversation  →", lambda checked=False, id=agent["id"]: self.select_agent(id))
-                talk.setEnabled(agent["online"])
+                talk.setEnabled(agent["online"] or bool(agent.get("can_start")))
                 talk.setToolTip(f"Start a conversation with {agent['id']}")
                 talk.setAccessibleName(f"Open a conversation with {agent['id']}")
                 column.addWidget(talk)
@@ -1912,7 +1912,12 @@ class MainWindow(QMainWindow):
         if target != GENERAL_TARGET:
             return next((item for item in self.agents if item["id"] == target), None)
         state = general_chat_state(self.model_agents(), self.workspace_meta.get("coordinator"))
-        return {"id": GENERAL_TARGET, "kind": "model", "online": state["online"], "vision": state["vision"],
+        startable = [model for model in self.model_agents()
+                     if model.get("can_start") and model.get("local")
+                     and model.get("orchestration_authorized", True)]
+        return {"id": GENERAL_TARGET, "kind": "model", "online": state["online"],
+                "vision": state["vision"] or any(model.get("vision") for model in startable),
+                "can_start": bool(startable),
                 "conversation_model": state["conversation_model"]["id"] if state["conversation_model"] else None,
                 "coordinator_online": bool(state["coordinator"] and state["coordinator"].get("online")),
                 "delegating": state["delegating"], "coordinator": state["coordinator"]["id"] if state["coordinator"] else None}
@@ -1946,7 +1951,8 @@ class MainWindow(QMainWindow):
         agent = self.chat_target_agent()
         chat = self.chats.get(self.selected, {})
         pending = chat.get("pending") or chat.get("local_pending")
-        self.send_button.setEnabled(bool(agent and agent["online"] and not pending and not self.preparing_files))
+        can_start = bool(agent and agent.get("can_start"))
+        self.send_button.setEnabled(bool(agent and (agent["online"] or can_start) and not pending and not self.preparing_files))
         self.attach_button.setEnabled(bool(self.ready and agent and self.is_model_agent(agent) and not pending and not self.preparing_files))
         count = len(self.model_agents(chat_only=True))
         self.chat_agent_count.setText(f"{count} " + ("agent" if count == 1 else "agents"))
@@ -1954,13 +1960,15 @@ class MainWindow(QMainWindow):
         self.send_button.setText("Working…" if pending else "Send request  ↑")
         self.chat_title.setText(room["title"] if room else "Chat" if target == GENERAL_TARGET else self.selected or "Choose an agent")
         subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
+        if agent and not agent["online"] and can_start:
+            subtitle = "Starting Ollama…" if pending else "Send a message to start Ollama automatically"
         if target == GENERAL_TARGET:
             if pending:
-                subtitle = "Your model is working…"
+                subtitle = "Starting Ollama…" if can_start and not agent["online"] else "Your model is working…"
             elif agent["online"]:
                 subtitle = "Online · Ready to chat with " + agent["conversation_model"]
             else:
-                subtitle = "Connect or start a model to chat"
+                subtitle = "Send a message to start Ollama automatically" if can_start else "Connect or start a model to chat"
         self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
         self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
         # The header's one conversation button is always the same widget. It
