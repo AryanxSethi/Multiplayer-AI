@@ -8,6 +8,7 @@ and why, rather than presenting a list a reader has to take on trust.
 
 
 import pytest
+from unittest.mock import patch
 
 
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page tests")
@@ -3366,3 +3367,74 @@ def test_a_visit_that_finds_nothing_changed_does_not_redraw(window) -> None:
 
     assert panel.hardware is pinned, (
         "a one per cent difference in free memory rebuilt the whole page")
+
+
+def test_a_busy_machine_does_not_blank_the_page(window, qt_app) -> None:
+    """Coming back to a page must not empty it because the box is busy now.
+
+    The page ranks models by how much memory is free, and it re-read that on
+    every arrival, so it re-ranked on every arrival too. A machine under load
+    reports almost nothing free, the recommended set collapses to empty, and the
+    reader comes back from another page to find their models gone and a "nothing
+    fits this device" card in their place -- which is a claim about the hardware
+    written by a momentary reading, not about the catalogue. Measured here:
+    four cards against a stated 4GB device, none at all against a reading with
+    200MB free.
+
+    The empty card is still correct when the catalogue genuinely has nothing for
+    the device. What is wrong is getting there by a re-rank that says less than
+    what was already on screen.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+    shown = len(panel._cards)
+    assert shown, "the fixture device recommends nothing, so this proves nothing"
+
+    busy = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=4,
+        memory_total=32 * 1024 ** 3, memory_available=200 * 1024 ** 2,
+        disk_free=500 * 1024 ** 3, vram=None, unified_memory=False, sources={})
+    # Through the re-read rather than render_models() directly, because that is
+    # the path a page switch takes and the one the guard is on.
+    with patch.object(panel_module, "detect_hardware", return_value=busy):
+        panel._reread_hardware(force=True)
+    qt_app.processEvents()
+
+    assert panel._cards, (
+        f"{shown} models were on screen and a re-read against a busy machine "
+        "removed every one of them; the page is now making a claim about the "
+        "hardware out of a momentary reading")
+
+
+def test_a_finished_refresh_keeps_the_reader_where_they_were(window, qt_app) -> None:
+    """A refresh must not throw the reader back to the top of the page.
+
+    A refresh rebuilds every card, and a rebuild sends the scrollbar to zero.
+    That lands the reader at the top at the exact moment _set_busy(False) takes
+    the Stop control away, so the button they had just pressed is off the bottom
+    of the screen with nothing to scroll back down to it. Choose_build has kept
+    its place across the same kind of rebuild since it was written; a refresh
+    did not.
+    """
+    panel = panel_of(window)
+    panel.render_models()
+    qt_app.processEvents()
+    bar = panel.scroller.verticalScrollBar()
+    bar.setValue(min(400, bar.maximum()))
+    qt_app.processEvents()
+    start = bar.value()
+    assert start, "the page is not tall enough to scroll, so this proves nothing"
+
+    # What _finish_refresh does once results have come back.
+    panel.render_models()
+    qt_app.processEvents()
+    panel._restore_scroll(start)
+    qt_app.processEvents()
+
+    assert panel.scroller.verticalScrollBar().value() == start, (
+        f"the reader was at {start}px and a rebuild left them at "
+        f"{panel.scroller.verticalScrollBar().value()}px")

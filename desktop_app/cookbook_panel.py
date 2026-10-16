@@ -419,10 +419,16 @@ class CookbookPanel(QWidget):
     def _reread_hardware(self, force=False):
         """Re-detect this device, and redraw only if the memory has moved.
 
-        A percentage rather than an absolute figure, because "1% of 32GB" is a
-        rounding difference and "20% of 32GB" is a laptop having closed four
+        A percentage rather than an absolute figure, because "1% of 32GB" is
+        a rounding difference and "20% of 32GB" is a laptop having closed four
         things. Two per cent keeps a slowly drifting background process from
         repainting the page on every visit.
+
+        keep_ranking=True: this runs on every arrival, so a box that is busy at
+        that moment would otherwise empty the page. The label still reports the
+        fresh figure -- it is what the page says about the machine -- but the
+        cards keep what they were ranked against rather than being told to
+        recommend nothing because a browser opened.
         """
         fresh = detect_hardware(
             self.window.storage.directory if hasattr(self.window, "storage") else None)
@@ -432,7 +438,7 @@ class CookbookPanel(QWidget):
                 return
         self.hardware = fresh
         self.hardware_label.setText(self.hardware.describe())
-        self.render_models()
+        self.render_models(keep_ranking=True)
 
     @property
     def base(self):
@@ -610,7 +616,7 @@ class CookbookPanel(QWidget):
         self.stop_refresh.setEnabled(False)
         self.stop_refresh.setText("Stopping.")
 
-    def render_models(self):
+    def render_models(self, keep_ranking=False):
         """Rebuild the list from the first page.
 
         Every reason the list changes -- a different task, a refresh, a
@@ -619,7 +625,19 @@ class CookbookPanel(QWidget):
         reader on an empty page whenever a filter or a refresh changed how many
         models there are, and an empty page reads as "nothing fits this
         device", which is a claim about their hardware that they never made.
+
+        ``keep_ranking`` holds the ranking the page is already showing when a
+        re-read would say less. The page ranks by free memory and re-reads it
+        on every arrival, so a machine under load reports almost nothing free
+        and the recommended set collapses -- the reader came back from another
+        page to find their models gone and "nothing fits this device" in their
+        place, which is a claim written by a momentary reading rather than by
+        the catalogue. Refusing to say less than is already on screen keeps that
+        empty card meaning what it says: that nothing here fits this device,
+        rather than that something else is running.
         """
+        if keep_ranking and self._cards and not self.page_entries():
+            return
         self._page = 0
         self.render_page()
 
@@ -877,6 +895,11 @@ class CookbookPanel(QWidget):
         self._chosen[repo] = quantization
         where = self.scroller.verticalScrollBar().value()
         QTimer.singleShot(0, lambda: self._rebuild_at(where, repo))
+
+    def _restore_scroll(self, where):
+        """Put the reader back where a rebuild moved them from."""
+        if where:
+            self.scroller.verticalScrollBar().setValue(where)
 
     def _rebuild_at(self, where, repo):
         """The deferred half of choose_build: swap one card, keep the reader put.
@@ -1518,7 +1541,15 @@ class CookbookPanel(QWidget):
         self.catalog_note.setText(self._refresh_note(total, updated, refused,
                                                      read, note, saved, stopped))
         self.refresh_controls()
-        self.render_models()
+        # Rendered where the reader was, not from the top. A refresh rebuilds
+        # every card, and a rebuild sends the scrollbar to zero -- which threw
+        # the reader back to the top of the page just as _set_busy(False) took
+        # the Stop control away, so the button they had just pressed was off
+        # the bottom of the screen with nothing to scroll back to it. Same
+        # arrangement choose_build uses, for the same reason.
+        where = self.scroller.verticalScrollBar().value()
+        QTimer.singleShot(0, lambda: (self.render_models(),
+                                      self._restore_scroll(where)))
 
     def _refresh_note(self, total, updated, refused, read, note, saved, stopped=False):
         """One sentence saying what this press actually achieved.

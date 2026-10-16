@@ -4896,13 +4896,19 @@ def test_follow_system_persists_immediately(window) -> None:
 
 
 def test_a_failed_command_is_reported_in_the_error_colour(window) -> None:
-    """A failure must not be painted in the success colours."""
+    """A failure must not be painted in the success colours.
+
+    Read off the label. The row carries the background, the border and the
+    padding, and a colour on it cascades into the dismiss button beside it and
+    puts the theme's #errorDismiss rule out of that subtree's reach.
+    """
     window.apply_theme(LIGHT)
     window.command_failure("no-such-request", "Could not save credentials.")
 
     assert window.toast_error is True
-    assert win.color(window.theme, "error") in window.toast_row.styleSheet()
-    assert win.color(window.theme, "toast_fg") not in window.toast_row.styleSheet()
+    painted = window.toast.styleSheet()
+    assert win.color(window.theme, "error") in painted
+    assert win.color(window.theme, "toast_fg") not in painted
 
 
 def test_a_notice_is_reported_in_the_success_colour(window) -> None:
