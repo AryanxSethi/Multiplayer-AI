@@ -1561,6 +1561,84 @@ def test_a_failure_is_announced_and_not_overwritten_by_a_confirmation(window, qt
     assert window.toast.accessibleName() == "Message Copied"
 
 
+def test_an_incoming_message_is_not_swallowed_by_a_failure(window, qt_app) -> None:
+    """An alert behind a failure is held, not dropped.
+
+    A confirmation behind a failure is dropped on purpose: it confirms something
+    the user just watched happen, so the thing still standing is the one that
+    was not acted on. An alert is not that. A peer has sent something and the
+    prompt pointing at it is the only thing that pulls anyone to the
+    conversation -- the message itself is in the chat either way, and the
+    unread badge and the activity log both still record it, which is exactly
+    why the disappearing prompt was easy to miss.
+
+    So it waits its turn and goes up when the failure is dismissed.
+    """
+    window.notice("Could not reach the host.", error=True)
+    window.network_event("incoming", {
+        "from": "guest-laptop", "to": "me", "text": "are you there?"})
+    qt_app.processEvents()
+
+    assert window.toast.text() == "Could not reach the host.", (
+        f"the alert replaced the failure: {window.toast.text()!r}")
+    assert window.toast_row.isHidden() is False, (
+        "the alert took the failure off the screen")
+
+    window.dismiss_notice()
+    assert window.toast.text() == "Message from guest-laptop. Open their conversation to view it.", (
+        f"the alert was dropped rather than held: the toast reads "
+        f"{window.toast.text()!r} after the failure was dismissed")
+    assert window.toast_row.isHidden() is False, (
+        "the held alert was released but not shown")
+
+    # The message itself was never at risk, and must still be in the chat.
+    assert window.chats["guest-laptop"]["messages"] == [("peer", "are you there?")], (
+        f"the message is not in the conversation: {window.chats}")
+
+
+def test_a_fatal_is_not_swallowed_by_a_failure(window) -> None:
+    """A runtime that cannot continue must not be silenced by a standing failure."""
+    window.notice("Could not reach the host.", error=True)
+    window.network_event("fatal", "The credential store is locked.")
+    window.dismiss_notice()
+
+    assert window.toast.text() == "The credential store is locked.", (
+        f"a fatal was dropped while a failure stood: the toast reads "
+        f"{window.toast.text()!r} instead after dismissing")
+
+
+def test_the_shutdown_message_is_the_one_a_screen_reader_is_told(qt_app, storage) -> None:
+    """closeEvent writes the toast directly, so it has to name itself too.
+
+    Every notice through notice() sets the accessible name, because that is the
+    only channel a screen reader has for this toast. closeEvent bypasses all of
+    that and sets the text alone, which left the window displaying one thing and
+    announcing another for the length of the shutdown.
+
+    Its own window rather than the shared fixture, because close() drives the
+    real shutdown and the fixture tears the network down again afterwards.
+    """
+    instance = win.MainWindow(storage)
+    try:
+        instance.notice("Message Copied", duration=win.COPY_TOAST_MS)
+        assert instance.toast.accessibleName() == "Message Copied"
+
+        instance.close()
+        # No processEvents here. closeEvent writes the toast synchronously, and
+        # letting the loop turn runs finish_close, which closes the event loop
+        # and leaves the teardown below shutting a dead loop down again. The
+        # other close tests in this file avoid it the same way.
+        assert instance.toast.accessibleName() == instance.toast.text(), (
+            f"the toast reads {instance.toast.text()!r} but is announced as "
+            f"{instance.toast.accessibleName()!r}")
+        assert "shutting down" in instance.toast.accessibleName(), (
+            f"the accessible name was left describing a notice from before the "
+            f"shutdown: {instance.toast.accessibleName()!r}")
+    finally:
+        instance.network.shutdown()
+        instance.network.wait(10000)
+
+
 def test_the_composer_is_set_apart_from_the_messages(window, qt_app) -> None:
     """It already sat outside the scrolling area, so it did not move.
 

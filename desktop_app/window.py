@@ -214,6 +214,12 @@ class MainWindow(QMainWindow):
         # actions cannot be fired twice from two places at once.
         self.chat_busy = False
         self.toast_error = False
+        # An alert that arrived while a failure was still on screen and has not
+        # been shown yet. Suppressing it lost it outright, which is right for a
+        # confirmation -- what it confirmed has already visibly happened -- and
+        # wrong for an alert, because nobody has been told anything yet. Held
+        # here and shown when the failure is dismissed.
+        self._pending_alert = None
         self.request_count = 0
         self.ready = False
         self.closing = False
@@ -2708,7 +2714,7 @@ class MainWindow(QMainWindow):
         while self.activity_list.count() > 8:
             self.activity_list.takeItem(self.activity_list.count() - 1)
 
-    def notice(self, message, error=False, duration=None):
+    def notice(self, message, error=False, duration=None, alert=False):
         """Show the toast, then take it away again.
 
         ``duration`` is how long it stays. It defaults to 7.5s because a
@@ -2721,6 +2727,13 @@ class MainWindow(QMainWindow):
         the notice that is actually on screen owns the countdown. Anything else
         and a stale timer from a previous notice hides this one early, which is
         at its worst on a short notice followed by a long one.
+
+        ``alert`` marks a notice that is not a confirmation: something arriving
+        from outside rather than a result the user just watched happen. It is
+        held back while a failure is standing rather than dropped, and shown
+        once that failure is dismissed. Only ``dismiss_notice`` releases it,
+        which needs no timer of its own -- an alert is only ever held behind a
+        failure, and a failure stops the timer.
         """
         # isHidden and not isVisible: the window is never shown in tests, and
         # more to the point a reader who has the window minimised has the
@@ -2730,6 +2743,19 @@ class MainWindow(QMainWindow):
             # screen. Nothing is shown for it: what it confirmed has already
             # visibly happened, and the thing still standing is the one that
             # was not acted on.
+            if alert:
+                # An alert is not that. A peer has sent something, or the
+                # runtime has hit something it cannot continue past, and
+                # nobody has been told. Dropping it is what made an incoming
+                # message vanish while a failure stood -- the unread badge and
+                # the activity log still recorded it, but the prompt that
+                # points at it was gone and never came back. Held here instead,
+                # and shown when the failure is dismissed.
+                #
+                # One slot, latest wins. Two alerts arriving behind a single
+                # failure keep the most recent; the other is still in the chat
+                # and the activity log, which is where it was anyway.
+                self._pending_alert = message
             return
         self.style_toast(error)
         self.toast.setText(message)
@@ -2759,6 +2785,12 @@ class MainWindow(QMainWindow):
         """Take the message away. There is a control for it, not just a timer."""
         self.toast_timer.stop()
         self.toast_row.hide()
+        # Whatever was held back while that message stood goes up now, or it
+        # was held for nothing. Cleared first so the notice it triggers cannot
+        # re-enter here and find it.
+        held, self._pending_alert = self._pending_alert, None
+        if held is not None:
+            self.notice(held, alert=True)
 
     def command(self, method, *args, success=None, failure=None):
         if not self.ready and method != "close":
@@ -2963,7 +2995,8 @@ class MainWindow(QMainWindow):
                 if self.selected != source:
                     chat["unread"] = chat.get("unread", 0) + 1
                 self.add_activity(f"Message from {source}", f"Received by {data['to']}")
-                self.notice(f"Message from {source}. Open their conversation to view it.")
+                self.notice(f"Message from {source}. Open their conversation to view it.",
+                            alert=True)
             else:
                 # ``data["to"]`` is this device's own agent, which is the one
                 # that answered: ``data["from"]`` is the peer that asked, and
@@ -2981,7 +3014,13 @@ class MainWindow(QMainWindow):
         elif event == "activity":
             self.add_activity(data["title"], data["detail"])
         elif event in ("notice", "fatal"):
-            self.notice(data)
+            # A fatal arrives here as an ordinary notice, and a failure standing
+            # on screen used to swallow it. Nothing has been told at that point
+            # and the runtime cannot continue, so it is held rather than
+            # dropped. Still not styled as a failure -- it does not go red, does
+            # not persist, and is not announced -- which is worth its own change
+            # and not this one.
+            self.notice(data, alert=event == "fatal")
             if event == "fatal":
                 self.progress.hide()
                 self.set_connection_state("statusBad", "●  Startup needs attention")
@@ -4143,6 +4182,13 @@ class MainWindow(QMainWindow):
             self.closing = True
             self.setEnabled(False)
             self.toast.setText("Disconnecting agents and shutting down your local relay…")
+            # The accessible name goes with it. It is written on every notice
+            # and is the only channel a screen reader has for this toast, so
+            # leaving it describing whatever notice came before means the window
+            # says one thing and announces another for the whole of shutdown --
+            # which is when it is least welcome to be told the wrong thing.
+            self.toast.setAccessibleName(
+                "Disconnecting agents and shutting down your local relay…")
             # Stopped first: this message is not going anywhere, and a copy
             # notice still counting down would take it off the screen a second
             # later -- during shutdown, on a window that is already disabled.
