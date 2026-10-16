@@ -69,7 +69,6 @@ class StartupStatus:
         self._line = "Starting your network"
         self._tone = "normal"
         self._settled = False
-        self._holding = False
         self.facts: list[str] = []
         self.warnings: list[str] = []
 
@@ -86,10 +85,6 @@ class StartupStatus:
         """Whether everything worth reporting has been reported."""
         return self._settled
 
-    @property
-    def holding(self):
-        return self._holding
-
     def begin_hold(self, line):
         """The last thing worth hearing has arrived; only the hold remains.
 
@@ -103,7 +98,6 @@ class StartupStatus:
         agents turned up, which is the more important of the two to say.
         """
         self._settled = True
-        self._holding = True
         if not self.warnings:
             self._line = HOLD_TEXT
             self._tone = "normal"

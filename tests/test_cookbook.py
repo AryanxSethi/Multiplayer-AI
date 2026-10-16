@@ -925,23 +925,6 @@ def test_byte_counts_are_readable_at_every_scale():
         assert human_bytes(value) == expected
 
 
-def test_a_published_record_is_never_treated_as_a_verified_one():
-    """Fetching metadata is not testing hardware.
-
-    The brief is explicit that updating a model's details must not mark it as
-    tested, so a record built from a live response carries no verification and
-    the date it was read rather than the date it was run.
-    """
-    from desktop_app.cookbook import catalog_from_payload
-    record = catalog_from_payload({"repo": "a/b", "name": "B"}, "2026-10-10")
-    assert record["verified"] is False
-    assert record["last_verified"] == "2026-10-10"
-    model = parse_model(record, 0)
-    assert model.verified is False
-    assert classify(model, Variant(name="v.gguf", quantization="Q4_K_M", size=1024),
-                    device(total_gb=64, available_gb=60))["result"] != VERIFIED
-
-
 @pytest.mark.parametrize("model", load_catalog(), ids=lambda m: m.repo)
 def test_every_shipped_model_is_internally_consistent(model):
     """What must hold of every catalogue entry, whenever it was added.
@@ -1118,8 +1101,8 @@ def test_withdrawn_models_under_a_filter_still_name_the_filter():
 
 def _variant_record(**variant):
     """One record carrying one variant, with that variant's fields to hand."""
-    from desktop_app.cookbook import catalog_from_payload
-    record = catalog_from_payload({"repo": "a/b", "name": "B"}, "2026-10-10")
+    record = {"repo": "a/b", "name": "B", "source": "Hugging Face",
+              "last_verified": "2026-10-10", "verified": False}
     record["variants"] = [dict({"name": "v.gguf", "quantization": "Q4_K_M",
                                 "size": 397808192}, **variant)]
     return record

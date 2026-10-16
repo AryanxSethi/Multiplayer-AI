@@ -326,17 +326,6 @@ class Model:
             return f"{billions:.0f}B"
         return f"{billions:.0f}B"
 
-    def variants_for(self, bits=None):
-        """Artifacts matching a bit depth, or all of them when none is given.
-
-        Sorted smallest first, because a person opening a catalog at this
-        point is usually trying to fit something and the smallest artifact that
-        does the job is the answer.
-        """
-        chosen = [variant for variant in self.variants
-                  if bits is None or (variant.bits_per_weight or 0) == bits]
-        return sorted(chosen, key=lambda variant: variant.size or 0)
-
 
 def human_bytes(value):
     """A byte count as something a person can size a download against."""
@@ -1466,24 +1455,3 @@ def describe_changes(previous, current):
     if removed:
         parts.append(f"no longer listed: {', '.join(removed)}")
     return " ".join(part.capitalize() for part in parts) + "."
-
-
-def catalog_from_payload(payload, fetched_at):
-    """Turn metadata fetched from a publisher into a catalogue record.
-
-    Only fields the response actually carries are used, and a field it does
-    not carry is left at zero rather than filled with a plausible number. That
-    matters more here than anywhere else in the app: an invented context
-    length becomes a KV cache estimate, and an invented one is confidently
-    wrong by a factor of several.
-    """
-    record = dict(payload)
-    record.setdefault("source", "Hugging Face")
-    record["last_verified"] = fetched_at
-    record.setdefault("verified", False)
-    return record
-
-
-def rank_key(row):
-    """Sort key for a recommendation row, exposed for tests and callers."""
-    return ORDER.index(row["verdict"]["result"])

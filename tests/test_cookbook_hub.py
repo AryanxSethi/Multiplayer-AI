@@ -15,9 +15,10 @@ breaks here too.
 import httpx
 import pytest
 
-from desktop_app.cookbook import parse_model
+from desktop_app.cookbook import VERIFIED, classify, parse_model
 from desktop_app.cookbook_hub import (HubError, check_repo, fetch_entry,
                                       fetch_model, fetch_variants)
+from tests.test_cookbook import device
 
 CODER_MODEL = {
     "id": "Qwen/Qwen2.5-Coder-7B-Instruct",
@@ -208,10 +209,14 @@ async def test_a_refreshed_record_passes_the_catalogue_s_own_checks():
                           "Qwen2.5-Coder-7B-Instruct-GGUF/tree": CODER_TREE}) as client:
         record = await fetch_entry(client, "Qwen/Qwen2.5-Coder-7B-Instruct",
                                    "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF")
-    assert parse_model(record, 0).parameters == 7615616512
+    model = parse_model(record, 0)
+    assert model.parameters == 7615616512
     assert record["verified"] is False, (
         "reading metadata marked a model as tested")
     assert record["last_verified"], "the reading was not dated"
+    assert model.verified is False
+    assert classify(model, model.variants[0],
+                    device(total_gb=64, available_gb=60))["result"] != VERIFIED
 
 
 async def test_a_request_that_fails_says_so_rather_than_returning_nothing():

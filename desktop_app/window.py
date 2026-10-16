@@ -33,7 +33,7 @@ from .layout import minimum_size, sidebar_should_collapse, window_size
 from .markdown import MarkdownMessage
 from .model_purpose import ModelPurpose
 from .resources import ResourceSampler
-from .theme import (DARK, LIGHT, PROVIDER_NAMES, THEME_CHOICES, color, mix,
+from .theme import (DARK, PROVIDER_NAMES, THEME_CHOICES, color, mix,
                    provider_color, provider_entry, provider_names, resolve_theme,
                    stylesheet, system_theme)
 from .widgets import (Composer, ErrorLine, HoverRow, MessageBubble, OrbitArt,
@@ -216,13 +216,6 @@ class MainWindow(QMainWindow):
         self.toast_error = False
         self.request_count = 0
         self.ready = False
-        # Whether the relay has answered since the runtime came up. None until
-        # it has, which is the case command() must not refuse on: "not heard
-        # from yet" and "heard from, and then lost" look identical from here
-        # but need opposite behaviour, and only the second one is worth a
-        # refusal. True on an agents event that reached the relay, False once an
-        # offline event arrives.
-        self.connected = None
         self.closing = False
         self.preparing_files = False
         self.setWindowTitle("Multiplayer AI")
@@ -290,7 +283,6 @@ class MainWindow(QMainWindow):
         rail_layout.addWidget(workspace_scroll, 1)
         join = WorkspaceButton("")
         self.join_button = join
-        self.add_workspace_button = join
         join.setIconSize(QSize(24, 24))
         join.set_ink("success")
         join.setToolTip("Create or join a workspace")
@@ -703,7 +695,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("YOUR DISTRIBUTED TEAM", "eyebrow"))
         layout.addWidget(label("Agents", "title"))
         layout.addWidget(label("Models connected to this workspace.", "muted"))
-        self.model_card, self.model_column = self.model_connection_card()
+        self.model_card = self.model_connection_card()
         layout.addWidget(self.model_card)
         layout.addWidget(label("CONNECTED", "eyebrow"))
         self.search = QLineEdit()
@@ -885,7 +877,7 @@ class MainWindow(QMainWindow):
             signal.connect(lambda *args: self.model_search_status.setText(""))
         self.change_model_provider()
         self.change_model_internet()
-        return card, column
+        return card
 
     def chat_page(self):
         page = QWidget()
@@ -1455,12 +1447,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "selected"):
             self.render_agents()
             self.render_messages()
-
-    def theme_changed(self, light):
-        """Persist the theme chosen in the UI and apply it."""
-        name = LIGHT if light else DARK
-        self.storage.update(theme=name)
-        self.apply_theme(name)
 
     def launch_screen_changed(self, wanted):
         """Store whether to show the launch screen next time.
@@ -2915,11 +2901,6 @@ class MainWindow(QMainWindow):
                 self.persist_history()
         elif event == "agents":
             self.agents = data["agents"]
-            # The relay answered, so it is reachable. Tracked rather than
-            # inferred from the status label, because command() has to decide
-            # whether to submit, and a label is not a place to read an answer
-            # from.
-            self.connected = bool(data["connected"])
             self.set_connection_state(
                 "statusOk" if data["connected"] else "statusWarn",
                 "●  Relay connected" if data["connected"] else "●  Reconnecting…")
@@ -3012,7 +2993,6 @@ class MainWindow(QMainWindow):
         elif event == "pending_cleanup":
             self.show_pending_cleanup(data["credentials"], data.get("files", 0))
         elif event == "offline":
-            self.connected = False
             self.set_connection_state("statusBad", "●  Relay unavailable")
             for agent in self.agents:
                 agent["online"] = False
@@ -4045,16 +4025,6 @@ class MainWindow(QMainWindow):
     def add_workspace(self):
         """The rail's plus goes to the page, where both routes are offered."""
         self.navigate(WORKSPACES_PAGE)
-
-    def open_cookbook(self):
-        """Go to the Cookbook page, the same as pressing its button.
-
-        Kept as a name of its own because it reads better at the two places
-        that call it, and because the top-bar button is wired to navigate
-        directly -- this is here for anything that reaches it as an action
-        rather than as navigation.
-        """
-        self.navigate(COOKBOOK_PAGE)
 
     def leave_workspace(self):
         """Leave a workspace this device joined, from the page that shows it.

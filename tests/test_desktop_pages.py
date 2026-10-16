@@ -686,11 +686,6 @@ def row_marks(row):
     return [child for child in row.findChildren(QLabel) if not child.pixmap().isNull()]
 
 
-def row_lead(row):
-    """The widget holding a row's leading slot: an avatar, or the indent."""
-    return row.content.itemAt(0).widget()
-
-
 def row_has_mark(row):
     """A mark is a label carrying a painted pixmap; the indent is a bare widget."""
     return bool(row_marks(row))
@@ -1756,7 +1751,7 @@ def test_every_shortcut_lands_on_its_own_page(window, index, key) -> None:
 def test_the_rail_plus_goes_to_the_page_and_not_a_menu(window) -> None:
     """It used to pop a two-item menu, and creating was a bare prompt."""
     before = window.stack.currentIndex()
-    window.add_workspace_button.click()
+    window.join_button.click()
 
     assert window.stack.currentIndex() == win.WORKSPACES_PAGE, (
         f"the plus left the user on page {window.stack.currentIndex()}")
