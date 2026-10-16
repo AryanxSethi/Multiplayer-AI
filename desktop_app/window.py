@@ -1411,10 +1411,26 @@ class MainWindow(QMainWindow):
         # put the button outside the bordered box -- so the toast would look
         # like a panel with a stray control next to it.
         foreground = color(self.theme, "error" if self.toast_error else "toast_fg")
+        # The row carries the background, the border and the padding, and
+        # deliberately not the colour. Qt propagates a widget's stylesheet to its
+        # children and lets it win over the application stylesheet for that
+        # subtree, so anything set here shadows #errorDismiss on the dismiss
+        # button beside it. The label below sets its own colour for the same
+        # reason.
         self.toast_row.setStyleSheet("background:" + color(self.theme, "toast_bg")
-                                     + "; color:" + foreground
                                      + "; border:1px solid " + color(self.theme, "text")
                                      + "; padding:12px 24px;")
+        # And the dismiss button declares itself, because being beside the row
+        # puts it out of reach of the theme's #errorDismiss rule. Left to it, it
+        # fell back to default chrome -- a dark fill, a square border, and 62px
+        # of content clipped into the 28px box it is fixed at, so the cross was
+        # not visible at all -- while still taking clicks, which is why it looked
+        # like a dead space rather than a missing control. Declared here rather
+        # than in the theme so it restyles with the toast.
+        self.toast_dismiss.setStyleSheet(
+            "background: transparent; border: none; border-radius: 4px; "
+            "padding: 0; color: " + color(self.theme, "error")
+            + "; font-weight: 700; font-size: 12px;")
         # The label sets its own foreground rather than relying on the row's
         # cascading down to it. A QLabel takes its text colour from the
         # palette, so a failure styled on the row alone is painted in the
