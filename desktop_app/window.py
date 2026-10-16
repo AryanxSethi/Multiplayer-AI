@@ -3017,9 +3017,14 @@ class MainWindow(QMainWindow):
             # A fatal arrives here as an ordinary notice, and a failure standing
             # on screen used to swallow it. Nothing has been told at that point
             # and the runtime cannot continue, so it is held rather than
-            # dropped. Still not styled as a failure -- it does not go red, does
-            # not persist, and is not announced -- which is worth its own change
-            # and not this one.
+            # dropped.
+            #
+            # Not toasted as a failure, and deliberately: startup_error below
+            # is already the lasting surface, styled as an error message and
+            # never hidden. Raising the toast to a failure as well would say
+            # the same thing twice, and would set toast_error for the rest of
+            # the session -- which would suppress every later confirmation,
+            # including the ones a user would need in order to try to recover.
             self.notice(data, alert=event == "fatal")
             if event == "fatal":
                 self.progress.hide()
@@ -3029,6 +3034,14 @@ class MainWindow(QMainWindow):
                 # window of dead controls with nothing to explain them.
                 self.startup_error.setText(str(data))
                 self.startup_error.setVisible(True)
+                # And announced, because this is the event most worth hearing:
+                # the app has stopped and every control it is showing is dead.
+                # The label carries it as its accessible name for the same
+                # reason a toast does, and is announced politely rather than
+                # asserted, so it does not interrupt or move focus.
+                self.startup_error.setAccessibleName(str(data))
+                QAccessible.updateAccessibility(
+                    QAccessibleAnnouncementEvent(self.startup_error, str(data)))
         elif event == "pending_cleanup":
             self.show_pending_cleanup(data["credentials"], data.get("files", 0))
         elif event == "offline":
