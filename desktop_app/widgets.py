@@ -1,14 +1,16 @@
 import math
+import re
 
 from PySide6.QtCore import (Property, QAbstractAnimation, QEasingCurve, QPointF, QRectF,
-                            QPropertyAnimation, Qt, Signal)
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton,
+                            QPropertyAnimation, QStringListModel, Qt, Signal)
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QFrame, QHBoxLayout, QLabel, QPushButton,
                              QPlainTextEdit, QSizePolicy, QStyle, QStyleOptionButton,
                              QVBoxLayout, QWidget)
 
 from .icons import provider_pixmap
 from .theme import DARK, color, mix
+from network_a2a.chat_commands import COMMAND_NAMES, IDENTITY, ROLE_NAMES
 
 
 def app_mark(theme_name=DARK, initial="M", size=64):
@@ -252,12 +254,99 @@ class Select(QComboBox):
 class Composer(QPlainTextEdit):
     submitted = Signal()
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.mention_names = ()
+        self.completion_model = QStringListModel(self)
+        self.completer = QCompleter(self.completion_model, self)
+        self.completer.setWidget(self)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.completer.setMaxVisibleItems(8)
+        self.completer.popup().setAccessibleName("Chat suggestions")
+        self.completer.activated[str].connect(self.insert_completion)
+        self.cursorPositionChanged.connect(self.hide_completion)
+
+    def set_mentions(self, names):
+        names = tuple(sorted({name for name in names if re.fullmatch(IDENTITY, name)}, key=str.casefold))
+        if names != self.mention_names:
+            self.mention_names = names
+            self.hide_completion()
+
+    def completion_context(self):
+        cursor = self.textCursor()
+        before = QTextCursor(cursor)
+        before.setPosition(0, QTextCursor.MoveMode.KeepAnchor)
+        text = before.selectedText().replace("\u2029", "\n")
+        role = re.fullmatch(r"\s*/set\s+@" + IDENTITY + r"\s+as\s+([A-Za-z]*)", text, re.I)
+        if role:
+            prefix, options = role[1], ROLE_NAMES
+        else:
+            mention = re.search(r"(?<![\w@])(@[A-Za-z0-9_-]*)$", text)
+            command = re.fullmatch(r"\s*(/[A-Za-z]*)", text)
+            if mention:
+                prefix, options = mention[1], tuple("@" + name for name in self.mention_names)
+            elif command:
+                prefix, options = command[1], COMMAND_NAMES
+            else:
+                return None
+        return cursor.position() - len(prefix), prefix, options
+
+    def hide_completion(self):
+        self.completer.popup().hide()
+
+    def show_completion(self):
+        context = self.completion_context()
+        if context is None or not self.hasFocus():
+            self.hide_completion()
+            return
+        _, prefix, options = context
+        if prefix in options:
+            self.hide_completion()
+            return
+        self.completion_model.setStringList(list(options))
+        self.completer.setCompletionPrefix(prefix)
+        if not self.completer.completionCount():
+            self.hide_completion()
+            return
+        self.completer.popup().setCurrentIndex(self.completer.completionModel().index(0, 0))
+        area = self.cursorRect()
+        area.setWidth(min(360, max(180, self.completer.popup().sizeHintForColumn(0) + 30)))
+        self.completer.complete(area)
+
+    def insert_completion(self, value):
+        context = self.completion_context()
+        if context is None or value not in context[2]:
+            return
+        start, _, _ = context
+        cursor = self.textCursor()
+        cursor.setPosition(start, QTextCursor.MoveMode.KeepAnchor)
+        cursor.insertText(value + " ")
+        self.setTextCursor(cursor)
+        self.hide_completion()
+
     def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self.hide_completion()
+            super().keyPressEvent(event)
+            return
+        if self.completer.popup().isVisible():
+            if event.key() == Qt.Key.Key_Escape:
+                self.hide_completion()
+                event.accept()
+                return
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                value = self.completer.popup().currentIndex().data() or self.completer.currentCompletion()
+                self.insert_completion(value)
+                event.accept()
+                return
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             self.submitted.emit()
             event.accept()
         else:
             super().keyPressEvent(event)
+            if event.text() or event.key() == Qt.Key.Key_Backspace:
+                self.show_completion()
 
 
 class OrbitArt(QWidget):

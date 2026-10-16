@@ -28,7 +28,7 @@ class ModelPurpose(QWidget):
         layout.addLayout(grid)
         self.enabled = TickCheckBox("Allow automatic delegation to this model")
         layout.addWidget(self.enabled)
-        layout.addWidget(label("The first imported model is your default. Add these preferences to route specialist work to other models. They are shared with your workspace.", "muted", True))
+        layout.addWidget(label("The first imported model is your Head. You can also assign roles in chat, e.g. /set @agent as Coder. Type /help for commands. These preferences are shared with your workspace.", "muted", True))
 
     def values(self):
         return {"purpose": self.purpose.toPlainText().strip(),

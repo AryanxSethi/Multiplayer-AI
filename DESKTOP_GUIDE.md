@@ -125,7 +125,11 @@ Greeting-prefixed requests such as
 "Hello, debug this function" still use the coordinator to plan specialist work.
 
 Each imported model has its own purpose and permitted tasks, regardless of its
-provider or model ID. In **Connect a model** or **Edit model**, describe what you
+provider or model ID. Assign a role from chat with `/set @agent as Coder`,
+`Debugger`, `Researcher`, `Writer`, or `Reasoner`. This replaces its purpose and
+permitted tasks and enables specialist delegation. `/set @agent as Chat` clears
+its specialist role. These roles describe your preferences; they do not test the
+model's capabilities. For custom preferences, **Connect a model** and **Edit model** let you describe what you
 want it used for, select tasks such as **Coding**, **Debugging**, **Reasoning /
 problem solving**, **Research**, or **Writing**, and enable **Allow automatic delegation
 to this model**. For example, permit coding and debugging on your chosen specialist.
@@ -140,14 +144,30 @@ on startup when no conversation was previously selected.
 New connections get an unused agent name, such as `ollama-agent-2`, so importing
 another model from the same provider preserves the first model.
 
-In **Conversations**, you can change **Default model** and click **Use model**.
-The workspace owner sets this optional preference; invited members use the same
-default. The choice is saved per workspace. Only active models appear in this
-dropdown; when none are available it shows **No active models**. Ollama models
-are available only while their server can be reached and the model is installed.
+In **Conversations**, type `/set @agent-name as Head` to choose the model that
+answers chat and coordinates specialists. The Head status shows your saved choice
+and any available fallback. The workspace owner assigns roles; invited members
+use the same settings. Choices are saved per workspace. Specialist roles apply
+to models imported on the owner's device.
+
+Type `/help` for all commands, `/agents` to list models, `/users` to list device
+identities, and `/status` to see the Head and specialist tasks. Typing `/` suggests
+commands, `@` suggests users and agents, and `/set @name as ` suggests roles.
+Use the arrow keys and Enter or Tab to accept a suggestion; Enter then sends the
+completed command. Shift+Enter inserts a new line. Help works even before a model
+is connected. Command results appear above the composer and stay out of model
+prompts and shared conversation history.
+
+Start a message with `@name` to open that user's or agent's direct conversation
+and send the rest of the message there. Its existing conversation history is
+used; the current conversation's history stays where it is. A bare `@name` opens
+the conversation. Inline mentions remain message text. Use `//` at the start to
+send a literal leading slash.
+
+Ollama models are available while their server can be reached and the model is installed.
 For a local Ollama HTTP API root (localhost, 127.0.0.1, or ::1), the app starts
 `ollama serve` automatically if the server is stopped, both during import and
-when restoring saved connections. Ollama must already be installed. Existing
+when restoring saved connections or sending to a saved local model. Ollama must already be installed. Existing
 servers are reused, and all workspaces share servers started by the app. On exit,
 the app stops only the servers it started. Saved connections remain available for
 the next launch, without another import. This uses Ollama's documented
@@ -157,8 +177,8 @@ Unavailable models are marked offline and excluded from chat choices. Installing
 a missing model in Ollama restores its saved connection automatically. New imports
 are accepted only when Ollama lists the model as installed. A saved default remains
 saved while unavailable.
-**Automatic · first available model** restores the original default and uses
-an available model while that default is offline. Specialist routing works best with a model that
+`/set head auto` restores the first imported model as Head and uses
+an available model while that Head is offline. Specialist routing works best with a model that
 follows JSON planning instructions reliably. Basic chat does not require planning.
 
 Automatic routing uses only models imported by the workspace owner or explicitly

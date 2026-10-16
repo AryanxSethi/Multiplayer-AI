@@ -2634,25 +2634,24 @@ def test_model_list_results_for_an_old_endpoint_are_ignored(window) -> None:
     assert window.model_models_button.isEnabled()
 
 
-def test_default_model_dropdown_only_offers_active_models_and_recovers(window) -> None:
+def test_head_status_retains_saved_model_and_shows_available_fallback(window) -> None:
     window.ready = True
     window.workspace_meta["coordinator"] = "stopped"
     window.agents = [{"id": "stopped", "kind": "model", "model": "saved-model", "online": False},
                      {"id": "active", "kind": "model", "model": "active-model", "online": True}]
-    window.refresh_coordinator_controls()
-    assert window.coordinator_picker.findData("stopped") == -1
-    assert window.coordinator_picker.currentData() == "active"
+    window.refresh_head_status()
+    assert "Head: @stopped" in window.head_status.text()
+    assert "using @active" in window.head_status.text()
     assert window.workspace_meta["coordinator"] == "stopped"
     window.agents[1]["online"] = False
-    window.refresh_coordinator_controls()
-    assert window.coordinator_picker.count() == 1
-    assert window.coordinator_picker.itemText(0) == "No active models"
-    assert not window.coordinator_picker.isEnabled()
-    assert not window.coordinator_save.isEnabled()
+    window.refresh_head_status()
+    assert "Head: @stopped" in window.head_status.text()
+    assert "Offline" in window.head_status.text()
     window.agents[0]["online"] = True
-    window.refresh_coordinator_controls()
-    assert window.coordinator_picker.currentData() == "stopped"
-    assert window.coordinator_picker.isEnabled()
+    window.refresh_head_status()
+    assert "Head: @stopped" in window.head_status.text()
+    assert "using" not in window.head_status.text()
+    assert "Offline" not in window.head_status.text()
 
 
 def test_ollama_catalog_failure_removes_stale_models_and_a_restart_restores_choices(window) -> None:

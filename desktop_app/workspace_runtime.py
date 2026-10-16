@@ -20,6 +20,7 @@ from network_a2a.persistence import HistoryStore
 from network_a2a.content import MAX_FRAME_BYTES, content_summary
 from network_a2a.web_search import create_search
 from network_a2a.orchestration import GENERAL_TARGET, ORCHESTRATION_TIMEOUT, routing_profile
+from network_a2a.chat_commands import HELP_TEXT, MODEL_ROLES, parse_command, resolve_identity
 
 from .storage import UNAVAILABLE
 from .ollama_service import OllamaService, model_installed
@@ -907,9 +908,82 @@ class WorkspaceRuntime:
 
         return await fetch_entry(self.http, repo, artifact_repo, base)
 
+    async def chat_command(self, text):
+        """Execute a typed workspace action without forwarding it to an agent."""
+        command = parse_command(text)
+        if command is None:
+            raise ValueError("Enter a chat command, such as /help.")
+        if command.name == "help":
+            return {"text": HELP_TEXT}
+        if command.name == "set" and self.remote:
+            raise ValueError("Only the workspace owner can assign the Head or specialist roles.")
+        if self.closed:
+            raise ValueError("This workspace is closed. The command was not applied.")
+        if self.remote:
+            base = relay_http_url(self.active_url, allow_insecure=True)
+            response = await self.relay_http().get(base + "/agents",
+                headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
+            response.raise_for_status()
+            agents = response.json()["agents"]
+            response = await self.relay_http().get(base + "/workspace",
+                headers={"Authorization": "Bearer " + self.active_token}, timeout=8)
+            response.raise_for_status()
+            head = response.json().get("coordinator")
+        else:
+            relay = self.app.state.relay
+            agents = [relay.agent_description(identity) for identity in relay.credentials
+                      if relay.allowed(self.active_id, identity)]
+            head = self.storage.settings.get("coordinator")
+        if command.name == "set":
+            identity = resolve_identity(command.identity, [agent["id"] for agent in agents]) if command.identity else None
+            if command.role in ("Head", "Automatic"):
+                await self.set_coordinator(identity)
+                chosen = self.storage.settings.get("coordinator")
+                return {"text": f"Head set to **@{chosen}**." if chosen else "Head set to **Automatic**. Import a model to start chat."}
+            await self.set_model_role(identity, command.role)
+            return {"text": f"**@{identity}** is now **{command.role}**. " +
+                    ("Specialist delegation is off." if command.role == "Chat" else "Its purpose and permitted tasks were saved; specialist delegation is enabled.")}
+        if command.name == "status":
+            specialists = [agent for agent in agents if agent.get("delegation_enabled")
+                           and agent.get("orchestration_authorized")]
+            lines = [f"**Head:** @{head}" if head else "**Head:** Automatic (first imported model)", "", "**Specialists**"]
+            lines += [f"- @{agent['id']}: {', '.join(agent['tasks'])}" for agent in specialists] or ["No specialist roles assigned."]
+        else:
+            models = command.name == "agents"
+            rows = [agent for agent in agents if (agent.get("kind") == "model") == models]
+            lines = ["**Model agents**" if models else "**Users / devices**", ""]
+            lines += [f"- @{agent['id']} — {'Online' if agent['online'] else 'Offline'}" for agent in rows] or ["None in this workspace."]
+        return {"text": "\n".join(lines)}
+
+    async def set_model_role(self, identity, role):
+        """Persist routing preferences without restarting the model or changing keys."""
+        async with self.mutation:
+            if self.remote or self.closed:
+                raise ValueError("Only the owner of an open workspace can assign specialist roles.")
+            self.storage.recover_agent_save()
+            previous = self.storage.settings.get("agents", [])
+            profile = next((profile for profile in previous if profile["id"] == identity), None)
+            if profile is None:
+                raise ValueError("Assign specialist roles to models imported on this device.")
+            if role not in MODEL_ROLES:
+                raise ValueError("Choose a specialist role from /help.")
+            purpose, tasks = MODEL_ROLES[role]
+            updated = {**profile, **routing_profile({"purpose": purpose, "tasks": list(tasks), "delegation_enabled": bool(tasks)})}
+            try:
+                self.storage.update(agents=[updated if item["id"] == identity else item for item in previous])
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    self.storage.update(agents=previous)
+                raise
+            running = self.app.state.relay.agent_profiles.get(identity, {}).get("running", False)
+            await self.publish_profile(updated, running=running)
+            await self.refresh()
+
     async def set_coordinator(self, agent_id):
         """Save the owner's default model, retaining import order for Automatic."""
         async with self.mutation:
+            if self.closed:
+                raise ValueError("This workspace is closed. The command was not applied.")
             if self.remote:
                 raise ValueError("The workspace owner chooses the default model")
             relay = self.app.state.relay
