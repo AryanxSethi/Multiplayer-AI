@@ -246,6 +246,31 @@ class SavedOllamaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["text"], "Ready to help")
         self.assertEqual(len(self.calls), 1)
 
+    async def test_direct_chat_checks_available_model_only_in_the_handler(self):
+        await self.mock_chat()
+        await self.runtime.save_agent(self.profile)
+        with patch.object(self.runtime.ollama_service, "ensure_model",
+                          wraps=self.runtime.ollama_service.ensure_model) as ensure:
+            result = await self.runtime.send("chat-agent", {"text": "Hello"})
+        ensure.assert_awaited_once()
+        self.assertEqual(result["text"], "Ready to help")
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_direct_chat_prepares_connected_unavailable_model_before_dispatch(self):
+        await self.mock_chat()
+        await self.runtime.save_agent(self.profile)
+        self.ready = False
+        await self.runtime.refresh()
+        self.assertFalse(self.runtime.app.state.relay.agent_description("chat-agent")["online"])
+        with patch.object(self.runtime.ollama_service, "_start", self.start_service), \
+                patch.object(self.runtime.ollama_service, "ensure_model",
+                             wraps=self.runtime.ollama_service.ensure_model) as ensure:
+            result = await self.runtime.send("chat-agent", {"text": "Hello"})
+        self.assertEqual(ensure.await_count, 2)
+        self.assertTrue(self.runtime.app.state.relay.agent_description("chat-agent")["online"])
+        self.assertEqual(result["text"], "Ready to help")
+        self.assertEqual(len(self.calls), 1)
+
     async def test_invited_device_can_wake_a_host_model_through_general_chat(self):
         await self.mock_chat()
         await self.runtime.save_agent(self.profile)

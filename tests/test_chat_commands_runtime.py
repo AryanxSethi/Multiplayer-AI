@@ -95,6 +95,20 @@ class ChatCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.storage.settings["agents"], previous)
         self.assertEqual(self.runtime.app.state.relay.agent_profiles["coder"], public)
 
+    async def test_failed_role_publication_or_refresh_restores_saved_agents(self):
+        previous = list(self.storage.settings["agents"])
+        for operation in ("publish_profile", "refresh"):
+            with self.subTest(operation=operation):
+                error = RuntimeError("Role update failed")
+                with patch.object(self.runtime.engine, operation, side_effect=error) as failed:
+                    with self.assertRaises(RuntimeError) as raised:
+                        await self.runtime.chat_command("/set @coder as Writer")
+                self.assertIs(raised.exception, error)
+                failed.assert_awaited_once()
+                self.assertEqual(self.storage.settings["agents"], previous)
+                restored = Storage(self.directory.name, self.storage.vault)
+                self.assertEqual(restored.settings["agents"], previous)
+
     async def test_workspace_switch_does_not_apply_an_old_command_to_the_new_workspace(self):
         original = self.runtime.active_workspace_id
         await self.runtime.create_workspace("Other")

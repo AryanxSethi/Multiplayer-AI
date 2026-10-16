@@ -2624,10 +2624,14 @@ class MainWindow(QMainWindow):
         mention = leading_mention(text)
         if mention and not self.preparing_files:
             try:
-                identity = resolve_identity(mention[0], [agent["id"] for agent in self.agents])
-                recipient = next(agent for agent in self.agents if agent["id"] == identity)
+                identities = [agent["id"] for agent in self.agents] + [
+                    member["id"] for member in self.workspace_meta.get("members", [])]
+                identity = resolve_identity(mention[0], identities)
+                recipient = next((agent for agent in self.agents if agent["id"] == identity), None)
                 if not self.ready:
                     raise ValueError("Your network is still starting. Try again in a moment.")
+                if recipient is None:
+                    raise ValueError(f"@{identity} is not currently available. Try again in a moment.")
                 if not (recipient["online"] or recipient.get("can_start")):
                     raise ValueError(f"@{identity} is offline. Start it on its device before sending a message.")
                 source = self.chats.get(self.selected, {})

@@ -168,6 +168,54 @@ def test_unknown_mentions_and_recipient_drafts_are_preserved(window):
     assert calls == []
 
 
+@pytest.mark.parametrize("online", [False, True])
+def test_member_only_mentions_preserve_drafts_with_availability_feedback(window, online):
+    window.workspace_meta["members"].append({"id": "bob", "online": online})
+    attachment = {"name": "draft.pdf", "content": []}
+    window.chats[GENERAL_TARGET]["draft_attachments"] = [attachment]
+    calls = []
+    window.command = lambda *args, **kwargs: calls.append(args)
+    window.composer.setPlainText("@BOB hello")
+    assert "bob" in window.composer.mention_names
+    window.send_message()
+    assert "@bob is not currently available" in window.command_output.toPlainText()
+    assert window.composer.toPlainText() == "@BOB hello"
+    assert window.selected == GENERAL_TARGET
+    assert window.chats[GENERAL_TARGET]["draft_attachments"] == [attachment]
+    assert "bob" not in window.chats
+    assert calls == []
+
+
+def test_mentions_check_ambiguity_across_agents_and_members(window):
+    window.workspace_meta["members"].append({"id": "Coder", "online": True})
+    calls = []
+    window.command = lambda *args, **kwargs: calls.append(args)
+    window.composer.setPlainText("@CODER hello")
+    window.send_message()
+    assert "ambiguous" in window.command_output.toPlainText()
+    assert window.composer.toPlainText() == "@CODER hello"
+    assert window.selected == GENERAL_TARGET
+    assert calls == []
+
+
+@pytest.mark.parametrize("online,can_start", [(True, False), (False, True), (False, False)])
+def test_agent_mentions_keep_agent_availability_over_membership(window, online, can_start):
+    window.agents[0].update(online=online, can_start=can_start)
+    window.workspace_meta["members"].append({"id": "coder", "online": not online})
+    calls = []
+    window.command = lambda *args, **kwargs: calls.append(args)
+    window.composer.setPlainText("@coder hello")
+    window.send_message()
+    if online or can_start:
+        assert calls == [("send", "coder", {"text": "hello"})]
+        assert window.selected == "coder"
+    else:
+        assert "@coder is offline" in window.command_output.toPlainText()
+        assert window.composer.toPlainText() == "@coder hello"
+        assert window.selected == GENERAL_TARGET
+        assert calls == []
+
+
 def test_mention_can_open_a_user_chat_without_any_available_model(window):
     window.agents = [window.agents[1]]
     calls = []

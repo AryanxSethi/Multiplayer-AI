@@ -636,7 +636,7 @@ class WorkspaceRuntime:
                     continue
                 runner = self.runners.get(identity)
                 connected = bool(runner and runner[0].ready.is_set() and not runner[1].done())
-                if target == GENERAL_TARGET and connected and self._ollama_availability.get(identity):
+                if connected and self._ollama_availability.get(identity):
                     continue
                 if not connected or not self._ollama_availability.get(identity):
                     self.emit("activity", {"title": "Starting Ollama", "detail": profile["model"]})
@@ -971,13 +971,13 @@ class WorkspaceRuntime:
             updated = {**profile, **routing_profile({"purpose": purpose, "tasks": list(tasks), "delegation_enabled": bool(tasks)})}
             try:
                 self.storage.update(agents=[updated if item["id"] == identity else item for item in previous])
+                running = self.app.state.relay.agent_profiles.get(identity, {}).get("running", False)
+                await self.publish_profile(updated, running=running)
+                await self.refresh()
             except BaseException:
                 with contextlib.suppress(Exception):
                     self.storage.update(agents=previous)
                 raise
-            running = self.app.state.relay.agent_profiles.get(identity, {}).get("running", False)
-            await self.publish_profile(updated, running=running)
-            await self.refresh()
 
     async def set_coordinator(self, agent_id):
         """Save the owner's default model, retaining import order for Automatic."""
