@@ -1,0 +1,10 @@
+# Tools needed to run the tests, and not to run the app. Kept out of the
+# application requirements on purpose: requirements-desktop.txt and
+# requirements-network.txt describe what the app imports, and a reader installing
+# them should not pull a test runner.
+#
+# Pinned to the versions environment.yml pins, so a machine set up either way
+# resolves the same. pytest-asyncio supplies the asyncio_mode that pytest.ini
+# sets; without it pytest exits 4 without collecting anything.
+pytest==9.1.1
+pytest-asyncio==1.4.0

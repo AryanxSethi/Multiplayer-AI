@@ -2,3 +2,9 @@ starlette==1.6.0
 uvicorn==0.52.4
 websockets==17.0.1
 httpx==0.28.1
+# src/messages/envelope.py declares its messages as pydantic models, and
+# tests/test_envelope.py imports it. It was in
+# environment.yml and nowhere else, so the suite only ran on a machine set up
+# from the conda environment and failed on import for anyone who installed the
+# requirements -- which is what CI does.
+pydantic==2.13.5

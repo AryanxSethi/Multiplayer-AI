@@ -15,12 +15,9 @@ the developer's keyring every time the suite ran.
 from __future__ import annotations
 
 import math
-import os
 
 import pytest
 
-# Must be set before QApplication is constructed.
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop theme tests")
 
@@ -129,11 +126,11 @@ def test_apply_theme_recolours_hand_styled_widgets(window) -> None:
     it is painted now, so it is covered by its own test instead.
     """
     window.apply_theme(LIGHT)
-    light_toast = window.toast.styleSheet()
+    light_toast = window.toast_row.styleSheet()
 
     window.apply_theme(DARK)
 
-    assert window.toast.styleSheet() != light_toast
+    assert window.toast_row.styleSheet() != light_toast
 
 
 # --- pieces ---------------------------------------------------------------

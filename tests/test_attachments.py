@@ -1,13 +1,11 @@
 """Read real PDF text and page images using the libraries shipped in the app."""
 import base64
-import os
 import tempfile
 import unittest
 from pathlib import Path
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6.QtPdf")
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QImage, QPainter, QPdfWriter

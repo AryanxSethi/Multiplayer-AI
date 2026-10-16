@@ -274,8 +274,6 @@ stays open; there is no durable offline queue.
 
 Two client Connection Server behaviours worth knowing about:
 
-- **Reconnecting with an existing client id** replaces the registry entry
-  but does not close the previous socket, which is left orphaned.
 - **`connection_id`** is server-internal and never exposed to clients.
 
 ## Design notes

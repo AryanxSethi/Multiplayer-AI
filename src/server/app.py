@@ -15,7 +15,7 @@ the sender as structured errors.
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator, Dict
 
 from starlette.applications import Starlette
@@ -119,16 +119,52 @@ async def client_socket(websocket: WebSocket) -> None:
     client_id = websocket.path_params["client_id"]
 
     await websocket.accept()
-    connection_id = connection_manager.register(client_id, websocket)
+    connection_id, displaced = connection_manager.register(client_id, websocket)
+    if displaced is not None:
+        # One client id is one socket, so the one this replaced has to go.
+        # Closing is where it belongs -- the connection is in hand here and the
+        # registry cannot await -- and it used to be left open, with its
+        # connection id left behind too, on every reconnect.
+        logger.info(
+            "CLIENT_DISPLACED clientId=%s connectionId=%s", client_id, connection_id
+        )
     logger.info(
         "CLIENT_CONNECTED clientId=%s connectionId=%s", client_id, connection_id
     )
 
     try:
+        if displaced is not None:
+            # Inside the try so a cancellation here still reaches the finally.
+            # CancelledError is not an Exception, so suppress() does not cover
+            # it, and outside the block it would skip unregister entirely and
+            # leave the new connection registered for ever.
+            #
+            # Suppressed otherwise, because closing a socket the framework is
+            # already tearing down can raise, and it is out of the registry
+            # either way: nothing to report, nothing left to clean up.
+            with suppress(Exception):
+                await displaced.close()
         while True:
             frame = await _receive_frame(websocket)
             if frame is None:
                 continue
+            # A frame that arrives after this connection has been displaced is
+            # not acted on. close() sends a close event; it does not cancel the
+            # receive_json() already waiting below, and it does not stop the
+            # client that is still writing. So this handler stays in the loop
+            # with a client id the registry has handed to somebody else, and
+            # routing on that id alone would deliver the stale frame down the
+            # new socket or run it as an agent request on the new one's behalf.
+            # The registry is the only thing that knows which connection is
+            # current, so it is what decides.
+            current = connection_manager.get_client(client_id)
+            if current is None or current.connection_id != connection_id:
+                logger.info(
+                    "CLIENT_FRAME_DROPPED clientId=%s connectionId=%s reason=displaced",
+                    client_id,
+                    connection_id,
+                )
+                break
             await _handle_frame(websocket, client_id, frame)
     except WebSocketDisconnect:
         pass

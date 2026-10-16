@@ -52,10 +52,24 @@ def clamp_size(width, height, screen_size=None):
 
 
 def minimum_size(screen_size=None):
-    """The smallest sensible window, never larger than the screen allows."""
+    """The smallest sensible window, never larger than the screen allows.
+
+    The width is capped at SIDEBAR_COLLAPSE_WIDTH rather than at some larger
+    number. It used to be capped at 1010, which is above the 1000px collapse
+    threshold, so the minimum was itself too wide to trigger the collapse: the
+    window could never be narrowed enough for the sidebar to drop, and
+    apply_sidebar_density() only ever ran its expand branch. That held on every
+    screen wide enough for the cap to bite -- which is every screen a desktop
+    user has -- and so the collapsed sidebar was unreachable in the real app,
+    not only in the tests that looked for it.
+    """
     available_width, available_height = available_size(screen_size)
+    # One below the threshold, because sidebar_should_collapse() collapses on
+    # strictly-less-than. Capping at the threshold itself leaves a window whose
+    # minimum width is exactly 1000, which does not collapse.
     return (
-        min(1010, max(MIN_WIDTH, int(available_width * 0.6))),
+        min(SIDEBAR_COLLAPSE_WIDTH - 1,
+            max(MIN_WIDTH, int(available_width * 0.6))),
         min(690, max(MIN_HEIGHT, int(available_height * 0.6))),
     )
 

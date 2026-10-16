@@ -1,6 +1,5 @@
 """Connect a model, define its purpose, choose a coordinator, and send through the native UI."""
 import json
-import os
 import re
 import tempfile
 import time
@@ -10,7 +9,6 @@ from unittest.mock import patch
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtCore import Qt

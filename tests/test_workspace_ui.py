@@ -1,6 +1,5 @@
 """Exercise saved context and workspace controls through native desktop windows."""
 import asyncio
-import os
 import tempfile
 import threading
 import time
@@ -10,7 +9,6 @@ from unittest.mock import patch
 
 import pytest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtCore import Qt, QTimer
