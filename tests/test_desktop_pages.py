@@ -2792,25 +2792,24 @@ def test_model_list_results_for_an_old_endpoint_are_ignored(window) -> None:
     assert window.model_models_button.isEnabled()
 
 
-def test_default_model_dropdown_only_offers_active_models_and_recovers(window) -> None:
+def test_head_status_retains_saved_model_and_shows_available_fallback(window) -> None:
     window.ready = True
     window.workspace_meta["coordinator"] = "stopped"
     window.agents = [{"id": "stopped", "kind": "model", "model": "saved-model", "online": False},
                      {"id": "active", "kind": "model", "model": "active-model", "online": True}]
-    window.refresh_coordinator_controls()
-    assert window.coordinator_picker.findData("stopped") == -1
-    assert window.coordinator_picker.currentData() == "active"
+    window.refresh_head_status()
+    assert "Head: @stopped" in window.head_status.text()
+    assert "using @active" in window.head_status.text()
     assert window.workspace_meta["coordinator"] == "stopped"
     window.agents[1]["online"] = False
-    window.refresh_coordinator_controls()
-    assert window.coordinator_picker.count() == 1
-    assert window.coordinator_picker.itemText(0) == "No active models"
-    assert not window.coordinator_picker.isEnabled()
-    assert not window.coordinator_save.isEnabled()
+    window.refresh_head_status()
+    assert "Head: @stopped" in window.head_status.text()
+    assert "Offline" in window.head_status.text()
     window.agents[0]["online"] = True
-    window.refresh_coordinator_controls()
-    assert window.coordinator_picker.currentData() == "stopped"
-    assert window.coordinator_picker.isEnabled()
+    window.refresh_head_status()
+    assert "Head: @stopped" in window.head_status.text()
+    assert "using" not in window.head_status.text()
+    assert "Offline" not in window.head_status.text()
 
 
 def test_ollama_catalog_failure_removes_stale_models_and_a_restart_restores_choices(window) -> None:
@@ -2846,6 +2845,39 @@ def test_imported_ollama_row_reports_unavailability_and_automatic_reconnection(w
     window.render_imported_models()
     card = window.imported_model_rows.itemAt(0).widget()
     assert any(child.text() == "Online" for child in card.findChildren(QLabel))
+
+
+@pytest.mark.parametrize("target", [win.GENERAL_TARGET, "saved-model"])
+def test_chat_can_start_local_ollama_without_waiting_for_a_health_poll(window, target) -> None:
+    window.ready = True
+    window.agents = [{"id": "saved-model", "provider": "ollama", "model": "chat",
+                      "kind": "model", "local": True, "online": False, "can_start": True}]
+    window.select_agent(target)
+    assert window.send_button.isEnabled()
+    assert "start Ollama automatically" in window.chat_subtitle.text()
+    submitted = []
+    window.command = lambda method, *args, **kwargs: submitted.append((method, args))
+    window.composer.setPlainText("Start and answer this request")
+    window.send_message()
+    assert submitted == [("send", (target, {"text": "Start and answer this request"}))]
+    assert window.chats[target]["pending"]
+    assert window.chat_subtitle.text() == "Starting Ollama…"
+
+
+def test_an_explicitly_stopped_ollama_model_starts_only_when_addressed_directly(window) -> None:
+    window.ready = True
+    window.agents = [{"id": "saved-model", "provider": "ollama", "model": "chat",
+                      "kind": "model", "local": False, "online": False, "can_start": True}]
+    window.select_agent(win.GENERAL_TARGET)
+    assert not window.send_button.isEnabled()
+    window.render_agents()
+    card = window.agent_cards.itemAt(0).widget()
+    talk = next(button for button in card.findChildren(QPushButton)
+                if button.text().startswith("Open conversation"))
+    assert talk.isEnabled()
+    talk.click()
+    assert window.selected == "saved-model"
+    assert window.send_button.isEnabled()
 
 
 def test_attachment_failure_returns_to_its_chat_and_preserves_the_draft(window) -> None:

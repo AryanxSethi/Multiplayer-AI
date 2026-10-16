@@ -861,6 +861,7 @@ class BackgroundArchiveTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.ensure_future(asyncio.sleep(3600))
         self.addAsyncCleanup(task.cancel)
         self.other.runners["chat-agent"] = (unittest.mock.Mock(ready=asyncio.Event()), task)
+        self.other.model_runners.add("chat-agent")
         profiles = {"chat-agent": {"id": "chat-agent", "provider": "ollama",
                                    "model": "chat", "base_url": "http://127.0.0.1:1"}}
 

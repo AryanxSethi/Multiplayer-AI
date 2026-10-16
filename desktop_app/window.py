@@ -24,6 +24,7 @@ from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_con
 from network_a2a.adapters import PROVIDERS
 from network_a2a.web_search import validate_search_settings
 from network_a2a.orchestration import GENERAL_TARGET, TASK_TYPES, general_chat_state
+from network_a2a.chat_commands import HELP_TEXT, is_command, leading_mention, parse_command, resolve_identity
 
 from .bridge import NetworkThread
 from .dialogs import InviteDialog, available_agent_name, parse_invitation
@@ -189,6 +190,7 @@ class MainWindow(QMainWindow):
         self.live_requests = set()
         self.workspace_buttons = {}
         self.callbacks = {}
+        self.command_request = None
         self.sidebar_expanded = False
         self.busy = False
         # Every message a card shows, keyed by the card that owns it. Held
@@ -913,17 +915,9 @@ class MainWindow(QMainWindow):
         header.addLayout(heading)
         self.chat_subtitle = label("Start a conversation with a connected device.", "muted")
         header.addWidget(self.chat_subtitle)
-        self.coordinator_controls = QWidget()
-        coordinator_row = QHBoxLayout(self.coordinator_controls)
-        coordinator_row.setContentsMargins(0, 0, 0, 0)
-        coordinator_row.addWidget(label("Default model", "muted"))
-        self.coordinator_picker = Select()
-        self.coordinator_picker.setToolTip("The first imported model is used automatically. Choose another default here.")
-        coordinator_row.addWidget(self.coordinator_picker, 1)
-        self.coordinator_save = action("Use model", self.save_coordinator)
-        self.coordinator_save.setToolTip("Save this workspace's default model for chat and routing")
-        coordinator_row.addWidget(self.coordinator_save)
-        header.addWidget(self.coordinator_controls)
+        self.head_status = label("Head: Automatic · /help for commands", "muted", True)
+        self.head_status.setToolTip("Use /set @agent as Head to choose the workspace's coordinator")
+        header.addWidget(self.head_status)
         self.share_conversation_button = action("Invite to conversation", self.invite_conversation)
         self.share_conversation_button.setToolTip(
             "Invite another device into this conversation")
@@ -972,7 +966,7 @@ class MainWindow(QMainWindow):
         self.messages_scroll.viewport().installEventFilter(self)
         column.addWidget(self.messages_scroll, 1)
         self.composer = Composer()
-        self.composer.setPlaceholderText("What would you like to work on?")
+        self.composer.setPlaceholderText("Send a message, @mention someone, or type /help")
         self.composer.setMaximumHeight(105)
         self.composer.submitted.connect(self.send_message)
         self.attachment_rows = QVBoxLayout()
@@ -983,6 +977,19 @@ class MainWindow(QMainWindow):
         self.composer_bar, composer_column = frame("composerBar")
         composer_column.setContentsMargins(22, 12, 22, 14)
         composer_column.setSpacing(8)
+        self.command_panel, command_column = frame("card")
+        command_heading = QHBoxLayout()
+        command_heading.addWidget(label("Workspace commands", "heading"), 1)
+        command_heading.addWidget(action("Dismiss", self.command_panel.hide, name="ghost"))
+        command_column.addLayout(command_heading)
+        self.command_scroll = QScrollArea()
+        self.command_scroll.setWidgetResizable(True)
+        self.command_scroll.setMinimumHeight(100)
+        self.command_scroll.setMaximumHeight(210)
+        command_column.addWidget(self.command_scroll)
+        self.command_text = ""
+        self.command_panel.hide()
+        composer_column.addWidget(self.command_panel)
         composer_column.addLayout(self.attachment_rows)
         composer_column.addWidget(self.composer)
         footer = QHBoxLayout()
@@ -999,7 +1006,7 @@ class MainWindow(QMainWindow):
         # after the header's stretch past the right edge of the window, where
         # the conversation buttons sat visible and unclickable. Wrapping lets it
         # shrink to its longest word instead of to its whole sentence.
-        self.composer_hint = label("Enter to send · Shift + Enter for a new line", "muted", True)
+        self.composer_hint = label("/help · @ to mention · Enter to send · Shift + Enter for a new line", "muted", True)
         self.composer_hint.setWordWrap(True)
         self.composer_hint.setMinimumWidth(120)
         footer.addWidget(self.composer_hint)
@@ -1008,6 +1015,7 @@ class MainWindow(QMainWindow):
         self.send_button.setToolTip("Send this message to the selected agent")
         footer.addWidget(self.send_button)
         composer_column.addLayout(footer)
+        self.composer.textChanged.connect(self.update_chat_controls)
         column.addWidget(self.composer_bar)
         layout.addWidget(panel, 1)
         return page
@@ -1453,6 +1461,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "selected"):
             self.render_agents()
             self.render_messages()
+        if hasattr(self, "command_panel") and not self.command_panel.isHidden() and self.command_text:
+            self.show_command_result(self.command_text)
 
     def launch_screen_changed(self, wanted):
         """Store whether to show the launch screen next time.
@@ -1655,7 +1665,7 @@ class MainWindow(QMainWindow):
                 column.addWidget(label(self.model_purpose_summary(agent), "muted", True))
                 column.addSpacing(7)
                 talk = action("Open conversation  →", lambda checked=False, id=agent["id"]: self.select_agent(id))
-                talk.setEnabled(agent["online"])
+                talk.setEnabled(agent["online"] or bool(agent.get("can_start")))
                 talk.setToolTip(f"Start a conversation with {agent['id']}")
                 talk.setAccessibleName(f"Open a conversation with {agent['id']}")
                 column.addWidget(talk)
@@ -1951,41 +1961,42 @@ class MainWindow(QMainWindow):
         if target != GENERAL_TARGET:
             return next((item for item in self.agents if item["id"] == target), None)
         state = general_chat_state(self.model_agents(), self.workspace_meta.get("coordinator"))
-        return {"id": GENERAL_TARGET, "kind": "model", "online": state["online"], "vision": state["vision"],
+        startable = [model for model in self.model_agents()
+                     if model.get("can_start") and model.get("local")
+                     and model.get("orchestration_authorized", True)]
+        return {"id": GENERAL_TARGET, "kind": "model", "online": state["online"],
+                "vision": state["vision"] or any(model.get("vision") for model in startable),
+                "can_start": bool(startable),
                 "conversation_model": state["conversation_model"]["id"] if state["conversation_model"] else None,
                 "coordinator_online": bool(state["coordinator"] and state["coordinator"].get("online")),
                 "delegating": state["delegating"], "coordinator": state["coordinator"]["id"] if state["coordinator"] else None}
 
-    def refresh_coordinator_controls(self):
-        models = [agent for agent in self.model_agents()
-                  if agent.get("online") and agent.get("orchestration_authorized", True)]
-        coordinator = general_chat_state(models, self.workspace_meta.get("coordinator"))["conversation_model"]
-        current = coordinator["id"] if coordinator else None
-        signature = (self.workspace_id, current, tuple((agent["id"], agent.get("model")) for agent in models))
-        if getattr(self, "_coordinator_signature", None) != signature:
-            self._coordinator_signature = signature
-            self.coordinator_picker.clear()
-            self.coordinator_picker.addItem("Automatic · first available model" if models else "No active models", None)
-            for agent in models:
-                self.coordinator_picker.addItem(agent["id"] + " · " + (agent.get("model") or "Configured model"), agent["id"])
-            self.coordinator_picker.setCurrentIndex(max(0, self.coordinator_picker.findData(current)))
-        self.coordinator_picker.setEnabled(bool(models) and self.ready and not self.remote)
-        self.coordinator_save.setEnabled(bool(models) and self.ready and not self.remote)
-
-    def save_coordinator(self):
-        self.command("set_coordinator", self.coordinator_picker.currentData(),
-                     success=lambda result: self.notice("Default model saved for this workspace."))
+    def refresh_head_status(self):
+        state = general_chat_state(self.model_agents(), self.workspace_meta.get("coordinator"))
+        head = state["coordinator"]
+        active = state["conversation_model"]
+        text = "Head: @" + head["id"] if head else "Head: Automatic"
+        if head and not head.get("online"):
+            text += " · using @" + active["id"] + " while unavailable" if active else " · Offline"
+        self.head_status.setText(text + " · /help for commands")
 
     def update_chat_controls(self):
         self.refresh_conversation_picker()
-        self.refresh_coordinator_controls()
+        self.refresh_head_status()
+        self.composer.set_mentions([agent["id"] for agent in self.agents] +
+                                   [member["id"] for member in self.workspace_meta.get("members", [])])
         room = self.conversations.get(self.selected)
         target = room["target"] if room else self.selected
-        self.coordinator_controls.setVisible(target == GENERAL_TARGET)
+        self.head_status.setVisible(target == GENERAL_TARGET)
         agent = self.chat_target_agent()
         chat = self.chats.get(self.selected, {})
         pending = chat.get("pending") or chat.get("local_pending")
-        self.send_button.setEnabled(bool(agent and agent["online"] and not pending and not self.preparing_files))
+        can_start = bool(agent and agent.get("can_start"))
+        text = self.composer.toPlainText()
+        typed_action = is_command(text) or bool(leading_mention(text))
+        command_pending = self.command_request is not None and self.command_request[0] == self.workspace_id
+        self.send_button.setEnabled(bool((typed_action or agent and (agent["online"] or can_start) and not pending)
+                                        and not command_pending and not self.preparing_files))
         self.attach_button.setEnabled(bool(self.ready and agent and self.is_model_agent(agent) and not pending and not self.preparing_files))
         count = len(self.model_agents(chat_only=True))
         self.chat_agent_count.setText(f"{count} " + ("agent" if count == 1 else "agents"))
@@ -1993,13 +2004,15 @@ class MainWindow(QMainWindow):
         self.send_button.setText("Working…" if pending else "Send request  ↑")
         self.chat_title.setText(room["title"] if room else "Chat" if target == GENERAL_TARGET else self.selected or "Choose an agent")
         subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
+        if agent and not agent["online"] and can_start:
+            subtitle = "Starting Ollama…" if pending else "Send a message to start Ollama automatically"
         if target == GENERAL_TARGET:
             if pending:
-                subtitle = "Your model is working…"
+                subtitle = "Starting Ollama…" if can_start and not agent["online"] else "Your model is working…"
             elif agent["online"]:
                 subtitle = "Online · Ready to chat with " + agent["conversation_model"]
             else:
-                subtitle = "Connect or start a model to chat"
+                subtitle = "Send a message to start Ollama automatically" if can_start else "Connect or start a model to chat"
         self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
         self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
         # The header's one conversation button is always the same widget. It
@@ -2593,10 +2606,99 @@ class MainWindow(QMainWindow):
             self.record_chat_error(workspace_id, store, target, message)
         self.command("prepare_attachments", paths, agent.get("vision", False), success=success, failure=failed)
 
+    def show_command_result(self, text):
+        """Show local command feedback separately from model and shared history."""
+        self.command_text = text
+        old = self.command_scroll.takeWidget()
+        if old is not None:
+            old.deleteLater()
+        self.command_output = MarkdownMessage(text, theme_name=self.theme)
+        self.command_scroll.setWidget(self.command_output)
+        self.command_panel.show()
+        if not self.selected:
+            self.select_agent(GENERAL_TARGET)
+
+    def submit_chat_command(self, text):
+        if self.command_request is not None and self.command_request[0] == self.workspace_id:
+            return
+        try:
+            parsed = parse_command(text)
+        except ValueError as exc:
+            self.show_command_result(str(exc))
+            return
+        if parsed.name == "help":
+            self.show_command_result(HELP_TEXT)
+            self.composer.clear()
+            return
+        if not self.ready:
+            self.show_command_result("Your network is still starting. Try the command again in a moment.")
+            return
+        request = (self.workspace_id, object())
+        self.command_request = request
+        self.update_chat_controls()
+        def finish():
+            if self.command_request == request:
+                self.command_request = None
+            self.update_chat_controls()
+        def success(result):
+            finish()
+            if self.workspace_id == request[0]:
+                self.show_command_result(result["text"])
+                if self.composer.toPlainText().strip() == text:
+                    self.composer.clear()
+        def failure(message):
+            finish()
+            if self.workspace_id == request[0]:
+                self.show_command_result("Command unsuccessful. " + message)
+        try:
+            self.command("chat_command", text, self.workspace_id, success=success, failure=failure)
+        except RuntimeError as exc:
+            failure(str(exc))
+
     def send_message(self):
+        text = self.composer.toPlainText().strip()
+        if is_command(text):
+            self.submit_chat_command(text)
+            return
+        mention = leading_mention(text)
+        if mention and not self.preparing_files:
+            try:
+                identities = [agent["id"] for agent in self.agents] + [
+                    member["id"] for member in self.workspace_meta.get("members", [])]
+                identity = resolve_identity(mention[0], identities)
+                recipient = next((agent for agent in self.agents if agent["id"] == identity), None)
+                if not self.ready:
+                    raise ValueError("Your network is still starting. Try again in a moment.")
+                if recipient is None:
+                    raise ValueError(f"@{identity} is not currently available. Try again in a moment.")
+                if not (recipient["online"] or recipient.get("can_start")):
+                    raise ValueError(f"@{identity} is offline. Start it on its device before sending a message.")
+                source = self.chats.get(self.selected, {})
+                attached = source.get("draft_attachments", [])
+                text = mention[1]
+                if not text and not attached:
+                    self.select_agent(identity)
+                    self.composer.clear()
+                    return
+                destination = self.chats.get(identity, {})
+                if destination.get("pending") or destination.get("local_pending"):
+                    raise ValueError(f"Wait for @{identity}'s current reply before sending another message.")
+                if self.selected != identity and destination.get("draft_attachments"):
+                    raise ValueError(f"@{identity}'s conversation has draft attachments. Finish that draft first.")
+                if len(json.dumps(text).encode()) > 180000:
+                    raise ValueError("This message is too large. Send a shorter request.")
+                if self.selected != identity:
+                    self.chats.setdefault(identity, {"messages": [], "history": [], "pending": False})["draft_attachments"] = attached
+                    source["draft_attachments"] = []
+                self.select_agent(identity)
+                self.composer.setPlainText(text)
+            except ValueError as exc:
+                self.show_command_result(str(exc))
+                return
         if not self.selected or not self.send_button.isEnabled():
             return
-        text = self.composer.toPlainText().strip()
+        if text.startswith("//") and mention is None:
+            text = text[1:]
         attached = self.chats[self.selected].get("draft_attachments", [])
         if not text and not attached:
             return
@@ -2899,6 +3001,9 @@ class MainWindow(QMainWindow):
         elif event == "workspace":
             changed = self.workspace_id != data["id"]
             if changed:
+                self.command_panel.hide()
+                self.command_text = ""
+                self.composer.hide_completion()
                 self.persist_history()
                 self.workspace_id = data["id"]
                 self.restore_history(data["history_directory"])

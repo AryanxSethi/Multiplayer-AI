@@ -17,7 +17,7 @@ from starlette.websockets import WebSocketDisconnect
 from .conversations import Conversations
 from .content import MAX_FRAME_BYTES
 from .web_search import SEARCH_ERRORS
-from .orchestration import Orchestrator, general_chat_state, routing_profile
+from .orchestration import GENERAL_TARGET, Orchestrator, general_chat_state, routing_profile
 
 
 MAX_BYTES = MAX_FRAME_BYTES
@@ -56,6 +56,7 @@ class Relay:
         self.conversations = Conversations(self, conversation_store)
         self.workspace = workspace or {}
         self.member_remover = None
+        self.model_preparer = None
         self.profile_store = conversation_store
         self.agent_profiles = conversation_store.load("agent_profiles").get("profiles", {}) if conversation_store else {}
         self.agent_profiles.update(self.workspace.get("agent_profiles", {}))
@@ -129,10 +130,18 @@ class Relay:
     async def invoke(self, source, target, payload, conversation_id=None):
         if not self.allowed(source, target):
             raise PermissionError("Target is unavailable or outside your group")
+        authorized = self.orchestration_authorized(target)
+        if len(self.pending) >= self.max_pending or not self.admit(source):
+            raise OverflowError("Relay capacity exceeded; retry later")
+        await self.prepare_models(source, target)
+        if not self.allowed(source, target):
+            raise PermissionError("Target is unavailable or outside your group")
+        if authorized and not self.orchestration_authorized(target):
+            raise PermissionError("This model is no longer authorized to receive Chat history")
         peer = self.peers.get(target)
         if not peer:
             raise ConnectionError("Target agent is offline")
-        if len(self.pending) >= self.max_pending or not self.admit(source):
+        if len(self.pending) >= self.max_pending:
             raise OverflowError("Relay capacity exceeded; retry later")
         request_id = str(uuid4())
         future = asyncio.get_running_loop().create_future()
@@ -149,6 +158,13 @@ class Relay:
             raise ConnectionError("Target connection failed") from exc
         finally:
             self.pending.pop(request_id, None)
+
+    async def prepare_models(self, source, target=GENERAL_TARGET):
+        """Let a desktop host start its own models before selection or dispatch."""
+        if source not in self.credentials or target != GENERAL_TARGET and not self.allowed(source, target):
+            raise PermissionError("Target is unavailable or outside your group")
+        if self.model_preparer:
+            await self.model_preparer(source, target)
 
     async def websocket(self, socket):
         """Authenticate an agent socket and relay validated messages with safe error responses."""

@@ -193,14 +193,20 @@ class Conversations:
         if room["pending"]:
             return JSONResponse({"error": "Wait for the current AI reply before sending another message"}, 409)
         general = room["target"] == GENERAL_TARGET
-        if general:
-            try:
+        room["pending"] = True
+        try:
+            await self.relay.prepare_models(source, room["target"])
+            if self.get(room["id"], source) is not room:
+                return JSONResponse({"error": "Conversation is unavailable for this device"}, 404)
+            if general:
                 needs_vision = any(images(message["content"]) for message in model_context(room["messages"])) or bool(images(text))
                 self.relay.orchestrator.coordinator(source, greeting=is_greeting(text), needs_vision=needs_vision)
-            except ConnectionError as exc:
-                return JSONResponse({"error": str(exc)}, 503)
-        elif room["target"] not in self.relay.peers:
-            return JSONResponse({"error": "The conversation's agent is offline"}, 503)
+            elif room["target"] not in self.relay.peers:
+                return JSONResponse({"error": "The conversation's agent is offline"}, 503)
+        except (ConnectionError, PermissionError) as exc:
+            return JSONResponse({"error": str(exc)}, 503)
+        finally:
+            room["pending"] = False
         room["pending"] = True
         self._append(room, "user", text, source)
         history = model_context(room["messages"])

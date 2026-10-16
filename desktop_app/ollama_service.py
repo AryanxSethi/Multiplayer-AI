@@ -62,8 +62,11 @@ class OllamaService:
         self.processes[address] = process
         return process
 
-    async def models(self, http, config):
+    async def models(self, http, config, *, retry=False):
         """Check first; start only unreachable loopback HTTP API roots.
+
+        Explicit import and chat requests use retry=True to bypass the backoff
+        earned by background discovery. They still share the startup lock.
 
         Deliberately not cached. This was tried with a ten second TTL, on the
         grounds that the poll asks the same question every three seconds. That
@@ -91,7 +94,7 @@ class OllamaService:
             except httpx.ConnectError:
                 pass
             retry_at, message = self.failures.get(address, (0, ""))
-            if time.monotonic() < retry_at:
+            if not retry and time.monotonic() < retry_at:
                 raise RuntimeError(message)
             try:
                 process = self.processes.get(address)
@@ -111,6 +114,12 @@ class OllamaService:
                 message = str(exc) or "Ollama did not become ready. Check its installation and the API root."
                 self.failures[address] = (time.monotonic() + self.RETRY_DELAY, message)
                 raise RuntimeError(message) from None
+
+    async def ensure_model(self, http, config, *, retry=False):
+        """Start the service if needed and verify the requested model is installed."""
+        models = await self.models(http, config, retry=retry)
+        if not model_installed(config.model, models):
+            raise ValueError(f"{config.model} is not installed in Ollama. Install it in Ollama, then choose an available model.")
 
     async def close(self):
         self.closed = True
