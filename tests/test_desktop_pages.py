@@ -5111,6 +5111,33 @@ def test_a_failed_startup_is_stated_and_not_only_toasted(window) -> None:
     assert "credential store" in window.startup_error.text()
 
 
+def test_a_fatal_is_announced_and_not_only_shown(window) -> None:
+    """The one event most worth hearing was the only failure never spoken.
+
+    Every other failure goes through notice(error=True), which writes an
+    accessible name and fires an announcement, because the toast is a panel of
+    colour that a screen reader is otherwise never told about. A fatal skipped
+    that entirely: it is shown on startup_error and stays there, which is right
+    for a reader who looks, and useless to one who does not -- the app has
+    stopped and every control on it is dead, with nothing said.
+
+    Asserted on the accessible name, which is what the announcement is made
+    from and what this file checks for every other failure. The event itself is
+    not asserted: it is raised on the Qt accessibility bus, which has no
+    observer to read it back from here.
+    """
+    assert window.startup_error.accessibleName() == "", (
+        "the fatal surface is named before anything has gone wrong: "
+        f"{window.startup_error.accessibleName()!r}")
+
+    window.network_event("fatal", "The credential store is locked.")
+
+    assert window.startup_error.accessibleName() == "The credential store is locked.", (
+        f"a fatal was never named for a screen reader, so it is announced as "
+        f"{window.startup_error.accessibleName()!r}: the app has stopped and "
+        "nothing is said")
+
+
 def test_a_search_that_matched_nothing_does_not_claim_the_team_is_empty(window) -> None:
     """"Your team is getting ready" is a claim about the reader's own setup.
 

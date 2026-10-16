@@ -77,19 +77,39 @@ def test_various_client_ids_are_accepted(
         assert registry.is_connected(client_id)
 
 
-def test_a_second_socket_for_one_client_is_closed(client: TestClient, registry) -> None:
-    """The registry half of the orphan, over a real socket rather than a stand-in.
+def test_a_second_socket_for_one_client_is_closed(
+    client: TestClient, registry, monkeypatch
+) -> None:
+    """The handler closes the socket it displaced, and the registry survives it.
 
-    The displaced socket is closed by the handler, and Starlette records no
-    state we can read back for it: application_state reads DISCONNECTED whether
-    or not close() ran, and a receive() on an abandoned socket blocks for ever
-    and hangs the suite instead of failing it. So this asserts the bookkeeping
-    the close must not corrupt, and the stand-in test above carries the close
-    itself.
+    The close was the half that could not be seen. Starlette records nothing
+    readable back -- application_state reads DISCONNECTED whether or not
+    close() ran, and a receive() on an abandoned socket blocks for ever and
+    hangs the suite instead of failing it -- so this watched the registry and
+    called that enough, which it was not: deleting ``await displaced.close()``
+    from the handler left every assertion here green.
+
+    So the close is watched directly, by recording the sockets it was called
+    on. That is the call under test rather than its consequences, so it fails
+    when the call is removed and does not care what the framework does
+    afterwards.
     """
+    closed: list[object] = []
+    real_close = server_app.WebSocket.close
+
+    async def record_close(websocket, *args, **kwargs):
+        closed.append(websocket)
+        return await real_close(websocket, *args, **kwargs)
+
+    monkeypatch.setattr(server_app.WebSocket, "close", record_close)
+
     with client.websocket_connect("/ws/client-A"):
+        stale_socket = registry.get_client("client-A").websocket
         stale = registry.get_client("client-A").connection_id
         with client.websocket_connect("/ws/client-A"):
+            assert stale_socket in closed, (
+                "the socket this connection replaced was left open: the handler "
+                "stopped tracking it without closing it")
             live = registry.get_client("client-A").connection_id
             assert live != stale, (
                 "the registry still points at the socket that was replaced")
