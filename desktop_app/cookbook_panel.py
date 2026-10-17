@@ -160,6 +160,14 @@ class CookbookPanel(QWidget):
         self.window = window
         self._busy = False
         self._cancelled = False
+        # Where the reader was when a refresh began, held for its duration so
+        # the run's own chrome cannot move them. None when no refresh is in
+        # flight.
+        self._refresh_scroll = None
+        # Counts the reader's own movements of the scrollbar. A queued restore
+        # remembers what this was when it was taken, so a reader who scrolls
+        # while it waits is not put back to a position that is no longer theirs.
+        self._scroll_restore_revision = 0
         self._page = 0
         # Set while a change to "Looking for" is waiting for its turn of the
         # event loop, so repeated presses collapse into one rebuild.
@@ -202,6 +210,19 @@ class CookbookPanel(QWidget):
         # scroll bar is the one thing a rebuild silently resets. Held as
         # ``scroller`` rather than ``scroll``, which is QWidget's own method.
         self.scroller = page
+        # The scrollbar's own actions, not valueChanged on it. The scrollbar
+        # also moves when the refresh chrome re-lays-out the page and the
+        # layout clamps it, and a clamp is a valueChanged with nobody having
+        # scrolled -- so a valueChanged connection recorded the snap as the
+        # reader's position and the next restore took them there.
+        #
+        # actionTriggered is the reader moving it by intent: a wheel turn, the
+        # page keys, Home, End, arriving either at the page or at the focused
+        # scrollbar. sliderMoved is the drag. Neither fires for a clamp or for
+        # a programmatic restore, so nothing has to be remembered about them.
+        bar = page.verticalScrollBar()
+        bar.actionTriggered.connect(self._note_reader_scrolled)
+        bar.sliderMoved.connect(self._note_reader_scrolled)
 
         # Everything below goes into ``layout`` -- the scroll area's own content
         # layout -- and not into ``outer``. ``outer`` holds the scroll area and
@@ -416,20 +437,65 @@ class CookbookPanel(QWidget):
             "until you press this.")
         self._reread_hardware()
 
+    def _entries_for(self, hardware):
+        """What this filter would list against ``hardware``, in page order.
+
+        Takes the hardware rather than reading it, so a reading can be counted
+        against what is already on screen before it is adopted.
+        """
+        task = self.task_picker.currentData()
+        if not self.catalog:
+            return []
+        offered = recommend(self.catalog, hardware, task=task)
+        withdrawn = [model for model in self.catalog
+                     if model.deprecated and (not task or task in model.tasks)]
+        return ([("model", row) for row in offered]
+                + [("withdrawn", model) for model in withdrawn])
+
     def _reread_hardware(self, force=False):
         """Re-detect this device, and redraw only if the memory has moved.
 
-        A percentage rather than an absolute figure, because "1% of 32GB" is a
-        rounding difference and "20% of 32GB" is a laptop having closed four
+        A percentage rather than an absolute figure, because "1% of 32GB" is
+        a rounding difference and "20% of 32GB" is a laptop having closed four
         things. Two per cent keeps a slowly drifting background process from
         repainting the page on every visit.
+
+        A reading that would list fewer models than the page already lists
+        does not re-rank at all. This runs on every arrival, so a box that is
+        busy at that moment would otherwise take models off the page -- all of
+        them, when nothing much is free at all -- and the reader comes back to
+        find their list shortened by whatever else was running. The label still
+        reports the fresh figure: what the page says about the machine is true
+        either way, and only the cards are held.
+
+        Compared against the whole list on both sides, not against the cards
+        on screen. _cards holds one page and nothing else -- it is rebuilt from
+        the visible window on every draw -- so it is capped at PAGE_SIZE, and
+        comparing a complete list against a page lets a real shrink through as
+        long as the list stays above ten.
+
+        Held only while the graphics situation is unchanged. A reading that
+        reports different dedicated graphics memory is a different machine as
+        far as a "fits on the graphics card" verdict is concerned, and keeping
+        those cards would leave the page claiming the reader has a card the
+        label has just said they do not. That is the stale-claim fault this
+        guard exists to prevent, arrived at from the other direction.
         """
         fresh = detect_hardware(
             self.window.storage.directory if hasattr(self.window, "storage") else None)
+        if self.hardware.vram != fresh.vram:
+            self.hardware = fresh
+            self.hardware_label.setText(self.hardware.describe())
+            self.render_models()
+            return
         before, after = self.hardware.memory_available, fresh.memory_available
         if not force and before and after:
             if abs(after - before) < before * 0.02:
                 return
+        listed = len(self.page_entries())
+        if listed and len(self._entries_for(fresh)) < listed:
+            self.hardware_label.setText(fresh.describe())
+            return
         self.hardware = fresh
         self.hardware_label.setText(self.hardware.describe())
         self.render_models()
@@ -574,7 +640,11 @@ class CookbookPanel(QWidget):
         """
         self._busy = busy
         self.refresh.setEnabled(not busy)
-        self.refresh.setVisible(not busy)
+        # Refresh stays on screen during a run, carrying the count. It used to
+        # be hidden and Stop took its place, which hid the progress on a button
+        # nobody could see; putting the count on Stop instead made Stop stop
+        # reading as a control, so a run could not be stopped by looking at it.
+        # Both on screen: one says how far along, the other says how to stop.
         if busy:
             # cancel_refresh disables Stop and relabels it "Stopping." so a
             # second press cannot queue another. That state outlived the run,
@@ -583,11 +653,15 @@ class CookbookPanel(QWidget):
             self.stop_refresh.setEnabled(True)
             self.stop_refresh.setText("Stop")
         self.stop_refresh.setVisible(busy)
-        # The button carries the progress while it runs, so putting it back is
-        # part of ending the run rather than something the caller has to
-        # remember to do on each path out.
+        # Stop carries the progress while the run lasts, and Refresh is hidden
+        # for its duration -- so the step count used to be written to a button
+        # nobody could see and the reader was shown "Stop" for the whole
+        # request. Reset here as well as on the refresh button, so a run that
+        # ends by any path leaves the control saying what a control says.
         if not busy:
             self.refresh.setText(f"Refresh from {self.host_name()}")
+            self.stop_refresh.setText("Stop")
+        self._hold_scroll()
         self.restore.setEnabled(not busy and bool(self.directory and
                                                  self.directory.joinpath(PREVIOUS_NAME).is_file()))
         self.restore_mirror.setEnabled(not busy)
@@ -609,6 +683,9 @@ class CookbookPanel(QWidget):
         self._cancelled = True
         self.stop_refresh.setEnabled(False)
         self.stop_refresh.setText("Stopping.")
+        # "Stopping." is narrower than the count it replaces, so the footer
+        # shrinks here as well. Held for the same reason as every other step.
+        self._hold_scroll()
 
     def render_models(self):
         """Rebuild the list from the first page.
@@ -619,6 +696,10 @@ class CookbookPanel(QWidget):
         reader on an empty page whenever a filter or a refresh changed how many
         models there are, and an empty page reads as "nothing fits this
         device", which is a claim about their hardware that they never made.
+
+        A memory re-read that would list fewer models than are on screen is
+        handled in _reread_hardware instead, before the hardware is replaced,
+        because that is where both readings still exist to be compared.
         """
         self._page = 0
         self.render_page()
@@ -638,14 +719,7 @@ class CookbookPanel(QWidget):
         argument for downloading it. They are listed so somebody who already has
         one can find out why nothing recommends it.
         """
-        task = self.task_picker.currentData()
-        if not self.catalog:
-            return []
-        offered = recommend(self.catalog, self.hardware, task=task)
-        withdrawn = [model for model in self.catalog
-                     if model.deprecated and (not task or task in model.tasks)]
-        return [("model", row) for row in offered] + [("withdrawn", model)
-                                                      for model in withdrawn]
+        return self._entries_for(self.hardware)
 
     def render_page(self):
         """Draw one page of cards, and the controls that move between them.
@@ -877,6 +951,75 @@ class CookbookPanel(QWidget):
         self._chosen[repo] = quantization
         where = self.scroller.verticalScrollBar().value()
         QTimer.singleShot(0, lambda: self._rebuild_at(where, repo))
+
+    def _hold_scroll(self):
+        """Put the reader back where a refresh's own chrome moved them from.
+
+        The Refresh and Stop controls live in the footer, and the footer is
+        inside the scrolled area -- so showing one, hiding the other, and
+        relabelling either of them re-lays-out the page under the reader and
+        the scrollbar goes to zero. That happened at the press rather than at
+        the end, which is why restoring only after the run finished restored
+        zero: by then the reader had already been thrown.
+
+        The position is the reader's *current* one, not the one they had at the
+        press. They may scroll to another card while the requests are in
+        flight, and restoring the press-time position on every step yanked them
+        back to it each time -- the page fought the reader to keep them where
+        they had started rather than where they had chosen to be. _refresh_scroll
+        tracks the reader instead, updated whenever they move the scrollbar and
+        not when we move it ourselves.
+
+        Deferred, because the layout has not settled in the turn that changes
+        it -- the same reason choose_build restores through a singleShot rather
+        than immediately.
+        """
+        where = self._refresh_scroll
+        if where is None:
+            return
+        # ``where`` and the revision are captured together because they are one
+        # fact: where the reader was, as of this moment. Qt does not promise
+        # that a zero-timeout timer runs before later input arrives, so a reader
+        # who scrolls while this restore waits in the queue would otherwise
+        # have their newer choice overwritten by this older position -- the
+        # hold winning against the reader one more time.
+        revision = self._scroll_restore_revision
+        QTimer.singleShot(0, lambda: self._restore_scroll(where, revision))
+
+    def _note_reader_scrolled(self, *_):
+        """Note that the reader moved the scrollbar, and read where to.
+
+        Deferred because Qt documents actionTriggered as firing once the
+        pending position has been adjusted but before it reaches the value --
+        so reading the value in the slot can hand back the place the reader
+        just left. Reading it a turn later is right whichever way the platform
+        commits, and costs nothing but the loop iteration.
+
+        The revision moves on every reader action, not only while busy: the
+        restore queued as a refresh ends outlives _busy, and a reader who
+        scrolls in that window has to be spared that one too.
+        """
+        self._scroll_restore_revision += 1
+        if self._busy:
+            QTimer.singleShot(0, self._record_reader_scroll)
+
+    def _record_reader_scroll(self):
+        """Take the position the reader asked for, now the bar has settled on it."""
+        if self._busy:
+            self._refresh_scroll = self.scroller.verticalScrollBar().value()
+
+    def _restore_scroll(self, where, revision):
+        """Put the reader back where a rebuild moved them from, unless they moved.
+
+        A restore is worth nothing if it lands after the reader has scrolled
+        again, because it was taken from a position that is no longer theirs.
+        The revision says whether it still is; when it has moved on, the queued
+        restore quietly gives up and leaves the reader where they put themselves.
+        """
+        if revision != self._scroll_restore_revision:
+            return
+        if where:
+            self.scroller.verticalScrollBar().setValue(where)
 
     def _rebuild_at(self, where, repo):
         """The deferred half of choose_build: swap one card, keep the reader put.
@@ -1413,6 +1556,11 @@ class CookbookPanel(QWidget):
         refused = {}
         self._busy = True
         self._cancelled = False
+        # Taken before anything moves, and held for the whole run. Everything
+        # after this changes the footer's width, and the footer is inside the
+        # scrolled area, so each of those is a scrollbar reset unless the
+        # reader's place is put back after it.
+        self._refresh_scroll = self.scroller.verticalScrollBar().value()
         # targets is passed down rather than re-read from self.catalog at each
         # step. The step used to index the live list, and the Restore button
         # stayed enabled throughout a refresh, so a restore mid-refresh could
@@ -1467,8 +1615,11 @@ class CookbookPanel(QWidget):
             refused[repo] = reason
             self._refresh_step(index + 1, targets, updated, refused, before)
 
+        # On Refresh, which stays on screen for the run and is disabled, so it
+        # reads as the count rather than as a control. Stop stays Stop.
         self.refresh.setText(f"Refreshing {index + 1} of {total} from "
                              f"{self.host_name()}.")
+        self._hold_scroll()
         self.window.command("cookbook_refresh", repo, artifacts, self.base,
                             success=landed, failure=missed)
 
@@ -1480,6 +1631,15 @@ class CookbookPanel(QWidget):
         successful read because the reader changed their mind about the rest
         would throw away work that cost a request to obtain.
         """
+        # A reader movement writes down the revision at once but the position a
+        # turn later, and that turn can land here. The recorder skips once the
+        # busy state has ended, so a scroll made just before the refresh
+        # finished would leave the revision saying they had moved while the
+        # held position still said they had not -- and the render would then
+        # restore that older position as though it were current. Taken now,
+        # while the page is still where they left it and before anything below
+        # re-lays it out.
+        self._record_reader_scroll()
         self._busy = False
         self._set_busy(False)
 
@@ -1518,7 +1678,42 @@ class CookbookPanel(QWidget):
         self.catalog_note.setText(self._refresh_note(total, updated, refused,
                                                      read, note, saved, stopped))
         self.refresh_controls()
-        self.render_models()
+        # Rendered where the reader was, not from the top. A refresh rebuilds
+        # every card, and a rebuild sends the scrollbar to zero -- which threw
+        # the reader back to the top of the page just as _set_busy(False) took
+        # the Stop control away, so the button they had just pressed was off
+        # the bottom of the screen with nothing to scroll back to it.
+        #
+        # The position held since the press is used rather than read here: by
+        # now the chrome has already reset it more than once, so reading it at
+        # this point reads zero and restores zero, which is what the earlier
+        # version of this did.
+        where = self._refresh_scroll or self.scroller.verticalScrollBar().value()
+        # Read with the position, and before the render rather than after it:
+        # if the reader scrolls while the rebuild is in flight, ``where`` is no
+        # longer where they are, and the restore has to know it is stale.
+        revision = self._scroll_restore_revision
+        self._refresh_scroll = None
+
+        def render_and_restore():
+            target, taken = where, revision
+            if taken != self._scroll_restore_revision:
+                # The reader moved after this was queued. Their captured
+                # position is theirs no longer, so take the live one instead.
+                # Skipping the restore on its own is not enough: the rebuild
+                # below still resets the scrollbar, and skipping would leave
+                # the reader exactly where the rebuild dropped them.
+                target = self._refresh_scroll or self.scroller.verticalScrollBar().value()
+                taken = self._scroll_restore_revision
+            # The restore is queued again rather than run after the render in
+            # the same turn. A rebuild has not laid itself out yet when
+            # render_models() returns, so setting the scrollbar there restores
+            # a position into a layout that does not exist and the scrollbar
+            # clamps to the top once the cards are finally placed.
+            self.render_models()
+            QTimer.singleShot(0, lambda: self._restore_scroll(target, taken))
+
+        QTimer.singleShot(0, render_and_restore)
 
     def _refresh_note(self, total, updated, refused, read, note, saved, stopped=False):
         """One sentence saying what this press actually achieved.

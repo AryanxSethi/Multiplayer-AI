@@ -8,6 +8,7 @@ and why, rather than presenting a list a reader has to take on trust.
 
 
 import pytest
+from unittest.mock import patch
 
 
 pytest.importorskip("PySide6", reason="PySide6 is needed for the desktop page tests")
@@ -541,6 +542,11 @@ def test_one_press_asks_once_per_model_and_says_so_when_none_answer(window) -> N
         "the button stayed live while the request was in flight")
     assert "1 of" in panel.refresh.text(), (
         f"the button does not show progress: {panel.refresh.text()!r}")
+    # And Stop is still a control while it counts, rather than having been
+    # turned into a second progress readout by the count landing on it.
+    assert panel.stop_refresh.text() == "Stop", (
+        f"the stop control reads {panel.stop_refresh.text()!r} while the run "
+        "it stops is in flight, so the reader cannot tell what it does")
 
     panel.do_refresh()
     assert len(pending) == 1, "a second press started another pass while one was running"
@@ -559,6 +565,9 @@ def test_one_press_asks_once_per_model_and_says_so_when_none_answer(window) -> N
     assert panel.refresh.isEnabled(), "the button stayed dead after a failure"
     assert panel.refresh.text().startswith("Refresh from"), (
         f"the button is still mid-attempt: {panel.refresh.text()!r}")
+    assert panel.stop_refresh.text() == "Stop", (
+        f"the run ended leaving the control saying "
+        f"{panel.stop_refresh.text()!r}")
     assert not panel._busy, "the page is still marked busy after a failed refresh"
 
 
@@ -3213,10 +3222,21 @@ def test_a_refresh_can_be_stopped_and_keeps_what_it_already_read(window) -> None
         setattr(panel.window, "_pending", kwargs.get("failure")))[1]
 
     panel.do_refresh()
-    assert not panel.refresh.isVisible(), (
-        "Refresh stayed on screen while a refresh was running, so there was "
-        "nothing to say the second press would do anything")
+    # Refresh stays on screen and disabled, carrying the count. It used to be
+    # hidden for the run and Stop took its place, which is what put the progress
+    # on a button nobody could see; asserting visibility here pinned that. What
+    # matters is that a second press does nothing, which is what being disabled
+    # means.
+    assert not panel.refresh.isEnabled(), (
+        "Refresh stayed live while a refresh was running, so a second press "
+        "could start another pass over the top of this one")
+    assert "1 of" in panel.refresh.text(), (
+        f"the run is counting on nothing: the button reads "
+        f"{panel.refresh.text()!r}")
     assert panel.stop_refresh.isVisible(), "a running refresh cannot be stopped"
+    assert panel.stop_refresh.text() == "Stop", (
+        f"the stop control reads {panel.stop_refresh.text()!r} while the run it "
+        "stops is in flight, so the reader cannot tell what it does")
     assert not panel.restore.isEnabled(), (
         "Restore stayed live during a refresh, and a restore can shorten the "
         "catalogue the requests in flight are indexed against")
@@ -3366,3 +3386,513 @@ def test_a_visit_that_finds_nothing_changed_does_not_redraw(window) -> None:
 
     assert panel.hardware is pinned, (
         "a one per cent difference in free memory rebuilt the whole page")
+
+
+def test_a_busy_machine_does_not_blank_the_page(window, qt_app) -> None:
+    """Coming back to a page must not empty it because the box is busy now.
+
+    The page ranks models by how much memory is free, and it re-read that on
+    every arrival, so it re-ranked on every arrival too. A machine under load
+    reports almost nothing free, the recommended set collapses to empty, and the
+    reader comes back from another page to find their models gone and a "nothing
+    fits this device" card in their place -- which is a claim about the hardware
+    written by a momentary reading, not about the catalogue. Measured here:
+    four cards against a stated 4GB device, none at all against a reading with
+    200MB free.
+
+    The empty card is still correct when the catalogue genuinely has nothing for
+    the device. What is wrong is getting there by a re-rank that says less than
+    what was already on screen.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+    shown = len(panel._cards)
+    assert shown, "the fixture device recommends nothing, so this proves nothing"
+
+    busy = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=4,
+        memory_total=32 * 1024 ** 3, memory_available=200 * 1024 ** 2,
+        disk_free=500 * 1024 ** 3, vram=4 * 1024 ** 3,
+        unified_memory=False, sources={})
+    # Through the re-read rather than render_models() directly, because that is
+    # the path a page switch takes and the one the guard is on.
+    with patch.object(panel_module, "detect_hardware", return_value=busy):
+        panel._reread_hardware(force=True)
+    qt_app.processEvents()
+
+    assert panel._cards, (
+        f"{shown} models were on screen and a re-read against a busy machine "
+        "removed every one of them; the page is now making a claim about the "
+        "hardware out of a momentary reading")
+
+
+def test_pressing_refresh_keeps_the_reader_where_they_were(window) -> None:
+    """The press must not send the reader to the top, or Stop out of reach.
+
+    Refresh and Stop swap places in the footer, and the footer is inside the
+    scrolled area -- so showing one and hiding the other re-lays-out the page
+    and the scrollbar goes to zero. It happens at the press, which is why
+    holding the place only after the run finished held zero: by then the reader
+    had already been thrown to the top and Stop had gone with them.
+
+    Driven through do_refresh rather than through the rebuild, because the press
+    is where it happens, and a test of the rebuild passes against the bug.
+    """
+    panel = panel_of(window)
+    settle()
+    window.command = lambda *args, **kwargs: None
+    panel.render_models()
+    settle()
+
+    bar = panel.scroller.verticalScrollBar()
+    bar.setValue(min(300, bar.maximum()))
+    settle()
+    start = bar.value()
+    assert start, "the page is not tall enough to scroll, so this proves nothing"
+
+    panel.do_refresh()
+    settle()
+
+    assert bar.value() == start, (
+        f"pressing Refresh moved the reader from {start}px to {bar.value()}px, "
+        "which puts the Stop control off the bottom of the page")
+    # isHidden rather than isVisible, because the window is never shown here
+    # and every child reports as not visible regardless of what was asked for.
+    assert panel.stop_refresh.isHidden() is False, (
+        "Stop is not on screen while the run it stops is in flight")
+
+
+def test_a_busier_reading_does_not_shorten_the_list(window, qt_app) -> None:
+    """A re-read that recommends fewer models must not remove the ones shown.
+
+    The guard used to cover only a drop to nothing, so a reading that left two
+    models instead of four still rebuilt the page and took the other two off it
+    -- the reader coming back to a shorter list and no way to tell why. It is
+    the same fault as the empty case and a fraction as visible, which is worse:
+    a page going empty at least says so.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+    shown = len(panel._cards)
+    assert shown >= 2, f"the fixture lists {shown}; this needs room to shrink"
+
+    # Enough free to recommend something, but not everything that was listed.
+    thinner = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=4,
+        memory_total=32 * 1024 ** 3, memory_available=3 * 1024 ** 3,
+        disk_free=500 * 1024 ** 3, vram=4 * 1024 ** 3,
+        unified_memory=False, sources={})
+    with patch.object(panel_module, "detect_hardware", return_value=thinner):
+        panel._reread_hardware(force=True)
+    qt_app.processEvents()
+
+    assert len(panel._cards) >= shown, (
+        f"{shown} models were listed and a busier reading cut the page to "
+        f"{len(panel._cards)}; the reader is given a shorter list by whatever "
+        "else happened to be running")
+
+
+def test_a_graphics_change_re_ranks_the_page(window, qt_app) -> None:
+    """Losing the graphics card must re-rank, whatever the list size does.
+
+    The guard holds the page as it stands when a re-read would list fewer
+    models, because that is how a busy machine used to take models off it. It
+    keys on the count alone, so cards carrying "fits on the graphics card"
+    verdicts survived a reading reporting no dedicated graphics memory at all,
+    while the label beside them described a machine without one.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+    assert panel.hardware.vram, "the fixture device has no graphics card, so this proves nothing"
+    assert panel._cards, "the fixture device recommends nothing, so this proves nothing"
+
+    no_graphics = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=2,
+        memory_total=32 * 1024 ** 3, memory_available=200 * 1024 ** 2,
+        disk_free=500 * 1024 ** 3, vram=None, unified_memory=False, sources={})
+    assert len(panel._entries_for(no_graphics)) < len(panel._cards), (
+        "the fresh reading still lists as much, so the guard would rebuild "
+        "anyway and this test would prove nothing about stale verdicts")
+    with patch.object(panel_module, "detect_hardware", return_value=no_graphics):
+        panel._reread_hardware(force=True)
+    qt_app.processEvents()
+
+    assert panel.hardware.vram is None, (
+        "the page kept the old reading's graphics memory while the label "
+        "describes the fresh one, so the cards and the label disagree")
+    assert "4.0 GB graphics memory" not in panel.hardware_label.text(), (
+        f"the label still claims the old graphics card: {panel.hardware_label.text()!r}")
+
+
+def test_the_guard_compares_whole_lists_not_one_page(window, qt_app) -> None:
+    """Fewer *listed* models must hold the page, not merely fewer than a page.
+
+    _cards holds one page and nothing else -- it is rebuilt from the visible
+    window on every draw -- so it never exceeds PAGE_SIZE. Comparing a
+    complete list against it let any shrink through while the list stayed
+    above ten, which is exactly where a long catalogue lives. Both sides are
+    stubbed here because the catalogue on this machine lists four models and
+    cannot reach a page of ten.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+    from desktop_app.cookbook_panel import PAGE_SIZE
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+
+    def entry(i):
+        return {"model": type("M", (), {"repo": f"repo-{i}", "params": ""})(), "why": []}
+
+    listed, thinner = 15, 12
+    assert listed > PAGE_SIZE, "the fixture cannot reach past one page"
+    panel._cards = {f"repo-{i}": object() for i in range(PAGE_SIZE)}
+    panel.page_entries = lambda: [entry(i) for i in range(listed)]
+    panel._entries_for = lambda hardware: [entry(i) for i in range(thinner)]
+
+    fresh = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=16,
+        memory_total=32 * 1024 ** 3, memory_available=2 * 1024 ** 3,
+        disk_free=500 * 1024 ** 3, vram=4 * 1024 ** 3,
+        unified_memory=False, sources={})
+    with patch.object(panel_module, "detect_hardware", return_value=fresh), \
+            patch.object(panel, "render_models") as rebuild:
+        panel._reread_hardware(force=True)
+
+    rebuild.assert_not_called()
+    assert len(panel.page_entries()) == listed, (
+        f"the list went from {listed} to {len(panel.page_entries())} on a "
+        "reading that only moved the memory figure")
+
+def test_a_layout_clamp_is_not_taken_for_the_readers_position(window) -> None:
+    """A scrollbar moving on its own is not the reader asking to be there.
+
+    valueChanged cannot tell a wheel turn from the layout clamping the
+    scrollbar when the refresh chrome re-lays out the page, and the second is
+    not a reader at all. Recording it is worse than ignoring it: the snap
+    stores itself as the position to hold, so the next restore faithfully
+    takes the reader to the top they never asked for. Held positions come
+    from input events instead.
+    """
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+
+    bar = panel.scroller.verticalScrollBar()
+    bar.setValue(min(300, bar.maximum()))
+    settle()
+    assert bar.value(), "the page is not tall enough to scroll, so this proves nothing"
+    panel._refresh_scroll = 137
+
+    # What a re-layout does to the scrollbar: the range collapses and the
+    # value is clamped to zero, emitting the same signal a wheel turn does.
+    bar.setRange(0, 0)
+    settle()
+    assert panel._refresh_scroll == 137, (
+        f"a layout clamp overwrote the held position with {panel._refresh_scroll}; "
+        "the next restore takes the reader somewhere they never asked to go")
+
+    bar.setRange(0, bar.maximum() or 900)
+    settle()
+
+
+def _make_the_page_scroll(panel, height=2000):
+    """Give the page something to scroll, and return the settled scrollbar.
+
+    A page whose content fits has a scrollbar range of zero, so nothing can be
+    moved and a test about moving it proves nothing.
+    """
+    from PySide6.QtWidgets import QWidget
+
+    spacer = QWidget()
+    spacer.setFixedHeight(height)
+    panel.scroller.widget().layout().addWidget(spacer)
+    settle()
+    bar = panel.scroller.verticalScrollBar()
+    assert bar.maximum() > 0, "the page still cannot scroll, so this proves nothing"
+    return bar
+
+
+def test_a_key_to_the_focused_scrollbar_is_not_missed(window, qt_app) -> None:
+    """The reader can aim at the scrollbar rather than the page, and that counts.
+
+    Watching the viewport for wheel and key events missed this case entirely:
+    a key delivered to the focused scrollbar never reaches a viewport filter,
+    so End -- the reader saying "take me to the bottom" -- went unrecorded,
+    and the refresh put them back where they started.
+    """
+    from PySide6.QtGui import QKeyEvent
+
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    panel._set_busy(True)
+
+    bar = _make_the_page_scroll(panel)
+    bar.setValue(200)
+    settle()
+    panel._refresh_scroll = None
+
+    qt_app.sendEvent(bar, QKeyEvent(
+        QEvent.Type.KeyPress, Qt.Key.Key_End, Qt.KeyboardModifier.NoModifier))
+    settle()
+
+    bottom = bar.value()
+    assert bottom > 200, f"the page did not scroll to the end; it is at {bottom}"
+    assert panel._refresh_scroll == bottom, (
+        f"End was pressed on the scrollbar but the held position stayed at "
+        f"{panel._refresh_scroll} rather than the {bottom} the reader asked for")
+
+
+def test_dragging_the_scrollbar_records_where_it_landed(window, qt_app) -> None:
+    """A drag is an action of its own, not a wheel turn or a key."""
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    panel._set_busy(True)
+
+    bar = _make_the_page_scroll(panel)
+    bar.setValue(0)
+    settle()
+    panel._refresh_scroll = None
+
+    target = min(900, bar.maximum())
+    bar.setSliderPosition(target)
+    settle()
+
+    assert bar.value() == target, f"the drag did not move the bar; it is at {bar.value()}"
+    assert panel._refresh_scroll == target, (
+        f"dragging the scrollbar to {target} left the held position at "
+        f"{panel._refresh_scroll}")
+
+
+def test_a_wheel_turn_records_where_the_reader_ended_up(window, qt_app) -> None:
+    """The recorded place is where the wheel left the reader, not where it found them.
+
+    Reading the scrollbar inside the handler records the position from before
+    the scroll, because Qt commits the new value after the action is announced.
+    The test that briefly stood in for this one asserted the pre-scroll figure
+    and passed for exactly the wrong reason.
+    """
+    from PySide6.QtGui import QWheelEvent
+
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    panel._set_busy(True)
+
+    bar = _make_the_page_scroll(panel)
+    bar.setValue(400)
+    settle()
+    panel._refresh_scroll = None
+
+    from PySide6.QtCore import QPoint, QPointF
+    wheel = QWheelEvent(
+        QPointF(20.0, 20.0), QPointF(20.0, 20.0), QPoint(0, -120), QPoint(0, -120),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate, False)
+    qt_app.sendEvent(panel.scroller.viewport(), wheel)
+    settle()
+
+    after = bar.value()
+    assert after != 400, "the wheel did not scroll, so this proves nothing"
+    assert panel._refresh_scroll == after, (
+        f"the wheel left the reader at {after} but the held position is "
+        f"{panel._refresh_scroll}, which would restore them to where they started")
+
+def test_a_reader_who_scrolls_while_a_restore_waits_is_not_undone(window) -> None:
+    """A restore taken from an older position must give up, not win.
+
+    Both queued restores -- the one after each re-lay-out and the one at the
+    end of a refresh -- are taken from a position read when they were queued.
+    Qt does not promise that a zero-timeout timer runs before later input, so
+    the reader can scroll while the restore waits. Applying it then puts them
+    back where they were before that scroll: the hold winning against the
+    reader, which is the thing all of this was meant to stop.
+    """
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    bar = _make_the_page_scroll(panel)
+    panel._set_busy(True)
+
+    panel._refresh_scroll = 300
+    panel._hold_scroll()
+
+    # The reader moves on before the queued restore gets its turn.
+    bar.setValue(1100)
+    panel._note_reader_scrolled()
+    settle()
+
+    assert bar.value() == 1100, (
+        f"a restore taken from 300 was applied after the reader had scrolled to "
+        f"1100, putting them back at {bar.value()}")
+
+
+def test_the_restore_still_lands_when_the_reader_has_not_moved(window) -> None:
+    """The guard has to spare stale restores only, not all of them."""
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    bar = _make_the_page_scroll(panel)
+    panel._set_busy(True)
+
+    panel._refresh_scroll = 420
+    bar.setValue(0)
+    panel._hold_scroll()
+    settle()
+
+    assert bar.value() == 420, (
+        f"the re-lay-out reset the bar to {bar.value()} and the restore never "
+        "put the reader back")
+
+def test_a_changed_graphics_card_is_not_skipped_by_the_memory_threshold(window, qt_app) -> None:
+    """The two-per-cent early exit must not also swallow a change of graphics card.
+
+    The threshold exists to stop a background process drifting the free memory
+    from repainting the page on every visit, and it returns before anything
+    else is looked at. Put first, it swallowed the graphics comparison whole:
+    a reading whose free memory moved by well under the threshold *and* which
+    reported no dedicated graphics memory came back early, and the page kept
+    its "fits on the graphics card" verdicts for a card that had gone.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+    assert panel.hardware.vram, "the fixture device has no graphics card, so this proves nothing"
+
+    # Free memory a rounding error away from the reading above, and no card.
+    moved = 28 * 1024 ** 3 - 1024 ** 2
+    drifted = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=16,
+        memory_total=32 * 1024 ** 3, memory_available=moved,
+        disk_free=500 * 1024 ** 3, vram=None, unified_memory=False, sources={})
+    assert abs(moved - 28 * 1024 ** 3) < 28 * 1024 ** 3 * 0.02, (
+        "the fixture drifts the memory further than the threshold, so the "
+        "threshold is not what is under test here")
+
+    with patch.object(panel_module, "detect_hardware", return_value=drifted):
+        panel._reread_hardware()
+
+    assert panel.hardware.vram is None, (
+        "a 1MB drift in free memory returned early and left the page assessing "
+        "cards against a graphics card the reading says is gone")
+
+def test_the_final_restore_follows_a_reader_who_moved_during_the_rebuild(window, qt_app) -> None:
+    """Skipping a stale restore is not enough; the rebuild still moves the bar.
+
+    The revision check stops the old position being applied, but the queued
+    render still re-lays the page out, and that is the thing that throws the
+    reader to the top in the first place. So when the reader has moved between
+    the queueing and the run, the render has to take where they are *now* and
+    put them back there -- not give up and leave them where the rebuild landed.
+
+    Asserted on the position the restore is aimed at rather than on the
+    scrollbar afterwards, because with the page kept a fixed height here the
+    rebuild happens not to move the bar at all, and the visible figure would
+    be the same either way.
+    """
+    from desktop_app.cookbook import load_catalog
+
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    bar = _make_the_page_scroll(panel)
+    panel._set_busy(True)
+    panel._refresh_scroll = 300
+    panel.directory = None
+
+    aimed = []
+    real_restore = panel._restore_scroll
+
+    def spy(where, revision):
+        aimed.append(where)
+        real_restore(where, revision)
+
+    panel._restore_scroll = spy
+    record = load_catalog()[0]
+    with patch.object(panel, "_refresh_note", return_value="done"), \
+            patch.object(panel, "refresh_controls", lambda *a, **k: None):
+        panel._finish_refresh(1, {record.repo: record}, {}, [record])
+
+    # The reader moves on while the rebuild is still waiting its turn.
+    bar.setValue(1100)
+    panel._note_reader_scrolled()
+    settle()
+
+    assert aimed, "the refresh queued no restore at all"
+    assert aimed[-1] == 1100, (
+        f"the final restore was aimed at {aimed[-1]}, the position from before "
+        "the reader scrolled, rather than the 1100 they were at")
+
+def test_a_scroll_made_just_before_the_refresh_finishes_is_not_lost(window, qt_app) -> None:
+    """The revision and the held position must not be able to disagree.
+
+    A reader movement raises the revision at once but records the position a
+    turn later. If the refresh finishes in that turn, the recorder is skipped
+    for want of a busy state -- leaving the revision claiming the reader had
+    moved, and the held position still holding the place before they did. The
+    render sees a revision that matches its own and restores that older
+    position, believing it current.
+
+    Asserted on where the restore is aimed, which is where the two disagree.
+    """
+    from desktop_app.cookbook import load_catalog
+
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    bar = _make_the_page_scroll(panel)
+    panel._set_busy(True)
+    bar.setValue(300)
+    settle()
+    panel._refresh_scroll = 300
+
+    # The reader scrolls, and the recorder for it is still queued.
+    bar.setValue(1100)
+    panel._note_reader_scrolled()
+
+    aimed = []
+    real_restore = panel._restore_scroll
+
+    def spy(where, revision):
+        aimed.append(where)
+        real_restore(where, revision)
+
+    panel._restore_scroll = spy
+    panel.directory = None
+    record = load_catalog()[0]
+    with patch.object(panel, "_refresh_note", return_value="done"), \
+            patch.object(panel, "refresh_controls", lambda *a, **k: None):
+        panel._finish_refresh(1, {record.repo: record}, {}, [record])
+    settle()
+
+    # _refresh_scroll is cleared again at the end of the refresh, so the
+    # disagreement is visible only in where the restore was aimed.
+    assert aimed and aimed[-1] == 1100, (
+        f"the final restore was aimed at {aimed[-1] if aimed else 'nothing'} "
+        "rather than the 1100 the reader was at")

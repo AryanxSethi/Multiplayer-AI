@@ -1504,6 +1504,73 @@ def test_the_toast_row_carries_its_own_border_and_inset(window, qt_app) -> None:
         "the toast row is no longer given a border to apply")
 
 
+def test_the_dismiss_cross_is_visible_and_red(window, qt_app) -> None:
+    """The toast's dismiss control shows a red cross rather than a dead space.
+
+    It is a button inside the row, and Qt gives a stylesheet set on a widget
+    priority over the application stylesheet for that widget's whole subtree.
+    style_toast() sets one on the row, so the theme's #errorDismiss rule never
+    reached the button beside it. It fell back to default chrome: a dark fill
+    with a square border and 62px of content inside a button fixed at 28, so
+    the cross was clipped out of sight -- while still taking clicks, which is
+    what made it read as a dead space rather than a missing control.
+
+    Both halves are asserted. The fit is the size hint against the fixed size,
+    which is where the clipping shows before anything is drawn; the colour is
+    read off the painted pixels, because a rule that names a colour and never
+    reaches the glyph looks identical to one that never named it.
+    """
+    from desktop_app.theme import color
+
+    window.notice("Something failed.", error=True)
+    qt_app.processEvents()
+
+    dismiss = window.toast_dismiss
+    hint = dismiss.sizeHint()
+    assert hint.width() <= dismiss.width() and hint.height() <= dismiss.height(), (
+        f"the dismiss control needs {hint.width()}x{hint.height()} inside a "
+        f"{dismiss.width()}x{dismiss.height()} box, so the cross is clipped "
+        "out of sight rather than drawn")
+
+    painted = window.grab().toImage()
+    origin = dismiss.mapTo(window, dismiss.rect().topLeft())
+    wanted = color(window.theme, "error").lower()
+    seen = {painted.pixelColor(x, y).name().lower()
+            for x in range(origin.x(), origin.x() + dismiss.width())
+            for y in range(origin.y(), origin.y() + dismiss.height())}
+    assert wanted in seen, (
+        f"no {wanted} pixel inside the dismiss control, so the cross is not "
+        f"drawn in the error red; it is drawn in {sorted(seen)}")
+
+
+def test_the_dismiss_cross_still_dismisses(window, qt_app) -> None:
+    """The control works, so it cannot be mistaken for something decorative.
+
+    Kept beside the visibility test on purpose. A control that takes clicks and
+    shows nothing is the exact failure being fixed, so a test that only checked
+    the cross appeared would still pass on a button wired to nothing.
+    """
+    window.notice("Something failed.", error=True)
+    qt_app.processEvents()
+    assert window.toast_row.isHidden() is False
+
+    # No word on hover either. A tooltip over a cross in a toast that is already
+    # the width of one message turns a two-character control into something with
+    # a label on it, which is what this control was asked not to be. The
+    # accessible name stays: it is what a screen reader is told, and nothing on
+    # screen has to say it twice.
+    assert window.toast_dismiss.toolTip() == "", (
+        f"hovering the cross still says {window.toast_dismiss.toolTip()!r}")
+    assert window.toast_dismiss.accessibleName() == "Dismiss message", (
+        "the control has nothing left to be called by a screen reader")
+
+    window.toast_dismiss.click()
+    qt_app.processEvents()
+
+    assert window.toast_row.isHidden() is True, (
+        "the dismiss control did not take the toast down")
+
+
 def test_one_timer_owns_the_toast(window) -> None:
     """The countdown is a window-owned timer that each notice restarts.
 
@@ -4839,21 +4906,33 @@ def test_follow_system_persists_immediately(window) -> None:
 
 
 def test_a_failed_command_is_reported_in_the_error_colour(window) -> None:
-    """A failure must not be painted in the success colours."""
+    """A failure must not be painted in the success colours.
+
+    Read off the label. The row carries the background, the border and the
+    padding, and a colour on it cascades into the dismiss button beside it and
+    puts the theme's #errorDismiss rule out of that subtree's reach.
+    """
     window.apply_theme(LIGHT)
     window.command_failure("no-such-request", "Could not save credentials.")
 
     assert window.toast_error is True
-    assert win.color(window.theme, "error") in window.toast_row.styleSheet()
-    assert win.color(window.theme, "toast_fg") not in window.toast_row.styleSheet()
+    painted = window.toast.styleSheet()
+    assert win.color(window.theme, "error") in painted
+    assert win.color(window.theme, "toast_fg") not in painted
 
 
 def test_a_notice_is_reported_in_the_success_colour(window) -> None:
-    """The default stays success-coloured."""
+    """The default stays success-coloured.
+
+    Read off the label, not the row. The row carries the background, the border
+    and the padding; setting a colour on it would cascade into the dismiss
+    button beside it and take the theme's #errorDismiss rule out of reach of
+    that whole subtree, which is what left the cross clipped and uncoloured.
+    """
     window.notice("Replaced 2 saved identities.")
 
     assert window.toast_error is False
-    assert win.color(window.theme, "toast_fg") in window.toast_row.styleSheet()
+    assert win.color(window.theme, "toast_fg") in window.toast.styleSheet()
 
 
 def test_switching_themes_does_not_turn_an_error_toast_green(window) -> None:
@@ -4866,8 +4945,9 @@ def test_switching_themes_does_not_turn_an_error_toast_green(window) -> None:
 
     window.apply_theme(LIGHT)
 
-    assert win.color(LIGHT, "error") in window.toast_row.styleSheet()
-    assert win.color(LIGHT, "toast_fg") not in window.toast_row.styleSheet()
+    painted = window.toast.styleSheet()
+    assert win.color(LIGHT, "error") in painted
+    assert win.color(LIGHT, "toast_fg") not in painted
 
 
 def test_settings_shows_owed_credentials_until_the_cleanup_completes(window) -> None:

@@ -447,9 +447,8 @@ class MainWindow(QMainWindow):
         toast_layout.addWidget(self.toast, 1)
         self.toast_dismiss = action("×", self.dismiss_notice, name="ghost")
         self.toast_dismiss.setObjectName("errorDismiss")
-        self.toast_dismiss.setFixedSize(28, 28)
+        self.toast_dismiss.setFixedSize(31, 31)
         self.toast_dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.toast_dismiss.setToolTip("Dismiss")
         self.toast_dismiss.setAccessibleName("Dismiss message")
         toast_layout.addWidget(self.toast_dismiss, 0, Qt.AlignmentFlag.AlignTop)
         self.style_toast()
@@ -980,7 +979,25 @@ class MainWindow(QMainWindow):
         self.command_panel, command_column = frame("card")
         command_heading = QHBoxLayout()
         command_heading.addWidget(label("Workspace commands", "heading"), 1)
-        command_heading.addWidget(action("Dismiss", self.command_panel.hide, name="ghost"))
+        # A cross rather than the word "Dismiss". Written out beside the heading
+        # it read as the only way out of the panel, and every other surface in
+        # this app that can be closed -- the toast, an error line -- closes with
+        # the same glyph, so the word made this one read as a different kind of
+        # thing.
+        self.command_dismiss = action("×", self.command_panel.hide, name="ghost")
+        self.command_dismiss.setFixedSize(31, 31)
+        self.command_dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.command_dismiss.setToolTip("Dismiss")
+        self.command_dismiss.setAccessibleName("Dismiss workspace commands")
+        # Declared rather than left on #ghost. Ghost carries 9px/12px of
+        # padding for a text button, which makes its size hint 39px wide --
+        # so a 31px box clipped the cross and drew half a glyph. Padding and a
+        # border belong on a button with a word in it; this one has a glyph.
+        # The colour is the ordinary muted text rather than the error red the
+        # toast's cross uses, because this panel is a neutral card and a red
+        # close would read as an error in it.
+        self.style_command_dismiss()
+        command_heading.addWidget(self.command_dismiss)
         command_column.addLayout(command_heading)
         self.command_scroll = QScrollArea()
         self.command_scroll.setWidgetResizable(True)
@@ -1411,15 +1428,45 @@ class MainWindow(QMainWindow):
         # put the button outside the bordered box -- so the toast would look
         # like a panel with a stray control next to it.
         foreground = color(self.theme, "error" if self.toast_error else "toast_fg")
+        # The row carries the background, the border and the padding, and
+        # deliberately not the colour. Qt propagates a widget's stylesheet to its
+        # children and lets it win over the application stylesheet for that
+        # subtree, so anything set here shadows #errorDismiss on the dismiss
+        # button beside it. The label below sets its own colour for the same
+        # reason.
         self.toast_row.setStyleSheet("background:" + color(self.theme, "toast_bg")
-                                     + "; color:" + foreground
                                      + "; border:1px solid " + color(self.theme, "text")
                                      + "; padding:12px 24px;")
+        # And the dismiss button declares itself, because being beside the row
+        # puts it out of reach of the theme's #errorDismiss rule. Left to it, it
+        # fell back to default chrome -- a dark fill, a square border, and 62px
+        # of content clipped into the 28px box it is fixed at, so the cross was
+        # not visible at all -- while still taking clicks, which is why it looked
+        # like a dead space rather than a missing control. Declared here rather
+        # than in the theme so it restyles with the toast.
+        self.toast_dismiss.setStyleSheet(
+            "background: transparent; border: none; border-radius: 4px; "
+            "padding: 0; color: " + color(self.theme, "error")
+            + "; font-weight: 700; font-size: 14px;")
         # The label sets its own foreground rather than relying on the row's
         # cascading down to it. A QLabel takes its text colour from the
         # palette, so a failure styled on the row alone is painted in the
         # ordinary notice colour -- the one thing this styling is for.
         self.toast.setStyleSheet("color:" + foreground)
+
+    def style_command_dismiss(self):
+        """Keep the commands panel's cross in the current theme's colour.
+
+        It carries its own style sheet so the ghost padding -- meant for a
+        labelled button -- cannot clip the glyph, and a widget that carries its
+        own keeps the colour it was given. apply_theme() has to call this: the
+        cross would otherwise carry the theme it was built in for the rest of
+        the session, which is the same reason style_toast() is called there.
+        """
+        self.command_dismiss.setStyleSheet(
+            "background: transparent; border: none; border-radius: 4px; "
+            "padding: 0; color: " + color(self.theme, "text_nav")
+            + "; font-weight: 700; font-size: 14px;")
 
     def style_placeholders(self):
         palette = self.palette()
@@ -1441,6 +1488,7 @@ class MainWindow(QMainWindow):
         self.style_placeholders()
         self.setWindowIcon(app_icon(name))
         self.style_toast()
+        self.style_command_dismiss()
         # A card message carries its own colour, so it does not follow the
         # application sheet and would keep the old theme's error colour.
         for line in self.card_lines.values():

@@ -277,3 +277,54 @@ def test_inline_mention_completion_handles_unicode_and_workspace_changes(compose
     composer.moveCursor(composer.textCursor().MoveOperation.End)
     composer.insert_completion("@agent-name")
     assert composer.toPlainText() == "@ag"
+
+
+def test_the_workspace_commands_panel_closes_with_a_cross(window):
+    """A cross, not the word Dismiss.
+
+    Written out beside the heading it read as the only way out of the panel,
+    and every other closable surface in the app -- the toast, an error line --
+    closes with the same glyph. Asserted on the text so it cannot quietly go
+    back to being a word, and clicked so the control is known to be the thing
+    that closes the panel rather than something that merely says so.
+    """
+    dismiss = window.command_dismiss
+    assert dismiss.text() == "\u00d7", (
+        f"the panel's close control reads {dismiss.text()!r} rather than the "
+        "cross every other surface uses")
+    # And that the cross fits. Left on the ghost style it inherited 9px/12px of
+    # padding meant for a text button, so its size hint came out wider than the
+    # box it is fixed at and the glyph was clipped to part of itself -- which is
+    # how the toast's cross went missing in the first place.
+    assert dismiss.sizeHint().width() <= dismiss.width(), (
+        f"the cross needs {dismiss.sizeHint().width()}px inside a "
+        f"{dismiss.width()}px box, so it is drawn clipped")
+
+    window.command_panel.show()
+    assert window.command_panel.isHidden() is False
+
+    window.command_dismiss.click()
+    assert window.command_panel.isHidden() is True, (
+        "the cross did not close the panel")
+
+
+def test_the_commands_cross_follows_the_theme(window):
+    """Switching themes must not leave the cross in the old theme's colour.
+
+    The cross carries its own style sheet, so it does not follow the
+    application sheet, and apply_theme() restyles the other hand-styled
+    widgets for exactly that reason. It was not doing this one, so a cross
+    built under the dark theme stayed dark-text on the light page for the rest
+    of the session.
+    """
+    from desktop_app.theme import LIGHT, color
+
+    window.apply_theme("DARK")
+    window.apply_theme(LIGHT)
+
+    assert color(LIGHT, "text_nav") in window.command_dismiss.styleSheet(), (
+        "the cross still carries the previous theme's colour: "
+        f"{window.command_dismiss.styleSheet()!r}")
+    assert color("DARK", "text_nav") not in window.command_dismiss.styleSheet(), (
+        "the cross carries both themes' colours at once")
+
