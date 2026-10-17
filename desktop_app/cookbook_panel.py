@@ -19,7 +19,7 @@ it sends before it is pressed.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
 
@@ -206,12 +206,19 @@ class CookbookPanel(QWidget):
         # scroll bar is the one thing a rebuild silently resets. Held as
         # ``scroller`` rather than ``scroll``, which is QWidget's own method.
         self.scroller = page
-        # An event filter on the viewport, not valueChanged on the scrollbar.
-        # The scrollbar also moves when the refresh chrome re-lays-out the
-        # page and the layout clamps it, and a clamp is a valueChanged with
-        # nobody having scrolled -- so a valueChanged connection recorded the
-        # snap as the reader's position and the next restore took them there.
-        page.viewport().installEventFilter(self)
+        # The scrollbar's own actions, not valueChanged on it. The scrollbar
+        # also moves when the refresh chrome re-lays-out the page and the
+        # layout clamps it, and a clamp is a valueChanged with nobody having
+        # scrolled -- so a valueChanged connection recorded the snap as the
+        # reader's position and the next restore took them there.
+        #
+        # actionTriggered is the reader moving it by intent: a wheel turn, the
+        # page keys, Home, End, arriving either at the page or at the focused
+        # scrollbar. sliderMoved is the drag. Neither fires for a clamp or for
+        # a programmatic restore, so nothing has to be remembered about them.
+        bar = page.verticalScrollBar()
+        bar.actionTriggered.connect(self._note_reader_scrolled)
+        bar.sliderMoved.connect(self._note_reader_scrolled)
 
         # Everything below goes into ``layout`` -- the scroll area's own content
         # layout -- and not into ``outer``. ``outer`` holds the scroll area and
@@ -968,20 +975,22 @@ class CookbookPanel(QWidget):
             return
         QTimer.singleShot(0, lambda: self._restore_scroll(where))
 
-    def eventFilter(self, watched, event):
-        """Note where the reader scrolls, from input rather than from the value.
+    def _note_reader_scrolled(self, *_):
+        """Note that the reader moved the scrollbar, and read where to.
 
-        A wheel turn or a page key is the reader saying where they want to be.
-        A scrollbar moving because the layout clamped it is not, and treating
-        the two alike is what made the refresh take the reader to the top:
-        the snap recorded itself as their position, and the next hold restored
-        the snap. So only input moves the held position -- which also means it
-        cannot be overwritten by a chrome change nobody thought to guard.
+        Deferred because Qt documents actionTriggered as firing once the
+        pending position has been adjusted but before it reaches the value --
+        so reading the value in the slot can hand back the place the reader
+        just left. Reading it a turn later is right whichever way the platform
+        commits, and costs nothing but the loop iteration.
         """
-        if watched is self.scroller.viewport() and self._busy:
-            if event.type() in (QEvent.Type.Wheel, QEvent.Type.KeyPress):
-                self._refresh_scroll = self.scroller.verticalScrollBar().value()
-        return super().eventFilter(watched, event)
+        if self._busy:
+            QTimer.singleShot(0, self._record_reader_scroll)
+
+    def _record_reader_scroll(self):
+        """Take the position the reader asked for, now the bar has settled on it."""
+        if self._busy:
+            self._refresh_scroll = self.scroller.verticalScrollBar().value()
 
     def _restore_scroll(self, where):
         """Put the reader back where a rebuild moved them from."""

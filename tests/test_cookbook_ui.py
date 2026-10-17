@@ -3610,9 +3610,86 @@ def test_a_layout_clamp_is_not_taken_for_the_readers_position(window) -> None:
     settle()
 
 
-def test_a_wheel_turn_does_record_the_readers_position(window, qt_app) -> None:
-    """The input path has to still work, or holding would freeze the place."""
-    from PySide6.QtCore import QPoint, QPointF
+def _make_the_page_scroll(panel, height=2000):
+    """Give the page something to scroll, and return the settled scrollbar.
+
+    A page whose content fits has a scrollbar range of zero, so nothing can be
+    moved and a test about moving it proves nothing.
+    """
+    from PySide6.QtWidgets import QWidget
+
+    spacer = QWidget()
+    spacer.setFixedHeight(height)
+    panel.scroller.widget().layout().addWidget(spacer)
+    settle()
+    bar = panel.scroller.verticalScrollBar()
+    assert bar.maximum() > 0, "the page still cannot scroll, so this proves nothing"
+    return bar
+
+
+def test_a_key_to_the_focused_scrollbar_is_not_missed(window, qt_app) -> None:
+    """The reader can aim at the scrollbar rather than the page, and that counts.
+
+    Watching the viewport for wheel and key events missed this case entirely:
+    a key delivered to the focused scrollbar never reaches a viewport filter,
+    so End -- the reader saying "take me to the bottom" -- went unrecorded,
+    and the refresh put them back where they started.
+    """
+    from PySide6.QtGui import QKeyEvent
+
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    panel._set_busy(True)
+
+    bar = _make_the_page_scroll(panel)
+    bar.setValue(200)
+    settle()
+    panel._refresh_scroll = None
+
+    qt_app.sendEvent(bar, QKeyEvent(
+        QEvent.Type.KeyPress, Qt.Key.Key_End, Qt.KeyboardModifier.NoModifier))
+    settle()
+
+    bottom = bar.value()
+    assert bottom > 200, f"the page did not scroll to the end; it is at {bottom}"
+    assert panel._refresh_scroll == bottom, (
+        f"End was pressed on the scrollbar but the held position stayed at "
+        f"{panel._refresh_scroll} rather than the {bottom} the reader asked for")
+
+
+def test_dragging_the_scrollbar_records_where_it_landed(window, qt_app) -> None:
+    """A drag is an action of its own, not a wheel turn or a key."""
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    panel._set_busy(True)
+
+    bar = _make_the_page_scroll(panel)
+    bar.setValue(0)
+    settle()
+    panel._refresh_scroll = None
+
+    target = min(900, bar.maximum())
+    bar.setSliderPosition(target)
+    settle()
+
+    assert bar.value() == target, f"the drag did not move the bar; it is at {bar.value()}"
+    assert panel._refresh_scroll == target, (
+        f"dragging the scrollbar to {target} left the held position at "
+        f"{panel._refresh_scroll}")
+
+
+def test_a_wheel_turn_records_where_the_reader_ended_up(window, qt_app) -> None:
+    """The recorded place is where the wheel left the reader, not where it found them.
+
+    Reading the scrollbar inside the handler records the position from before
+    the scroll, because Qt commits the new value after the action is announced.
+    The test that briefly stood in for this one asserted the pre-scroll figure
+    and passed for exactly the wrong reason.
+    """
     from PySide6.QtGui import QWheelEvent
 
     panel = panel_of(window)
@@ -3621,11 +3698,12 @@ def test_a_wheel_turn_does_record_the_readers_position(window, qt_app) -> None:
     settle()
     panel._set_busy(True)
 
-    bar = panel.scroller.verticalScrollBar()
-    bar.setRange(0, 900)
-    bar.setValue(240)
+    bar = _make_the_page_scroll(panel)
+    bar.setValue(400)
     settle()
+    panel._refresh_scroll = None
 
+    from PySide6.QtCore import QPoint, QPointF
     wheel = QWheelEvent(
         QPointF(20.0, 20.0), QPointF(20.0, 20.0), QPoint(0, -120), QPoint(0, -120),
         Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
@@ -3633,6 +3711,8 @@ def test_a_wheel_turn_does_record_the_readers_position(window, qt_app) -> None:
     qt_app.sendEvent(panel.scroller.viewport(), wheel)
     settle()
 
-    assert panel._refresh_scroll == 240, (
-        f"a wheel turn left the held position at {panel._refresh_scroll} rather "
-        f"than the {240} the reader had scrolled to")
+    after = bar.value()
+    assert after != 400, "the wheel did not scroll, so this proves nothing"
+    assert panel._refresh_scroll == after, (
+        f"the wheel left the reader at {after} but the held position is "
+        f"{panel._refresh_scroll}, which would restore them to where they started")
