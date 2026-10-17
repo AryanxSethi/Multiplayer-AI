@@ -3764,3 +3764,86 @@ def test_the_restore_still_lands_when_the_reader_has_not_moved(window) -> None:
     assert bar.value() == 420, (
         f"the re-lay-out reset the bar to {bar.value()} and the restore never "
         "put the reader back")
+
+def test_a_changed_graphics_card_is_not_skipped_by_the_memory_threshold(window, qt_app) -> None:
+    """The two-per-cent early exit must not also swallow a change of graphics card.
+
+    The threshold exists to stop a background process drifting the free memory
+    from repainting the page on every visit, and it returns before anything
+    else is looked at. Put first, it swallowed the graphics comparison whole:
+    a reading whose free memory moved by well under the threshold *and* which
+    reported no dedicated graphics memory came back early, and the page kept
+    its "fits on the graphics card" verdicts for a card that had gone.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+    assert panel.hardware.vram, "the fixture device has no graphics card, so this proves nothing"
+
+    # Free memory a rounding error away from the reading above, and no card.
+    moved = 28 * 1024 ** 3 - 1024 ** 2
+    drifted = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=16,
+        memory_total=32 * 1024 ** 3, memory_available=moved,
+        disk_free=500 * 1024 ** 3, vram=None, unified_memory=False, sources={})
+    assert abs(moved - 28 * 1024 ** 3) < 28 * 1024 ** 3 * 0.02, (
+        "the fixture drifts the memory further than the threshold, so the "
+        "threshold is not what is under test here")
+
+    with patch.object(panel_module, "detect_hardware", return_value=drifted):
+        panel._reread_hardware()
+
+    assert panel.hardware.vram is None, (
+        "a 1MB drift in free memory returned early and left the page assessing "
+        "cards against a graphics card the reading says is gone")
+
+def test_the_final_restore_follows_a_reader_who_moved_during_the_rebuild(window, qt_app) -> None:
+    """Skipping a stale restore is not enough; the rebuild still moves the bar.
+
+    The revision check stops the old position being applied, but the queued
+    render still re-lays the page out, and that is the thing that throws the
+    reader to the top in the first place. So when the reader has moved between
+    the queueing and the run, the render has to take where they are *now* and
+    put them back there -- not give up and leave them where the rebuild landed.
+
+    Asserted on the position the restore is aimed at rather than on the
+    scrollbar afterwards, because with the page kept a fixed height here the
+    rebuild happens not to move the bar at all, and the visible figure would
+    be the same either way.
+    """
+    from desktop_app.cookbook import load_catalog
+
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    bar = _make_the_page_scroll(panel)
+    panel._set_busy(True)
+    panel._refresh_scroll = 300
+    panel.directory = None
+
+    aimed = []
+    real_restore = panel._restore_scroll
+
+    def spy(where, revision):
+        aimed.append(where)
+        real_restore(where, revision)
+
+    panel._restore_scroll = spy
+    record = load_catalog()[0]
+    with patch.object(panel, "_refresh_note", return_value="done"), \
+            patch.object(panel, "refresh_controls", lambda *a, **k: None):
+        panel._finish_refresh(1, {record.repo: record}, {}, [record])
+
+    # The reader moves on while the rebuild is still waiting its turn.
+    bar.setValue(1100)
+    panel._note_reader_scrolled()
+    settle()
+
+    assert aimed, "the refresh queued no restore at all"
+    assert aimed[-1] == 1100, (
+        f"the final restore was aimed at {aimed[-1]}, the position from before "
+        "the reader scrolled, rather than the 1100 they were at")

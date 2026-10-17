@@ -483,15 +483,15 @@ class CookbookPanel(QWidget):
         """
         fresh = detect_hardware(
             self.window.storage.directory if hasattr(self.window, "storage") else None)
-        before, after = self.hardware.memory_available, fresh.memory_available
-        if not force and before and after:
-            if abs(after - before) < before * 0.02:
-                return
         if self.hardware.vram != fresh.vram:
             self.hardware = fresh
             self.hardware_label.setText(self.hardware.describe())
             self.render_models()
             return
+        before, after = self.hardware.memory_available, fresh.memory_available
+        if not force and before and after:
+            if abs(after - before) < before * 0.02:
+                return
         listed = len(self.page_entries())
         if listed and len(self._entries_for(fresh)) < listed:
             self.hardware_label.setText(fresh.describe())
@@ -1687,13 +1687,22 @@ class CookbookPanel(QWidget):
         self._refresh_scroll = None
 
         def render_and_restore():
+            target, taken = where, revision
+            if taken != self._scroll_restore_revision:
+                # The reader moved after this was queued. Their captured
+                # position is theirs no longer, so take the live one instead.
+                # Skipping the restore on its own is not enough: the rebuild
+                # below still resets the scrollbar, and skipping would leave
+                # the reader exactly where the rebuild dropped them.
+                target = self._refresh_scroll or self.scroller.verticalScrollBar().value()
+                taken = self._scroll_restore_revision
             # The restore is queued again rather than run after the render in
             # the same turn. A rebuild has not laid itself out yet when
             # render_models() returns, so setting the scrollbar there restores
             # a position into a layout that does not exist and the scrollbar
             # clamps to the top once the cards are finally placed.
             self.render_models()
-            QTimer.singleShot(0, lambda: self._restore_scroll(where, revision))
+            QTimer.singleShot(0, lambda: self._restore_scroll(target, taken))
 
         QTimer.singleShot(0, render_and_restore)
 
