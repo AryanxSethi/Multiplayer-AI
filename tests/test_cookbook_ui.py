@@ -3416,7 +3416,8 @@ def test_a_busy_machine_does_not_blank_the_page(window, qt_app) -> None:
     busy = Hardware(
         platform="Linux 6.1", architecture="x86_64", cpu_cores=4,
         memory_total=32 * 1024 ** 3, memory_available=200 * 1024 ** 2,
-        disk_free=500 * 1024 ** 3, vram=None, unified_memory=False, sources={})
+        disk_free=500 * 1024 ** 3, vram=4 * 1024 ** 3,
+        unified_memory=False, sources={})
     # Through the re-read rather than render_models() directly, because that is
     # the path a page switch takes and the one the guard is on.
     with patch.object(panel_module, "detect_hardware", return_value=busy):
@@ -3487,7 +3488,8 @@ def test_a_busier_reading_does_not_shorten_the_list(window, qt_app) -> None:
     thinner = Hardware(
         platform="Linux 6.1", architecture="x86_64", cpu_cores=4,
         memory_total=32 * 1024 ** 3, memory_available=3 * 1024 ** 3,
-        disk_free=500 * 1024 ** 3, vram=None, unified_memory=False, sources={})
+        disk_free=500 * 1024 ** 3, vram=4 * 1024 ** 3,
+        unified_memory=False, sources={})
     with patch.object(panel_module, "detect_hardware", return_value=thinner):
         panel._reread_hardware(force=True)
     qt_app.processEvents()
@@ -3497,3 +3499,140 @@ def test_a_busier_reading_does_not_shorten_the_list(window, qt_app) -> None:
         f"{len(panel._cards)}; the reader is given a shorter list by whatever "
         "else happened to be running")
 
+
+def test_a_graphics_change_re_ranks_the_page(window, qt_app) -> None:
+    """Losing the graphics card must re-rank, whatever the list size does.
+
+    The guard holds the page as it stands when a re-read would list fewer
+    models, because that is how a busy machine used to take models off it. It
+    keys on the count alone, so cards carrying "fits on the graphics card"
+    verdicts survived a reading reporting no dedicated graphics memory at all,
+    while the label beside them described a machine without one.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+    assert panel.hardware.vram, "the fixture device has no graphics card, so this proves nothing"
+    assert panel._cards, "the fixture device recommends nothing, so this proves nothing"
+
+    no_graphics = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=2,
+        memory_total=32 * 1024 ** 3, memory_available=200 * 1024 ** 2,
+        disk_free=500 * 1024 ** 3, vram=None, unified_memory=False, sources={})
+    assert len(panel._entries_for(no_graphics)) < len(panel._cards), (
+        "the fresh reading still lists as much, so the guard would rebuild "
+        "anyway and this test would prove nothing about stale verdicts")
+    with patch.object(panel_module, "detect_hardware", return_value=no_graphics):
+        panel._reread_hardware(force=True)
+    qt_app.processEvents()
+
+    assert panel.hardware.vram is None, (
+        "the page kept the old reading's graphics memory while the label "
+        "describes the fresh one, so the cards and the label disagree")
+    assert "4.0 GB graphics memory" not in panel.hardware_label.text(), (
+        f"the label still claims the old graphics card: {panel.hardware_label.text()!r}")
+
+
+def test_the_guard_compares_whole_lists_not_one_page(window, qt_app) -> None:
+    """Fewer *listed* models must hold the page, not merely fewer than a page.
+
+    _cards holds one page and nothing else -- it is rebuilt from the visible
+    window on every draw -- so it never exceeds PAGE_SIZE. Comparing a
+    complete list against it let any shrink through while the list stayed
+    above ten, which is exactly where a long catalogue lives. Both sides are
+    stubbed here because the catalogue on this machine lists four models and
+    cannot reach a page of ten.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+    from desktop_app.cookbook_panel import PAGE_SIZE
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+
+    def entry(i):
+        return {"model": type("M", (), {"repo": f"repo-{i}", "params": ""})(), "why": []}
+
+    listed, thinner = 15, 12
+    assert listed > PAGE_SIZE, "the fixture cannot reach past one page"
+    panel._cards = {f"repo-{i}": object() for i in range(PAGE_SIZE)}
+    panel.page_entries = lambda: [entry(i) for i in range(listed)]
+    panel._entries_for = lambda hardware: [entry(i) for i in range(thinner)]
+
+    fresh = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=16,
+        memory_total=32 * 1024 ** 3, memory_available=2 * 1024 ** 3,
+        disk_free=500 * 1024 ** 3, vram=4 * 1024 ** 3,
+        unified_memory=False, sources={})
+    with patch.object(panel_module, "detect_hardware", return_value=fresh), \
+            patch.object(panel, "render_models") as rebuild:
+        panel._reread_hardware(force=True)
+
+    rebuild.assert_not_called()
+    assert len(panel.page_entries()) == listed, (
+        f"the list went from {listed} to {len(panel.page_entries())} on a "
+        "reading that only moved the memory figure")
+
+def test_a_layout_clamp_is_not_taken_for_the_readers_position(window) -> None:
+    """A scrollbar moving on its own is not the reader asking to be there.
+
+    valueChanged cannot tell a wheel turn from the layout clamping the
+    scrollbar when the refresh chrome re-lays out the page, and the second is
+    not a reader at all. Recording it is worse than ignoring it: the snap
+    stores itself as the position to hold, so the next restore faithfully
+    takes the reader to the top they never asked for. Held positions come
+    from input events instead.
+    """
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+
+    bar = panel.scroller.verticalScrollBar()
+    bar.setValue(min(300, bar.maximum()))
+    settle()
+    assert bar.value(), "the page is not tall enough to scroll, so this proves nothing"
+    panel._refresh_scroll = 137
+
+    # What a re-layout does to the scrollbar: the range collapses and the
+    # value is clamped to zero, emitting the same signal a wheel turn does.
+    bar.setRange(0, 0)
+    settle()
+    assert panel._refresh_scroll == 137, (
+        f"a layout clamp overwrote the held position with {panel._refresh_scroll}; "
+        "the next restore takes the reader somewhere they never asked to go")
+
+    bar.setRange(0, bar.maximum() or 900)
+    settle()
+
+
+def test_a_wheel_turn_does_record_the_readers_position(window, qt_app) -> None:
+    """The input path has to still work, or holding would freeze the place."""
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    panel._set_busy(True)
+
+    bar = panel.scroller.verticalScrollBar()
+    bar.setRange(0, 900)
+    bar.setValue(240)
+    settle()
+
+    wheel = QWheelEvent(
+        QPointF(20.0, 20.0), QPointF(20.0, 20.0), QPoint(0, -120), QPoint(0, -120),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate, False)
+    qt_app.sendEvent(panel.scroller.viewport(), wheel)
+    settle()
+
+    assert panel._refresh_scroll == 240, (
+        f"a wheel turn left the held position at {panel._refresh_scroll} rather "
+        f"than the {240} the reader had scrolled to")

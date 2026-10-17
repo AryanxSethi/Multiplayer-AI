@@ -19,7 +19,7 @@ it sends before it is pressed.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
 
@@ -164,7 +164,6 @@ class CookbookPanel(QWidget):
         # the run's own chrome cannot move them. None when no refresh is in
         # flight.
         self._refresh_scroll = None
-        self._restoring_scroll = False
         self._page = 0
         # Set while a change to "Looking for" is waiting for its turn of the
         # event loop, so repeated presses collapse into one rebuild.
@@ -207,8 +206,12 @@ class CookbookPanel(QWidget):
         # scroll bar is the one thing a rebuild silently resets. Held as
         # ``scroller`` rather than ``scroll``, which is QWidget's own method.
         self.scroller = page
-        # So the held position follows the reader rather than the press.
-        page.verticalScrollBar().valueChanged.connect(self._note_reader_scroll)
+        # An event filter on the viewport, not valueChanged on the scrollbar.
+        # The scrollbar also moves when the refresh chrome re-lays-out the
+        # page and the layout clamps it, and a clamp is a valueChanged with
+        # nobody having scrolled -- so a valueChanged connection recorded the
+        # snap as the reader's position and the next restore took them there.
+        page.viewport().installEventFilter(self)
 
         # Everything below goes into ``layout`` -- the scroll area's own content
         # layout -- and not into ``outer``. ``outer`` holds the scroll area and
@@ -446,13 +449,26 @@ class CookbookPanel(QWidget):
         things. Two per cent keeps a slowly drifting background process from
         repainting the page on every visit.
 
-        A reading that would list fewer models than are on screen does not
-        re-rank at all. This runs on every arrival, so a box that is busy at
-        that moment would otherwise take models off the page -- all of them,
-        when nothing much is free at all -- and the reader comes back to find
-        their list shortened by whatever else was running. The label still
+        A reading that would list fewer models than the page already lists
+        does not re-rank at all. This runs on every arrival, so a box that is
+        busy at that moment would otherwise take models off the page -- all of
+        them, when nothing much is free at all -- and the reader comes back to
+        find their list shortened by whatever else was running. The label still
         reports the fresh figure: what the page says about the machine is true
         either way, and only the cards are held.
+
+        Compared against the whole list on both sides, not against the cards
+        on screen. _cards holds one page and nothing else -- it is rebuilt from
+        the visible window on every draw -- so it is capped at PAGE_SIZE, and
+        comparing a complete list against a page lets a real shrink through as
+        long as the list stays above ten.
+
+        Held only while the graphics situation is unchanged. A reading that
+        reports different dedicated graphics memory is a different machine as
+        far as a "fits on the graphics card" verdict is concerned, and keeping
+        those cards would leave the page claiming the reader has a card the
+        label has just said they do not. That is the stale-claim fault this
+        guard exists to prevent, arrived at from the other direction.
         """
         fresh = detect_hardware(
             self.window.storage.directory if hasattr(self.window, "storage") else None)
@@ -460,8 +476,13 @@ class CookbookPanel(QWidget):
         if not force and before and after:
             if abs(after - before) < before * 0.02:
                 return
-        shown = len(self._cards)
-        if shown and len(self._entries_for(fresh)) < shown:
+        if self.hardware.vram != fresh.vram:
+            self.hardware = fresh
+            self.hardware_label.setText(self.hardware.describe())
+            self.render_models()
+            return
+        listed = len(self.page_entries())
+        if listed and len(self._entries_for(fresh)) < listed:
             self.hardware_label.setText(fresh.describe())
             return
         self.hardware = fresh
@@ -947,25 +968,25 @@ class CookbookPanel(QWidget):
             return
         QTimer.singleShot(0, lambda: self._restore_scroll(where))
 
-    def _note_reader_scroll(self, value):
-        """Record where the reader has scrolled to, unless we moved them there.
+    def eventFilter(self, watched, event):
+        """Note where the reader scrolls, from input rather than from the value.
 
-        Connected to the scrollbar so the held position is always the reader's
-        current one. A restore also moves the scrollbar, so it is marked and
-        skipped here; otherwise every restore would overwrite the position it
-        was taken from and the reader's own scrolling would never be recorded.
+        A wheel turn or a page key is the reader saying where they want to be.
+        A scrollbar moving because the layout clamped it is not, and treating
+        the two alike is what made the refresh take the reader to the top:
+        the snap recorded itself as their position, and the next hold restored
+        the snap. So only input moves the held position -- which also means it
+        cannot be overwritten by a chrome change nobody thought to guard.
         """
-        if not self._restoring_scroll:
-            self._refresh_scroll = value
+        if watched is self.scroller.viewport() and self._busy:
+            if event.type() in (QEvent.Type.Wheel, QEvent.Type.KeyPress):
+                self._refresh_scroll = self.scroller.verticalScrollBar().value()
+        return super().eventFilter(watched, event)
 
     def _restore_scroll(self, where):
         """Put the reader back where a rebuild moved them from."""
         if where:
-            self._restoring_scroll = True
-            try:
-                self.scroller.verticalScrollBar().setValue(where)
-            finally:
-                self._restoring_scroll = False
+            self.scroller.verticalScrollBar().setValue(where)
 
     def _rebuild_at(self, where, repo):
         """The deferred half of choose_build: swap one card, keep the reader put.
