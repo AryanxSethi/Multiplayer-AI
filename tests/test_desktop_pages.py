@@ -1554,6 +1554,16 @@ def test_the_dismiss_cross_still_dismisses(window, qt_app) -> None:
     qt_app.processEvents()
     assert window.toast_row.isHidden() is False
 
+    # No word on hover either. A tooltip over a cross in a toast that is already
+    # the width of one message turns a two-character control into something with
+    # a label on it, which is what this control was asked not to be. The
+    # accessible name stays: it is what a screen reader is told, and nothing on
+    # screen has to say it twice.
+    assert window.toast_dismiss.toolTip() == "", (
+        f"hovering the cross still says {window.toast_dismiss.toolTip()!r}")
+    assert window.toast_dismiss.accessibleName() == "Dismiss message", (
+        "the control has nothing left to be called by a screen reader")
+
     window.toast_dismiss.click()
     qt_app.processEvents()
 

@@ -449,7 +449,6 @@ class MainWindow(QMainWindow):
         self.toast_dismiss.setObjectName("errorDismiss")
         self.toast_dismiss.setFixedSize(31, 31)
         self.toast_dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.toast_dismiss.setToolTip("Dismiss")
         self.toast_dismiss.setAccessibleName("Dismiss message")
         toast_layout.addWidget(self.toast_dismiss, 0, Qt.AlignmentFlag.AlignTop)
         self.style_toast()
