@@ -164,6 +164,10 @@ class CookbookPanel(QWidget):
         # the run's own chrome cannot move them. None when no refresh is in
         # flight.
         self._refresh_scroll = None
+        # Counts the reader's own movements of the scrollbar. A queued restore
+        # remembers what this was when it was taken, so a reader who scrolls
+        # while it waits is not put back to a position that is no longer theirs.
+        self._scroll_restore_revision = 0
         self._page = 0
         # Set while a change to "Looking for" is waiting for its turn of the
         # event loop, so repeated presses collapse into one rebuild.
@@ -973,7 +977,14 @@ class CookbookPanel(QWidget):
         where = self._refresh_scroll
         if where is None:
             return
-        QTimer.singleShot(0, lambda: self._restore_scroll(where))
+        # ``where`` and the revision are captured together because they are one
+        # fact: where the reader was, as of this moment. Qt does not promise
+        # that a zero-timeout timer runs before later input arrives, so a reader
+        # who scrolls while this restore waits in the queue would otherwise
+        # have their newer choice overwritten by this older position -- the
+        # hold winning against the reader one more time.
+        revision = self._scroll_restore_revision
+        QTimer.singleShot(0, lambda: self._restore_scroll(where, revision))
 
     def _note_reader_scrolled(self, *_):
         """Note that the reader moved the scrollbar, and read where to.
@@ -983,7 +994,12 @@ class CookbookPanel(QWidget):
         so reading the value in the slot can hand back the place the reader
         just left. Reading it a turn later is right whichever way the platform
         commits, and costs nothing but the loop iteration.
+
+        The revision moves on every reader action, not only while busy: the
+        restore queued as a refresh ends outlives _busy, and a reader who
+        scrolls in that window has to be spared that one too.
         """
+        self._scroll_restore_revision += 1
         if self._busy:
             QTimer.singleShot(0, self._record_reader_scroll)
 
@@ -992,8 +1008,16 @@ class CookbookPanel(QWidget):
         if self._busy:
             self._refresh_scroll = self.scroller.verticalScrollBar().value()
 
-    def _restore_scroll(self, where):
-        """Put the reader back where a rebuild moved them from."""
+    def _restore_scroll(self, where, revision):
+        """Put the reader back where a rebuild moved them from, unless they moved.
+
+        A restore is worth nothing if it lands after the reader has scrolled
+        again, because it was taken from a position that is no longer theirs.
+        The revision says whether it still is; when it has moved on, the queued
+        restore quietly gives up and leaves the reader where they put themselves.
+        """
+        if revision != self._scroll_restore_revision:
+            return
         if where:
             self.scroller.verticalScrollBar().setValue(where)
 
@@ -1656,6 +1680,10 @@ class CookbookPanel(QWidget):
         # this point reads zero and restores zero, which is what the earlier
         # version of this did.
         where = self._refresh_scroll or self.scroller.verticalScrollBar().value()
+        # Read with the position, and before the render rather than after it:
+        # if the reader scrolls while the rebuild is in flight, ``where`` is no
+        # longer where they are, and the restore has to know it is stale.
+        revision = self._scroll_restore_revision
         self._refresh_scroll = None
 
         def render_and_restore():
@@ -1665,7 +1693,7 @@ class CookbookPanel(QWidget):
             # a position into a layout that does not exist and the scrollbar
             # clamps to the top once the cards are finally placed.
             self.render_models()
-            QTimer.singleShot(0, lambda: self._restore_scroll(where))
+            QTimer.singleShot(0, lambda: self._restore_scroll(where, revision))
 
         QTimer.singleShot(0, render_and_restore)
 

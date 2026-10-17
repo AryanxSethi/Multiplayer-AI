@@ -3716,3 +3716,51 @@ def test_a_wheel_turn_records_where_the_reader_ended_up(window, qt_app) -> None:
     assert panel._refresh_scroll == after, (
         f"the wheel left the reader at {after} but the held position is "
         f"{panel._refresh_scroll}, which would restore them to where they started")
+
+def test_a_reader_who_scrolls_while_a_restore_waits_is_not_undone(window) -> None:
+    """A restore taken from an older position must give up, not win.
+
+    Both queued restores -- the one after each re-lay-out and the one at the
+    end of a refresh -- are taken from a position read when they were queued.
+    Qt does not promise that a zero-timeout timer runs before later input, so
+    the reader can scroll while the restore waits. Applying it then puts them
+    back where they were before that scroll: the hold winning against the
+    reader, which is the thing all of this was meant to stop.
+    """
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    bar = _make_the_page_scroll(panel)
+    panel._set_busy(True)
+
+    panel._refresh_scroll = 300
+    panel._hold_scroll()
+
+    # The reader moves on before the queued restore gets its turn.
+    bar.setValue(1100)
+    panel._note_reader_scrolled()
+    settle()
+
+    assert bar.value() == 1100, (
+        f"a restore taken from 300 was applied after the reader had scrolled to "
+        f"1100, putting them back at {bar.value()}")
+
+
+def test_the_restore_still_lands_when_the_reader_has_not_moved(window) -> None:
+    """The guard has to spare stale restores only, not all of them."""
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    bar = _make_the_page_scroll(panel)
+    panel._set_busy(True)
+
+    panel._refresh_scroll = 420
+    bar.setValue(0)
+    panel._hold_scroll()
+    settle()
+
+    assert bar.value() == 420, (
+        f"the re-lay-out reset the bar to {bar.value()} and the restore never "
+        "put the reader back")
