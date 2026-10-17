@@ -307,3 +307,24 @@ def test_the_workspace_commands_panel_closes_with_a_cross(window):
     assert window.command_panel.isHidden() is True, (
         "the cross did not close the panel")
 
+
+def test_the_commands_cross_follows_the_theme(window):
+    """Switching themes must not leave the cross in the old theme's colour.
+
+    The cross carries its own style sheet, so it does not follow the
+    application sheet, and apply_theme() restyles the other hand-styled
+    widgets for exactly that reason. It was not doing this one, so a cross
+    built under the dark theme stayed dark-text on the light page for the rest
+    of the session.
+    """
+    from desktop_app.theme import LIGHT, color
+
+    window.apply_theme("DARK")
+    window.apply_theme(LIGHT)
+
+    assert color(LIGHT, "text_nav") in window.command_dismiss.styleSheet(), (
+        "the cross still carries the previous theme's colour: "
+        f"{window.command_dismiss.styleSheet()!r}")
+    assert color("DARK", "text_nav") not in window.command_dismiss.styleSheet(), (
+        "the cross carries both themes' colours at once")
+

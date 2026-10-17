@@ -3463,3 +3463,37 @@ def test_pressing_refresh_keeps_the_reader_where_they_were(window) -> None:
     # and every child reports as not visible regardless of what was asked for.
     assert panel.stop_refresh.isHidden() is False, (
         "Stop is not on screen while the run it stops is in flight")
+
+
+def test_a_busier_reading_does_not_shorten_the_list(window, qt_app) -> None:
+    """A re-read that recommends fewer models must not remove the ones shown.
+
+    The guard used to cover only a drop to nothing, so a reading that left two
+    models instead of four still rebuilt the page and took the other two off it
+    -- the reader coming back to a shorter list and no way to tell why. It is
+    the same fault as the empty case and a fraction as visible, which is worse:
+    a page going empty at least says so.
+    """
+    from desktop_app import cookbook_panel as panel_module
+    from desktop_app.cookbook import Hardware
+
+    panel = panel_of(window)
+    use_a_stated_device(panel, vram_gb=4)
+    qt_app.processEvents()
+    shown = len(panel._cards)
+    assert shown >= 2, f"the fixture lists {shown}; this needs room to shrink"
+
+    # Enough free to recommend something, but not everything that was listed.
+    thinner = Hardware(
+        platform="Linux 6.1", architecture="x86_64", cpu_cores=4,
+        memory_total=32 * 1024 ** 3, memory_available=3 * 1024 ** 3,
+        disk_free=500 * 1024 ** 3, vram=None, unified_memory=False, sources={})
+    with patch.object(panel_module, "detect_hardware", return_value=thinner):
+        panel._reread_hardware(force=True)
+    qt_app.processEvents()
+
+    assert len(panel._cards) >= shown, (
+        f"{shown} models were listed and a busier reading cut the page to "
+        f"{len(panel._cards)}; the reader is given a shorter list by whatever "
+        "else happened to be running")
+

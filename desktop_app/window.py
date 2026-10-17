@@ -996,10 +996,7 @@ class MainWindow(QMainWindow):
         # The colour is the ordinary muted text rather than the error red the
         # toast's cross uses, because this panel is a neutral card and a red
         # close would read as an error in it.
-        self.command_dismiss.setStyleSheet(
-            "background: transparent; border: none; border-radius: 4px; "
-            "padding: 0; color: " + color(self.theme, "text_nav")
-            + "; font-weight: 700; font-size: 14px;")
+        self.style_command_dismiss()
         command_heading.addWidget(self.command_dismiss)
         command_column.addLayout(command_heading)
         self.command_scroll = QScrollArea()
@@ -1457,6 +1454,20 @@ class MainWindow(QMainWindow):
         # ordinary notice colour -- the one thing this styling is for.
         self.toast.setStyleSheet("color:" + foreground)
 
+    def style_command_dismiss(self):
+        """Keep the commands panel's cross in the current theme's colour.
+
+        It carries its own style sheet so the ghost padding -- meant for a
+        labelled button -- cannot clip the glyph, and a widget that carries its
+        own keeps the colour it was given. apply_theme() has to call this: the
+        cross would otherwise carry the theme it was built in for the rest of
+        the session, which is the same reason style_toast() is called there.
+        """
+        self.command_dismiss.setStyleSheet(
+            "background: transparent; border: none; border-radius: 4px; "
+            "padding: 0; color: " + color(self.theme, "text_nav")
+            + "; font-weight: 700; font-size: 14px;")
+
     def style_placeholders(self):
         palette = self.palette()
         palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(color(self.theme, "text_muted")))
@@ -1477,6 +1488,7 @@ class MainWindow(QMainWindow):
         self.style_placeholders()
         self.setWindowIcon(app_icon(name))
         self.style_toast()
+        self.style_command_dismiss()
         # A card message carries its own colour, so it does not follow the
         # application sheet and would keep the old theme's error colour.
         for line in self.card_lines.values():
