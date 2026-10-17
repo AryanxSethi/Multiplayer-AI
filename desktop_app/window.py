@@ -980,7 +980,28 @@ class MainWindow(QMainWindow):
         self.command_panel, command_column = frame("card")
         command_heading = QHBoxLayout()
         command_heading.addWidget(label("Workspace commands", "heading"), 1)
-        command_heading.addWidget(action("Dismiss", self.command_panel.hide, name="ghost"))
+        # A cross rather than the word "Dismiss". Written out beside the heading
+        # it read as the only way out of the panel, and every other surface in
+        # this app that can be closed -- the toast, an error line -- closes with
+        # the same glyph, so the word made this one read as a different kind of
+        # thing.
+        self.command_dismiss = action("×", self.command_panel.hide, name="ghost")
+        self.command_dismiss.setFixedSize(31, 31)
+        self.command_dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.command_dismiss.setToolTip("Dismiss")
+        self.command_dismiss.setAccessibleName("Dismiss workspace commands")
+        # Declared rather than left on #ghost. Ghost carries 9px/12px of
+        # padding for a text button, which makes its size hint 39px wide --
+        # so a 31px box clipped the cross and drew half a glyph. Padding and a
+        # border belong on a button with a word in it; this one has a glyph.
+        # The colour is the ordinary muted text rather than the error red the
+        # toast's cross uses, because this panel is a neutral card and a red
+        # close would read as an error in it.
+        self.command_dismiss.setStyleSheet(
+            "background: transparent; border: none; border-radius: 4px; "
+            "padding: 0; color: " + color(self.theme, "text_nav")
+            + "; font-weight: 700; font-size: 14px;")
+        command_heading.addWidget(self.command_dismiss)
         command_column.addLayout(command_heading)
         self.command_scroll = QScrollArea()
         self.command_scroll.setWidgetResizable(True)
