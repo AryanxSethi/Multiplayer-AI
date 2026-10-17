@@ -3847,3 +3847,52 @@ def test_the_final_restore_follows_a_reader_who_moved_during_the_rebuild(window,
     assert aimed[-1] == 1100, (
         f"the final restore was aimed at {aimed[-1]}, the position from before "
         "the reader scrolled, rather than the 1100 they were at")
+
+def test_a_scroll_made_just_before_the_refresh_finishes_is_not_lost(window, qt_app) -> None:
+    """The revision and the held position must not be able to disagree.
+
+    A reader movement raises the revision at once but records the position a
+    turn later. If the refresh finishes in that turn, the recorder is skipped
+    for want of a busy state -- leaving the revision claiming the reader had
+    moved, and the held position still holding the place before they did. The
+    render sees a revision that matches its own and restores that older
+    position, believing it current.
+
+    Asserted on where the restore is aimed, which is where the two disagree.
+    """
+    from desktop_app.cookbook import load_catalog
+
+    panel = panel_of(window)
+    settle()
+    panel.render_models()
+    settle()
+    bar = _make_the_page_scroll(panel)
+    panel._set_busy(True)
+    bar.setValue(300)
+    settle()
+    panel._refresh_scroll = 300
+
+    # The reader scrolls, and the recorder for it is still queued.
+    bar.setValue(1100)
+    panel._note_reader_scrolled()
+
+    aimed = []
+    real_restore = panel._restore_scroll
+
+    def spy(where, revision):
+        aimed.append(where)
+        real_restore(where, revision)
+
+    panel._restore_scroll = spy
+    panel.directory = None
+    record = load_catalog()[0]
+    with patch.object(panel, "_refresh_note", return_value="done"), \
+            patch.object(panel, "refresh_controls", lambda *a, **k: None):
+        panel._finish_refresh(1, {record.repo: record}, {}, [record])
+    settle()
+
+    # _refresh_scroll is cleared again at the end of the refresh, so the
+    # disagreement is visible only in where the restore was aimed.
+    assert aimed and aimed[-1] == 1100, (
+        f"the final restore was aimed at {aimed[-1] if aimed else 'nothing'} "
+        "rather than the 1100 the reader was at")

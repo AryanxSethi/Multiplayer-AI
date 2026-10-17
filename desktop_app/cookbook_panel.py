@@ -1631,6 +1631,15 @@ class CookbookPanel(QWidget):
         successful read because the reader changed their mind about the rest
         would throw away work that cost a request to obtain.
         """
+        # A reader movement writes down the revision at once but the position a
+        # turn later, and that turn can land here. The recorder skips once the
+        # busy state has ended, so a scroll made just before the refresh
+        # finished would leave the revision saying they had moved while the
+        # held position still said they had not -- and the render would then
+        # restore that older position as though it were current. Taken now,
+        # while the page is still where they left it and before anything below
+        # re-lays it out.
+        self._record_reader_scroll()
         self._busy = False
         self._set_busy(False)
 
