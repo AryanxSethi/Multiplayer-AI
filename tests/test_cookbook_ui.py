@@ -542,6 +542,11 @@ def test_one_press_asks_once_per_model_and_says_so_when_none_answer(window) -> N
         "the button stayed live while the request was in flight")
     assert "1 of" in panel.refresh.text(), (
         f"the button does not show progress: {panel.refresh.text()!r}")
+    # And Stop is still a control while it counts, rather than having been
+    # turned into a second progress readout by the count landing on it.
+    assert panel.stop_refresh.text() == "Stop", (
+        f"the stop control reads {panel.stop_refresh.text()!r} while the run "
+        "it stops is in flight, so the reader cannot tell what it does")
 
     panel.do_refresh()
     assert len(pending) == 1, "a second press started another pass while one was running"
@@ -560,6 +565,9 @@ def test_one_press_asks_once_per_model_and_says_so_when_none_answer(window) -> N
     assert panel.refresh.isEnabled(), "the button stayed dead after a failure"
     assert panel.refresh.text().startswith("Refresh from"), (
         f"the button is still mid-attempt: {panel.refresh.text()!r}")
+    assert panel.stop_refresh.text() == "Stop", (
+        f"the run ended leaving the control saying "
+        f"{panel.stop_refresh.text()!r}")
     assert not panel._busy, "the page is still marked busy after a failed refresh"
 
 
@@ -3214,10 +3222,21 @@ def test_a_refresh_can_be_stopped_and_keeps_what_it_already_read(window) -> None
         setattr(panel.window, "_pending", kwargs.get("failure")))[1]
 
     panel.do_refresh()
-    assert not panel.refresh.isVisible(), (
-        "Refresh stayed on screen while a refresh was running, so there was "
-        "nothing to say the second press would do anything")
+    # Refresh stays on screen and disabled, carrying the count. It used to be
+    # hidden for the run and Stop took its place, which is what put the progress
+    # on a button nobody could see; asserting visibility here pinned that. What
+    # matters is that a second press does nothing, which is what being disabled
+    # means.
+    assert not panel.refresh.isEnabled(), (
+        "Refresh stayed live while a refresh was running, so a second press "
+        "could start another pass over the top of this one")
+    assert "1 of" in panel.refresh.text(), (
+        f"the run is counting on nothing: the button reads "
+        f"{panel.refresh.text()!r}")
     assert panel.stop_refresh.isVisible(), "a running refresh cannot be stopped"
+    assert panel.stop_refresh.text() == "Stop", (
+        f"the stop control reads {panel.stop_refresh.text()!r} while the run it "
+        "stops is in flight, so the reader cannot tell what it does")
     assert not panel.restore.isEnabled(), (
         "Restore stayed live during a refresh, and a restore can shorten the "
         "catalogue the requests in flight are indexed against")
@@ -3410,31 +3429,37 @@ def test_a_busy_machine_does_not_blank_the_page(window, qt_app) -> None:
         "hardware out of a momentary reading")
 
 
-def test_a_finished_refresh_keeps_the_reader_where_they_were(window, qt_app) -> None:
-    """A refresh must not throw the reader back to the top of the page.
+def test_pressing_refresh_keeps_the_reader_where_they_were(window) -> None:
+    """The press must not send the reader to the top, or Stop out of reach.
 
-    A refresh rebuilds every card, and a rebuild sends the scrollbar to zero.
-    That lands the reader at the top at the exact moment _set_busy(False) takes
-    the Stop control away, so the button they had just pressed is off the bottom
-    of the screen with nothing to scroll back down to it. Choose_build has kept
-    its place across the same kind of rebuild since it was written; a refresh
-    did not.
+    Refresh and Stop swap places in the footer, and the footer is inside the
+    scrolled area -- so showing one and hiding the other re-lays-out the page
+    and the scrollbar goes to zero. It happens at the press, which is why
+    holding the place only after the run finished held zero: by then the reader
+    had already been thrown to the top and Stop had gone with them.
+
+    Driven through do_refresh rather than through the rebuild, because the press
+    is where it happens, and a test of the rebuild passes against the bug.
     """
     panel = panel_of(window)
+    settle()
+    window.command = lambda *args, **kwargs: None
     panel.render_models()
-    qt_app.processEvents()
+    settle()
+
     bar = panel.scroller.verticalScrollBar()
-    bar.setValue(min(400, bar.maximum()))
-    qt_app.processEvents()
+    bar.setValue(min(300, bar.maximum()))
+    settle()
     start = bar.value()
     assert start, "the page is not tall enough to scroll, so this proves nothing"
 
-    # What _finish_refresh does once results have come back.
-    panel.render_models()
-    qt_app.processEvents()
-    panel._restore_scroll(start)
-    qt_app.processEvents()
+    panel.do_refresh()
+    settle()
 
-    assert panel.scroller.verticalScrollBar().value() == start, (
-        f"the reader was at {start}px and a rebuild left them at "
-        f"{panel.scroller.verticalScrollBar().value()}px")
+    assert bar.value() == start, (
+        f"pressing Refresh moved the reader from {start}px to {bar.value()}px, "
+        "which puts the Stop control off the bottom of the page")
+    # isHidden rather than isVisible, because the window is never shown here
+    # and every child reports as not visible regardless of what was asked for.
+    assert panel.stop_refresh.isHidden() is False, (
+        "Stop is not on screen while the run it stops is in flight")

@@ -447,7 +447,7 @@ class MainWindow(QMainWindow):
         toast_layout.addWidget(self.toast, 1)
         self.toast_dismiss = action("×", self.dismiss_notice, name="ghost")
         self.toast_dismiss.setObjectName("errorDismiss")
-        self.toast_dismiss.setFixedSize(28, 28)
+        self.toast_dismiss.setFixedSize(31, 31)
         self.toast_dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toast_dismiss.setToolTip("Dismiss")
         self.toast_dismiss.setAccessibleName("Dismiss message")
@@ -1430,7 +1430,7 @@ class MainWindow(QMainWindow):
         self.toast_dismiss.setStyleSheet(
             "background: transparent; border: none; border-radius: 4px; "
             "padding: 0; color: " + color(self.theme, "error")
-            + "; font-weight: 700; font-size: 12px;")
+            + "; font-weight: 700; font-size: 14px;")
         # The label sets its own foreground rather than relying on the row's
         # cascading down to it. A QLabel takes its text colour from the
         # palette, so a failure styled on the row alone is painted in the

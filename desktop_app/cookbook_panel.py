@@ -160,6 +160,10 @@ class CookbookPanel(QWidget):
         self.window = window
         self._busy = False
         self._cancelled = False
+        # Where the reader was when a refresh began, held for its duration so
+        # the run's own chrome cannot move them. None when no refresh is in
+        # flight.
+        self._refresh_scroll = None
         self._page = 0
         # Set while a change to "Looking for" is waiting for its turn of the
         # event loop, so repeated presses collapse into one rebuild.
@@ -580,7 +584,11 @@ class CookbookPanel(QWidget):
         """
         self._busy = busy
         self.refresh.setEnabled(not busy)
-        self.refresh.setVisible(not busy)
+        # Refresh stays on screen during a run, carrying the count. It used to
+        # be hidden and Stop took its place, which hid the progress on a button
+        # nobody could see; putting the count on Stop instead made Stop stop
+        # reading as a control, so a run could not be stopped by looking at it.
+        # Both on screen: one says how far along, the other says how to stop.
         if busy:
             # cancel_refresh disables Stop and relabels it "Stopping." so a
             # second press cannot queue another. That state outlived the run,
@@ -589,11 +597,15 @@ class CookbookPanel(QWidget):
             self.stop_refresh.setEnabled(True)
             self.stop_refresh.setText("Stop")
         self.stop_refresh.setVisible(busy)
-        # The button carries the progress while it runs, so putting it back is
-        # part of ending the run rather than something the caller has to
-        # remember to do on each path out.
+        # Stop carries the progress while the run lasts, and Refresh is hidden
+        # for its duration -- so the step count used to be written to a button
+        # nobody could see and the reader was shown "Stop" for the whole
+        # request. Reset here as well as on the refresh button, so a run that
+        # ends by any path leaves the control saying what a control says.
         if not busy:
             self.refresh.setText(f"Refresh from {self.host_name()}")
+            self.stop_refresh.setText("Stop")
+        self._hold_scroll()
         self.restore.setEnabled(not busy and bool(self.directory and
                                                  self.directory.joinpath(PREVIOUS_NAME).is_file()))
         self.restore_mirror.setEnabled(not busy)
@@ -615,6 +627,9 @@ class CookbookPanel(QWidget):
         self._cancelled = True
         self.stop_refresh.setEnabled(False)
         self.stop_refresh.setText("Stopping.")
+        # "Stopping." is narrower than the count it replaces, so the footer
+        # shrinks here as well. Held for the same reason as every other step.
+        self._hold_scroll()
 
     def render_models(self, keep_ranking=False):
         """Rebuild the list from the first page.
@@ -895,6 +910,26 @@ class CookbookPanel(QWidget):
         self._chosen[repo] = quantization
         where = self.scroller.verticalScrollBar().value()
         QTimer.singleShot(0, lambda: self._rebuild_at(where, repo))
+
+    def _hold_scroll(self):
+        """Put the reader back where a refresh's own chrome moved them from.
+
+        The Refresh and Stop controls live in the footer, and the footer is
+        inside the scrolled area -- so showing one, hiding the other, and
+        relabelling either of them re-lays-out the page under the reader and
+        the scrollbar goes to zero. That happened at the press rather than at
+        the end, which is why restoring only after the run finished restored
+        zero: by then the reader had already been thrown.
+
+        The position is taken once, when the run starts, and re-applied after
+        each thing that moves the layout. Deferred, because the layout has not
+        settled in the turn that changes it -- the same reason choose_build
+        restores through a singleShot rather than immediately.
+        """
+        where = getattr(self, "_refresh_scroll", None)
+        if where is None:
+            return
+        QTimer.singleShot(0, lambda: self._restore_scroll(where))
 
     def _restore_scroll(self, where):
         """Put the reader back where a rebuild moved them from."""
@@ -1436,6 +1471,11 @@ class CookbookPanel(QWidget):
         refused = {}
         self._busy = True
         self._cancelled = False
+        # Taken before anything moves, and held for the whole run. Everything
+        # after this changes the footer's width, and the footer is inside the
+        # scrolled area, so each of those is a scrollbar reset unless the
+        # reader's place is put back after it.
+        self._refresh_scroll = self.scroller.verticalScrollBar().value()
         # targets is passed down rather than re-read from self.catalog at each
         # step. The step used to index the live list, and the Restore button
         # stayed enabled throughout a refresh, so a restore mid-refresh could
@@ -1490,8 +1530,11 @@ class CookbookPanel(QWidget):
             refused[repo] = reason
             self._refresh_step(index + 1, targets, updated, refused, before)
 
+        # On Refresh, which stays on screen for the run and is disabled, so it
+        # reads as the count rather than as a control. Stop stays Stop.
         self.refresh.setText(f"Refreshing {index + 1} of {total} from "
                              f"{self.host_name()}.")
+        self._hold_scroll()
         self.window.command("cookbook_refresh", repo, artifacts, self.base,
                             success=landed, failure=missed)
 
@@ -1545,9 +1588,14 @@ class CookbookPanel(QWidget):
         # every card, and a rebuild sends the scrollbar to zero -- which threw
         # the reader back to the top of the page just as _set_busy(False) took
         # the Stop control away, so the button they had just pressed was off
-        # the bottom of the screen with nothing to scroll back to it. Same
-        # arrangement choose_build uses, for the same reason.
-        where = self.scroller.verticalScrollBar().value()
+        # the bottom of the screen with nothing to scroll back to it.
+        #
+        # The position held since the press is used rather than read here: by
+        # now the chrome has already reset it more than once, so reading it at
+        # this point reads zero and restores zero, which is what the earlier
+        # version of this did.
+        where = self._refresh_scroll or self.scroller.verticalScrollBar().value()
+        self._refresh_scroll = None
         QTimer.singleShot(0, lambda: (self.render_models(),
                                       self._restore_scroll(where)))
 
