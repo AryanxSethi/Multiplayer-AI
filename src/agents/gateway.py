@@ -1,6 +1,6 @@
 """The Agent Gateway: the only component that talks to the agent relay.
 
-agent.md section 14 draws the boundary this module implements::
+The specification draws the boundary this module implements::
 
     Message Router
            |
@@ -29,7 +29,7 @@ itself just a caller.
 Correlation
 -----------
 An HTTP invoke is synchronous, so the response is correlated to the
-request by the call itself. agent.md section 15 warns against assuming
+request by the call itself. The specification warns against assuming
 agent responses are always synchronous. That seam is left open on
 purpose: :meth:`AgentGateway.invoke` is async and returns the agent's
 payload, so an asynchronous push path can be added beside it later

@@ -1,6 +1,6 @@
 """The single routing decision point for client-facing messages.
 
-agent.md section 20 asks for one clearly identifiable routing component
+The specification asks for one clearly identifiable routing component
 rather than routing decisions scattered across unrelated modules, so
 every inbound message funnels through :func:`route_message`.
 

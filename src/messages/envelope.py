@@ -1,7 +1,7 @@
 """The wire format exchanged between clients and the Connection Server.
 
 A single envelope carries every client-facing message. The field names on
-the wire are camelCase, matching the examples in agent.md sections 10 and
+the wire are camelCase, matching the examples in specification sections 10 and
 34; internally the model uses snake_case, so the aliases below are what
 bridge the two.
 

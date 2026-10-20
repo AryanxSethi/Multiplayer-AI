@@ -4,6 +4,10 @@ Multiplayer AI is a platform where authorized users by the session leader
 can invite people to work on the same session without sharing accounts or
 people from the same organization.
 
+For the complete reference — what the project does, the technologies it uses,
+its requirements, installation, configuration, architecture, and test setup —
+see [DOCUMENTATION.md](DOCUMENTATION.md).
+
 ## Status: under development
 
 The first milestone is the **client communication layer**: a Connection
@@ -241,9 +245,10 @@ with `INVALID_MESSAGE` and keeps reading.
 python -m pytest
 ```
 
-Client Connection Server tests cover agent.md Tests 1–6 (server starts, health responds,
-client connects, two clients stay connected, A → B delivers, unknown
-destination errors), plus the envelope and routing contracts. Additional
+Client Connection Server tests cover the six acceptance scenarios (server
+starts, health responds, client connects, two clients stay connected,
+A → B delivers, unknown destination errors), plus the envelope and routing
+contracts. Additional
 relay and adapter tests cover multi-device messaging, reconnection, provider
 request formats, and safe failures. Provider HTTP responses are mocked.
 
@@ -278,6 +283,6 @@ Two client Connection Server behaviours worth knowing about:
 
 ## Design notes
 
-`agent.md` in the repository root holds the full specification these
-decisions come from, including the phase plan, acceptance criteria, and
-the reasoning behind each boundary.
+The reasoning behind each boundary is recorded in the module docstrings
+that implement it, together with the acceptance criteria the code is
+written to satisfy.

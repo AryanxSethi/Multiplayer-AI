@@ -1,6 +1,6 @@
 """End-to-end: client -> Connection Server -> Agent Gateway -> relay -> agent.
 
-This exercises the chain in agent.md sections 12 to 16 with real
+This exercises the chain in specification sections 12 to 16 with real
 components: a real relay on a real socket, a real ``AgentClient`` holding
 an agent, and a real client WebSocket on the Connection Server. Nothing
 here is mocked, so it proves the two applications actually fit together
@@ -214,7 +214,7 @@ async def test_response_correlates_to_the_request(
 ) -> None:
     """The response echoes messageId and sessionId so a client can match it.
 
-    agent.md section 15 requires the association between a client request
+    The specification requires the association between a client request
     and the agent response that it caused.
     """
     start_agent("agent-B")

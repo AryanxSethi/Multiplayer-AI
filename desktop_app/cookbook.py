@@ -247,11 +247,10 @@ class Variant:
 class Model:
     """A model as its publisher describes it.
 
-    Carries the provenance every field needs, because ``cookBook.md`` is
-    explicit that metadata must be attributed and dated and that a catalogue
-    update must not mark anything as tested. ``verified`` is therefore part of
-    the record rather than inferred from arithmetic, and nothing in this module
-    sets it.
+    Carries the provenance every field needs: metadata must be attributed and
+    dated, and a catalogue update must not mark anything as tested.
+    ``verified`` is therefore part of the record rather than inferred from
+    arithmetic, and nothing in this module sets it.
 
     Attributes:
         repo: Publisher's repository id, used verbatim for every request and
