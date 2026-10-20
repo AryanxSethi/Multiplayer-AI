@@ -5,7 +5,7 @@ message arrived on. Raw exception text and stack traces are never sent to
 clients; the code carries enough information for a client to react, and
 the underlying detail stays in the server log.
 
-Frame shape (agent.md section 21)::
+Frame shape (specification section 21)::
 
     {
         "type": "error",

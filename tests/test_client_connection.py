@@ -1,4 +1,4 @@
-"""Tests 3 and 4 from agent.md section 24: clients connect and stay connected."""
+"""Tests 3 and 4 from specification section 24: clients connect and stay connected."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def test_client_is_registered_on_connect(client: TestClient, registry) -> None:
 
 
 def test_client_is_removed_on_disconnect(client: TestClient, registry) -> None:
-    """agent.md section 22: the registry cleans up after a disconnect."""
+    """Specification section 22: the registry cleans up after a disconnect."""
     with client.websocket_connect("/ws/client-A"):
         assert registry.is_connected("client-A")
 
@@ -70,7 +70,7 @@ def test_various_client_ids_are_accepted(
 ) -> None:
     """Any client-supplied identifier is accepted at the prototype stage.
 
-    agent.md section 8 allows the client to supply an id, and separates
+    The specification allows the client to supply an id, and separates
     identification from authentication.
     """
     with client.websocket_connect(f"/ws/{client_id}"):

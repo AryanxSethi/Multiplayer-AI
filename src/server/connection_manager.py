@@ -1,8 +1,8 @@
 """In-memory registry of connected clients.
 
 The Connection Server keeps a live WebSocket per connected client and
-tracks who is present. This is deliberately in-memory only: agent.md
-section 7 says not to add a database until something actually needs one.
+tracks who is present. This is deliberately in-memory only: no database is
+added until something actually needs one.
 
 The registry owns delivery to a client socket. Routing decides *where* a
 message goes; the registry is the only place that writes to a WebSocket.

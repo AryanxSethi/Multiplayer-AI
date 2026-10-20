@@ -4,6 +4,10 @@ Multiplayer AI is a platform where authorized users by the session leader
 can invite people to work on the same session without sharing accounts or
 people from the same organization.
 
+For the complete reference — what the project does, the technologies it uses,
+its requirements, installation, configuration, architecture, and test setup —
+see [DOCUMENTATION.md](DOCUMENTATION.md).
+
 ## Status: under development
 
 The first milestone is the **client communication layer**: a Connection
@@ -53,8 +57,10 @@ request directly. Workspace access, online status, and task permissions are chec
 before dispatch. See the [chat guide](DESKTOP_GUIDE.md#chat-and-model-orchestration).
 
 The client Connection Server and agent relay are separate applications with
-different WebSocket message formats. They are not wired together. Run them on
-different ports if both are needed; each guide uses port 8000 by default.
+different WebSocket message formats. The Connection Server reaches agents
+through its Agent Gateway when `A2A_RELAY_URL` and `A2A_RELAY_TOKEN` configure
+a usable relay. Run them on different ports if both are needed; each guide
+uses port 8000 by default.
 
 ## Architecture
 
@@ -205,7 +211,8 @@ connection that sent the frame, so one client cannot impersonate another.
 `destination.type` selects the route:
 
 - `client` — delivered to that client's WebSocket
-- `agent` — **not supported yet**, returns `AGENT_NOT_FOUND`
+- `agent` — routed through the Agent Gateway when a usable relay is configured;
+  otherwise returns `AGENT_NOT_FOUND`
 
 ## Errors
 
@@ -222,12 +229,15 @@ Failures are returned to the *sender* as a JSON frame:
 
 | Code | Meaning |
 |------|---------|
-| `INVALID_MESSAGE` | Frame is not JSON, or the envelope is malformed |
+| `INVALID_MESSAGE` | Frame is not JSON, the envelope is malformed, or the agent id is invalid |
 | `CLIENT_NOT_FOUND` | Destination client is not connected |
-| `AGENT_NOT_FOUND` | Agent destinations are not implemented yet |
+| `AGENT_NOT_FOUND` | No agent relay is configured for this server |
+| `AGENT_UNAVAILABLE` | The relay is unreachable, or the agent is unknown or outside the caller's group |
+| `TIMEOUT` | The agent did not answer before `A2A_GATEWAY_TIMEOUT` |
+| `A2A_ERROR` | The relay rejected the server's credentials or returned an unreadable response |
+| `INTERNAL_ERROR` | An unexpected server failure; details stay in the server log |
 
-`AGENT_UNAVAILABLE`, `SESSION_NOT_FOUND`, `A2A_ERROR`, `TIMEOUT`, and
-`INTERNAL_ERROR` are defined but not yet reachable.
+`SESSION_NOT_FOUND` is defined but not yet reachable.
 
 `messageId` is `null` when the frame could not be parsed far enough to
 recover an id. Stack traces are never sent to clients.
@@ -241,9 +251,10 @@ with `INVALID_MESSAGE` and keeps reading.
 python -m pytest
 ```
 
-Client Connection Server tests cover agent.md Tests 1–6 (server starts, health responds,
-client connects, two clients stay connected, A → B delivers, unknown
-destination errors), plus the envelope and routing contracts. Additional
+Client Connection Server tests cover the six acceptance scenarios (server
+starts, health responds, client connects, two clients stay connected,
+A → B delivers, unknown destination errors), plus the envelope and routing
+contracts. Additional
 relay and adapter tests cover multi-device messaging, reconnection, provider
 request formats, and safe failures. Provider HTTP responses are mocked.
 
@@ -260,7 +271,6 @@ in favour of `httpx2`. Cosmetic, and left alone for now.
 
 The following remain unimplemented in the client Connection Server (`src/`):
 
-- Agent Gateway integration with the agent layer
 - Response correlation between a client request and a later agent reply
 - Session management
 - Authentication — client ids are self-declared and unverified
@@ -272,12 +282,12 @@ and reconnecting clients. Connections and shared chats are kept in memory and
 require a single worker and replica. Shared chats last while the host relay
 stays open; there is no durable offline queue.
 
-Two client Connection Server behaviours worth knowing about:
+One client Connection Server behaviour worth knowing about:
 
 - **`connection_id`** is server-internal and never exposed to clients.
 
 ## Design notes
 
-`agent.md` in the repository root holds the full specification these
-decisions come from, including the phase plan, acceptance criteria, and
-the reasoning behind each boundary.
+The reasoning behind each boundary is recorded in the module docstrings
+that implement it, together with the acceptance criteria the code is
+written to satisfy.

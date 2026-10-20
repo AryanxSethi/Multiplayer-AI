@@ -3,7 +3,7 @@
 Serves two things:
 
 * ``GET /health`` — a liveness probe that deliberately does not depend on
-  any agent being reachable (agent.md section 6).
+  any agent being reachable (specification section 6).
 * ``WebSocket /ws/{client_id}`` — the persistent client connection that
   carries all client-to-client messaging (section 7).
 
@@ -38,7 +38,7 @@ from src.routing.router import route_message
 from src.server.connection_manager import ConnectionManager
 
 # Configure before creating the logger, otherwise the INFO events listed in
-# agent.md section 23 are discarded: Python's default root level is WARNING
+# specification section 23 are discarded: Python's default root level is WARNING
 # and no handler is attached, so logger.info() would emit nothing at all.
 logging.basicConfig(
     level=logging.INFO,
@@ -109,7 +109,7 @@ async def client_socket(websocket: WebSocket) -> None:
 
     The client id is taken as given. There is no authentication yet:
     identification and authentication are separate concerns
-    (agent.md section 8), and conflating them would make retrofitting
+    (specification section 8), and conflating them would make retrofitting
     auth harder.
 
     Delivery failures are reported to the *sender*; on success the sender

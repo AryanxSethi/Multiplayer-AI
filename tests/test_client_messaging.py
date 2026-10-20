@@ -1,4 +1,4 @@
-"""Tests 5 and 6 from agent.md section 24: client-to-client messaging.
+"""Tests 5 and 6 from specification section 24: client-to-client messaging.
 
 The success path asserts on the *destination* socket. Nothing is sent
 back to the sender on success, so the sender's socket is silent and
@@ -44,7 +44,7 @@ def test_delivered_frame_keeps_camel_case(client: TestClient) -> None:
 def test_source_is_rewritten_to_the_real_sender(client: TestClient) -> None:
     """The server identifies the source from the connection, not the payload.
 
-    agent.md section 9 requires the source be identified. Trusting the
+    The specification requires the source be identified. Trusting the
     envelope would let any client impersonate another.
     """
     spoofed = envelope(source="client-B")
@@ -84,7 +84,7 @@ def test_unknown_client_returns_client_not_found(client: TestClient) -> None:
 def test_disconnected_destination_returns_client_not_found(
     client: TestClient,
 ) -> None:
-    """agent.md section 22: a departed client yields an error, not a crash."""
+    """Specification section 22: a departed client yields an error, not a crash."""
     with client.websocket_connect("/ws/client-B"):
         pass  # client-B connects, then disconnects
 
@@ -200,7 +200,7 @@ def test_json_array_frame_is_invalid(client: TestClient) -> None:
 
 
 def test_error_never_leaks_a_stack_trace(client: TestClient) -> None:
-    """agent.md section 21: raw tracebacks are not exposed to clients."""
+    """Specification section 21: raw tracebacks are not exposed to clients."""
     with client.websocket_connect("/ws/client-A") as ws_a:
         ws_a.send_text("not json")
         error = ws_a.receive_json()

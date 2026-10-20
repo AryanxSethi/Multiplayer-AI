@@ -1,4 +1,4 @@
-"""Tests 1 and 2 from agent.md section 24: the server starts and reports health."""
+"""Tests 1 and 2 from specification section 24: the server starts and reports health."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def test_health_endpoint_returns_healthy(client) -> None:
 def test_health_does_not_depend_on_agents(client) -> None:
     """Test 2: health stays healthy with no clients and no agents.
 
-    agent.md section 6 requires the health check not to depend on the AI
+    The specification requires the health check not to depend on the AI
     agent, so it must not report on client or agent state.
     """
     response = client.get("/health")

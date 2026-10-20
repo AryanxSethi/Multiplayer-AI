@@ -144,7 +144,7 @@ async def test_nothing_is_delivered_on_failure(stub: StubRegistry) -> None:
 
 
 def test_make_error_matches_documented_shape() -> None:
-    """The error frame matches the shape in agent.md section 21."""
+    """The error frame matches the shape in specification section 21."""
     frame = json.loads(
         make_error("msg-123", ErrorCode.CLIENT_NOT_FOUND, "Destination missing.")
     )
@@ -178,7 +178,7 @@ def test_make_error_allows_null_message_id() -> None:
     ],
 )
 def test_all_documented_error_codes_exist(code: str) -> None:
-    """Every code listed in agent.md section 21 is defined."""
+    """Every code listed in specification section 21 is defined."""
     assert getattr(ErrorCode, code) == code
 
 
