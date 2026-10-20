@@ -57,8 +57,10 @@ request directly. Workspace access, online status, and task permissions are chec
 before dispatch. See the [chat guide](DESKTOP_GUIDE.md#chat-and-model-orchestration).
 
 The client Connection Server and agent relay are separate applications with
-different WebSocket message formats. They are not wired together. Run them on
-different ports if both are needed; each guide uses port 8000 by default.
+different WebSocket message formats. The Connection Server reaches agents
+through its Agent Gateway when `A2A_RELAY_URL` and `A2A_RELAY_TOKEN` configure
+a usable relay. Run them on different ports if both are needed; each guide
+uses port 8000 by default.
 
 ## Architecture
 
@@ -209,7 +211,8 @@ connection that sent the frame, so one client cannot impersonate another.
 `destination.type` selects the route:
 
 - `client` — delivered to that client's WebSocket
-- `agent` — **not supported yet**, returns `AGENT_NOT_FOUND`
+- `agent` — routed through the Agent Gateway when a usable relay is configured;
+  otherwise returns `AGENT_NOT_FOUND`
 
 ## Errors
 
@@ -226,12 +229,15 @@ Failures are returned to the *sender* as a JSON frame:
 
 | Code | Meaning |
 |------|---------|
-| `INVALID_MESSAGE` | Frame is not JSON, or the envelope is malformed |
+| `INVALID_MESSAGE` | Frame is not JSON, the envelope is malformed, or the agent id is invalid |
 | `CLIENT_NOT_FOUND` | Destination client is not connected |
-| `AGENT_NOT_FOUND` | Agent destinations are not implemented yet |
+| `AGENT_NOT_FOUND` | No agent relay is configured for this server |
+| `AGENT_UNAVAILABLE` | The relay is unreachable, or the agent is unknown or outside the caller's group |
+| `TIMEOUT` | The agent did not answer before `A2A_GATEWAY_TIMEOUT` |
+| `A2A_ERROR` | The relay rejected the server's credentials or returned an unreadable response |
+| `INTERNAL_ERROR` | An unexpected server failure; details stay in the server log |
 
-`AGENT_UNAVAILABLE`, `SESSION_NOT_FOUND`, `A2A_ERROR`, `TIMEOUT`, and
-`INTERNAL_ERROR` are defined but not yet reachable.
+`SESSION_NOT_FOUND` is defined but not yet reachable.
 
 `messageId` is `null` when the frame could not be parsed far enough to
 recover an id. Stack traces are never sent to clients.
@@ -265,7 +271,6 @@ in favour of `httpx2`. Cosmetic, and left alone for now.
 
 The following remain unimplemented in the client Connection Server (`src/`):
 
-- Agent Gateway integration with the agent layer
 - Response correlation between a client request and a later agent reply
 - Session management
 - Authentication — client ids are self-declared and unverified
@@ -277,7 +282,7 @@ and reconnecting clients. Connections and shared chats are kept in memory and
 require a single worker and replica. Shared chats last while the host relay
 stays open; there is no durable offline queue.
 
-Two client Connection Server behaviours worth knowing about:
+One client Connection Server behaviour worth knowing about:
 
 - **`connection_id`** is server-internal and never exposed to clients.
 

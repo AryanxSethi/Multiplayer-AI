@@ -53,9 +53,11 @@ single Python environment:
 | Device relay | `network_a2a.server:app_from_env` | Authenticated relay connecting agents across devices |
 | Connection Server | `src.server.app:app` | Client-facing WebSocket server for client-to-client messaging |
 
-They are **separate applications with different message formats**. They are not
-wired together, and each guide uses port `8000` by default, so run them on
-different ports if you need more than one at a time.
+They are **separate applications with different message formats**. The
+Connection Server reaches agents through its Agent Gateway when
+`A2A_RELAY_URL` and `A2A_RELAY_TOKEN` configure a usable relay. Each guide uses
+port `8000` by default, so run them on different ports if you need more than
+one at a time.
 
 The desktop app is the primary product. It starts its own local relay, creates
 a private device identity, and connects automatically, so most users never run
@@ -162,11 +164,13 @@ and are never written to the settings file.
 - persistent client connections over WebSocket at `/ws/{client_id}`;
 - an in-memory registry of connected clients;
 - client-to-client message routing;
+- agent destinations through the Agent Gateway when a relay is configured;
 - structured error frames and event logging;
 - a `/health` endpoint that does not depend on any agent being reachable.
 
-Agent destinations are defined in the protocol but not yet delivered —
-sending to `destination.type: "agent"` returns `AGENT_NOT_FOUND`.
+Agent destinations are routed through the Agent Gateway when a usable relay is
+configured. Without one, sending to `destination.type: "agent"` returns
+`AGENT_NOT_FOUND` with a hint to set `A2A_RELAY_URL` and `A2A_RELAY_TOKEN`.
 
 ---
 
@@ -701,10 +705,11 @@ Not implemented in `src/`:
 - client authentication — client IDs are self-declared and unverified;
 - persistence — the client registry is in memory and resets on restart;
 - delivery receipts, so a sender cannot confirm delivery;
-- agent destinations — these return `AGENT_NOT_FOUND`.
+- response correlation for a later agent reply — agent responses are returned
+  inline to the requesting client, so a reply pushed after the request is not
+  matched to it.
 
-`AGENT_UNAVAILABLE`, `SESSION_NOT_FOUND`, `A2A_ERROR`, `TIMEOUT`, and
-`INTERNAL_ERROR` are defined but not currently reachable.
+`SESSION_NOT_FOUND` is defined but not currently reachable.
 
 ### 13.2 Relay
 

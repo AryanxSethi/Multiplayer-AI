@@ -13,7 +13,7 @@ Standard A2A discovery and streaming are not implemented by this relay.
 
 ## 1. Install on the relay and every device
 
-Use Python 3.11 or newer. From this repository directory on Windows:
+Use Python 3.13 or newer. From this repository directory on Windows:
 
 ```powershell
 python -m venv .venv
