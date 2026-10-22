@@ -117,6 +117,21 @@ Hardware detection reads the machine once per visit. The first open can take
 around a second on machines where querying the GPU is slow; see
 [Scope and known limitations](#13-scope-and-known-limitations).
 
+The native workflow is **find a fitting build → Download → Run → Use in chat**,
+following [Odysseus Cookbook](https://github.com/odysseus-dev/odysseus)'s
+hardware-aware discovery, download, and serving approach. Search and task
+filters narrow the catalogue; the context selector recalculates fit estimates.
+Downloads use Ollama's streaming API, show progress, support cancellation and
+retry, and continue across page and workspace changes. Installed and running
+models can be listed explicitly, and Stop unloads weights without deleting them.
+Use in chat fills the existing connection form for the current workspace.
+
+Ollama must be installed separately and listen at `127.0.0.1:11434`. The native
+controls use GGUF repositories; the existing provider form supports other
+endpoints. Local lifecycle requests bypass HTTP proxies. Opening Cookbook
+does not make requests. Catalogue metadata refresh and model file downloads
+remain separate actions. See the [desktop cookbook guide](DESKTOP_GUIDE.md#cookbook-find-download-and-run-local-models).
+
 ### 2.4 Chat orchestration
 
 Chat uses the first imported model as its default. While that model is offline,
@@ -253,7 +268,7 @@ limit.
 | WebSocket | `websockets` | Device and client connections |
 | Validation | Pydantic | Message envelopes and configuration models |
 | HTTP client | httpx | Provider API calls and relay client |
-| Agent protocol | `a2a-sdk` | Agent-to-agent request plumbing |
+| Agent transport | Custom authenticated WebSocket relay | Device-to-device model requests |
 | Persistence | SQLite (`sqlite3`) | Chat history and bounded model context |
 | Credentials | `keyring` | OS credential store for tokens and API keys |
 | System info | `psutil` | Hardware detection for the Cookbook |
@@ -565,7 +580,9 @@ change one of them explicitly.
 | `desktop_app/workspace_runtime.py` | Per-workspace relays, agents, membership |
 | `desktop_app/cookbook.py` | Hardware detection and model-fit arithmetic (no widgets) |
 | `desktop_app/cookbook_panel.py` | Cookbook page, refresh flow, scroll handling |
-| `desktop_app/cookbook_hub.py` | Catalogue browsing and download |
+| `desktop_app/cookbook_hub.py` | Hugging Face catalogue metadata refresh |
+| `desktop_app/cookbook_runtime.py` | Device-wide Ollama downloads, progress, cancellation, and model lifecycle |
+| `desktop_app/cookbook_controls.py` | Native download, run, stop, and chat controls |
 | `desktop_app/storage.py` | Preferences, credential store, workspace vault |
 | `desktop_app/theme.py` | Colours, spacing, and stylesheet generation |
 | `desktop_app/widgets.py`, `layout.py`, `icons.py` | Shared UI building blocks |
@@ -709,7 +726,6 @@ Not implemented in `src/`:
   inline to the requesting client, so a reply pushed after the request is not
   matched to it.
 
-`SESSION_NOT_FOUND` is defined but not currently reachable.
 
 ### 13.2 Relay
 

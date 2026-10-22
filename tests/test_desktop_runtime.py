@@ -1185,7 +1185,6 @@ class PollBackoffTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_backoff_is_state_someone_else_can_reach(self):
         """It starts on the engine, not inside the loop that owns it."""
         self.assertEqual(self.engine._poll_delay, 3)
-        self.assertEqual(self.engine._poll_failures, 0)
 
     async def test_retry_clears_a_backoff_earned_by_an_outage_that_is_over(self):
         """The reader pressing Retry should not wait out a repaired fault."""
@@ -1195,11 +1194,10 @@ class PollBackoffTests(unittest.IsolatedAsyncioTestCase):
             called.append(True)
 
         self.engine.refresh = refresh
-        self.engine._poll_delay, self.engine._poll_failures = 300, 9
+        self.engine._poll_delay = 300
         await self.engine.retry_poll()
         self.assertTrue(called, "the stubbed refresh was never used")
         self.assertEqual(self.engine._poll_delay, 3)
-        self.assertEqual(self.engine._poll_failures, 0)
 
     async def test_a_retry_that_fails_leaves_the_backoff_where_it_was(self):
         """Otherwise Retry would promise a cadence the relay cannot keep.
@@ -1211,10 +1209,9 @@ class PollBackoffTests(unittest.IsolatedAsyncioTestCase):
             raise OSError("relay still gone")
 
         self.engine.refresh = refresh
-        self.engine._poll_delay, self.engine._poll_failures = 48, 5
+        self.engine._poll_delay = 48
         await self.engine.retry_poll()
         self.assertEqual(self.engine._poll_delay, 48)
-        self.assertEqual(self.engine._poll_failures, 5)
         self.assertFalse(self.engine._poll_wake.is_set(),
                          "a failed Retry woke the loop into the same dead relay")
 
@@ -1232,7 +1229,7 @@ class PollBackoffTests(unittest.IsolatedAsyncioTestCase):
             called.append(True)
 
         self.engine.refresh = refresh
-        self.engine._poll_delay, self.engine._poll_failures = 300, 9
+        self.engine._poll_delay = 300
         await self.engine.retry_poll()
         self.assertTrue(called, "the stubbed refresh was never used")
         self.assertTrue(self.engine._poll_wake.is_set(),

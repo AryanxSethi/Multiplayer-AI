@@ -61,7 +61,7 @@ class WorkspaceRuntime:
         # because the other end went away should start listening again the
         # moment it is reachable, not sit out a backoff earned by a fault that
         # has already been repaired.
-        self._poll_delay, self._poll_failures = 3, 0
+        self._poll_delay = 3
         # Set to cut the poll's wait short. The loop reads the delay at the top
         # of a pass and sleeps it at the bottom, so clearing the stored delay
         # while it is already asleep changes nothing about that wait: on a relay
@@ -379,7 +379,7 @@ class WorkspaceRuntime:
             # has now been repaired. Left in place it would keep the poll quiet
             # for up to five minutes on a device that is already connected --
             # which is how a guest that had just rejoined saw no agents at all.
-            self._poll_delay, self._poll_failures = 3, 0
+            self._poll_delay = 3
             if self.remote and self.active_url == url and self.active_token == token:
                 await self.refresh()
                 if conversation_id:
@@ -729,7 +729,7 @@ class WorkspaceRuntime:
         """
         try:
             await self.refresh()
-            self._poll_delay, self._poll_failures = 3, 0
+            self._poll_delay = 3
             self._poll_wake.set()
         except Exception:
             self.emit("offline", "Relay connection interrupted. The app will keep trying to reconnect.")
@@ -800,9 +800,8 @@ class WorkspaceRuntime:
                 await self.refresh()
                 # Back to the steady cadence on the first success, so a blip
                 # costs one slow moment rather than the rest of the session.
-                self._poll_delay, self._poll_failures = 3, 0
+                self._poll_delay = 3
             except Exception:
-                self._poll_failures += 1
                 self.emit("offline", "Relay connection interrupted. The app will keep trying to reconnect.")
                 # Doubling, to a ceiling of five minutes, with a little
                 # jitter so a room full of clients does not come back in step.

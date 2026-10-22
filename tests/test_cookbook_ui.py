@@ -44,17 +44,35 @@ def storage(tmp_path):
 
 
 @pytest.fixture
-def window(qt_app, storage):
+def window(qt_app, storage, monkeypatch):
     """A real MainWindow, torn down after the test.
 
     The vault is the in-memory one throughout, because the runtime saves
     credentials while starting up and a real vault would leave a device token
     in the developer's OS credential store on every run.
     """
+    from unittest.mock import AsyncMock
+    from dataclasses import replace
+    from desktop_app.cookbook import GpuAdapter
+    from tests.test_cookbook import device
+
+    # UI layout and controls must not depend on the host's current free RAM.
+    hardware = replace(device(available_gb=28, vram=4 * 1024 ** 3), gpus=(
+        GpuAdapter(name="Test GPU", vendor="nvidia", vram=4 * 1024 ** 3,
+                   source="manual"),))
+    monkeypatch.setattr("desktop_app.cookbook_panel.detect_hardware",
+                        lambda *args: hardware)
     instance = win.MainWindow(storage)
+    # HTTP lifecycle behavior is covered by test_cookbook_runtime. UI tests
+    # must never download gigabytes if a selector clicks the wrong control.
+    monkeypatch.setattr(instance.network.runtime.cookbook, "start",
+                        AsyncMock(return_value={"installed": [], "running": [],
+                                               "jobs": [], "error": ""}))
     yield instance
     instance.network.shutdown()
     instance.network.wait(10000)
+    instance.deleteLater()
+    qt_app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def panel_of(window):
@@ -388,7 +406,7 @@ def test_a_command_is_monospaced_selectable_and_not_body_text(window) -> None:
 
     block = blocks[0]
     assert "ollama run" in block.text()
-    assert block.text().count("\n") >= 2, (
+    assert block.text().count("\n") >= 1, (
         "the commands are not held together in one block")
     assert block.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse, (
         "a command cannot be selected, so it can only be typed by hand")
@@ -984,6 +1002,7 @@ def test_an_empty_filter_offers_a_way_back_to_the_models_that_are_there(window) 
     panel = panel_of(window)
     window.show()
     settle()
+    use_a_stated_device(panel)
     panel.task_picker.setCurrentIndex(panel.task_picker.findData("vision"))
     settle()
 
@@ -1406,7 +1425,7 @@ def build_toggles(panel):
         for button in card.findChildren(QPushButton):
             head = button.text().split(" · ")[0]
             if head.endswith(" build") or head.endswith(" builds"):
-                if not button.property("buildRow"):
+                if button.isCheckable() and not button.property("buildRow"):
                     found.append(button)
     return found
 
@@ -2110,7 +2129,7 @@ def test_only_the_labels_that_changed_are_touched(window) -> None:
     card = card_with_rows()
     assert card, "no card shows a build table"
     next(b for b in card.findChildren(QPushButton)
-         if b.property("buildRow") is None).click()
+         if b.isCheckable() and b.property("buildRow") is None).click()
     settle()
 
     def snapshot(wanted):
@@ -2172,7 +2191,7 @@ def test_the_card_border_moves_only_when_the_verdict_does(window) -> None:
     assert card, "no card shows a build table"
     repo = next(row["model"].repo for row in recommend(panel.catalog, panel.hardware))
     next(b for b in card.findChildren(QPushButton)
-         if b.property("buildRow") is None).click()
+         if b.isCheckable() and b.property("buildRow") is None).click()
     settle()
 
     entries = {entry["variant"].quantization: entry["verdict"]["result"]
@@ -2400,7 +2419,7 @@ def test_choosing_a_build_never_draws_two_different_cards(window) -> None:
     card = card_with_rows()
     assert card, "no card shows a build table"
     toggle = next(b for b in card.findChildren(QPushButton)
-                  if b.property("buildRow") is None)
+                  if b.isCheckable() and b.property("buildRow") is None)
     toggle.click()
     settle()
 
@@ -2449,7 +2468,7 @@ def test_choosing_the_build_already_shown_does_not_clear_it(window) -> None:
     card = card_with_rows()
     assert card, "no card shows a build table"
     next(b for b in card.findChildren(QPushButton)
-         if b.property("buildRow") is None).click()
+         if b.isCheckable() and b.property("buildRow") is None).click()
     settle()
 
     def chosen():
@@ -2509,7 +2528,7 @@ def test_a_card_is_never_hidden_while_the_list_can_still_paint(window) -> None:
 
     def spy(frame):
         try:
-            if frame.updatesEnabled():
+            if frame.parentWidget() is panel.body and frame.updatesEnabled():
                 gaps.append(frame.objectName() or type(frame).__name__)
         except RuntimeError:
             pass
@@ -3896,3 +3915,89 @@ def test_a_scroll_made_just_before_the_refresh_finishes_is_not_lost(window, qt_a
     assert aimed and aimed[-1] == 1100, (
         f"the final restore was aimed at {aimed[-1] if aimed else 'nothing'} "
         "rather than the 1100 the reader was at")
+
+
+def test_search_and_context_recalculate_the_catalogue(window):
+    from desktop_app.cookbook import kv_cache_bytes
+    panel = panel_of(window)
+    use_a_stated_device(panel)
+    panel.context_picker.setCurrentIndex(panel.context_picker.findData(8192))
+    settle()
+    row = next(entry for kind, entry in panel.page_entries() if kind == "model")
+    for build in row["builds"]:
+        assert build["figures"]["kv_cache"] == kv_cache_bytes(row["model"], 8192)
+    panel.search.setText(row["model"].repo)
+    settle()
+    assert len(panel.page_entries()) == 1
+    panel.search.setText("no-such-model")
+    settle()
+    assert not panel.page_entries()
+    assert "No matching models" in text_of(panel)
+    panel.clear_filters()
+    settle()
+    assert panel.page_entries()
+
+
+def test_native_actions_follow_the_selected_build(window):
+    from desktop_app.cookbook import ollama_model
+    panel = panel_of(window)
+    use_a_stated_device(panel)
+    row = next(entry for kind, entry in panel.page_entries()
+               if kind == "model" and len(entry["builds"]) > 1)
+    repo = row["model"].repo
+    variant = next(b["variant"] for b in row["builds"]
+                   if b["variant"].quantization != row["variant"].quantization)
+    expected = ollama_model(row["model"], variant)
+    panel.choose_build(repo, variant.quantization)
+    settle()
+    panel.update_local_state({"installed": [{"name": expected}], "running": [],
+                              "jobs": [], "error": ""})
+    calls = []
+    window.command = lambda method, *args, **kwargs: calls.append((method, args))
+    download, run, chat = panel._parts[repo]["local_actions"]
+    assert download.text() == "Downloaded" and not download.isEnabled()
+    assert run.isEnabled() and chat.isEnabled()
+    run.click()
+    assert calls[-1] == ("cookbook_start", (expected, "run", 4096))
+
+
+def test_downloaded_model_prefills_the_chat_connection_form(window):
+    from desktop_app.cookbook_runtime import LOCAL_OLLAMA
+    panel = panel_of(window)
+    window.ready = True
+    window.command = lambda *args, **kwargs: None
+    name = "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
+    panel.local_models.use_in_chat(name)
+    assert window.stack.currentIndex() == win.AGENTS_PAGE
+    assert window.model_id.currentText() == name
+    assert window.model_base.text() == LOCAL_OLLAMA
+    assert window.model_provider.currentData() == "ollama"
+    assert window.model_name.text()
+
+
+def test_local_progress_updates_keep_the_same_widgets(window):
+    panel = panel_of(window)
+    state = {"installed": [], "running": [], "error": "", "jobs": [{
+        "name": "example:latest", "state": "downloading", "operation": "download",
+        "message": "pulling weights", "completed": 50, "total": 100}]}
+    panel.update_local_state(state)
+    before = panel.local_models._job_widgets["example:latest"]
+    updated = {**state, "jobs": [{**state["jobs"][0], "completed": 75}]}
+    panel.update_local_state(updated)
+    assert panel.local_models._job_widgets["example:latest"] == before
+    assert before[1].value() == 75
+
+
+def test_local_models_fit_in_a_narrow_page(window):
+    panel = panel_of(window)
+    name = "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
+    panel.update_local_state({
+        "installed": [{"name": name, "size": 4683074336}],
+        "running": [{"name": name, "size_vram": 4000000000}],
+        "jobs": [{"name": name, "state": "downloading", "operation": "download",
+                  "message": "pulling model weights", "completed": 50, "total": 100}],
+        "error": ""})
+    window.resize(760, 800)
+    window.show()
+    settle()
+    assert panel.scroller.horizontalScrollBar().maximum() == 0

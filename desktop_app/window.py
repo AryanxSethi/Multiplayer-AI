@@ -3031,7 +3031,11 @@ class MainWindow(QMainWindow):
 
     @Slot(str, object)
     def network_event(self, event, data):
-        if event == "ready":
+        if event == "cookbook":
+            self.cookbook_state = data
+            if self.cookbook_panel is not None:
+                self.cookbook_panel.update_local_state(data)
+        elif event == "ready":
             self.ready = True
             self.port = data["port"]
             self.progress.hide()

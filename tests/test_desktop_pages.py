@@ -4220,6 +4220,11 @@ def test_a_checkbox_paints_nothing_behind_itself(window, qt_app) -> None:
         qt_app.processEvents()
         time.sleep(0.005)
 
+    # Keep the sample away from anti-aliased text at the end of the label.
+    # This test measures the background; label sizing is checked separately.
+    window.reduce_motion.setFixedWidth(window.reduce_motion.width())
+    window.reduce_motion.setText("")
+
     for name in THEME_NAMES:
         window.apply_theme(name)
         qt_app.processEvents()

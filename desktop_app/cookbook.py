@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -1071,6 +1072,16 @@ def empty_reason(catalog, hardware, task=None, context=DEFAULT_CONTEXT):
         can_widen=bool(task))
 
 
+def ollama_model(model, variant):
+    """An Ollama Hub identifier shared by commands and native download controls."""
+    repo = model.artifact_repo
+    quant = variant.quantization
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", repo)
+            or not re.fullmatch(r"[A-Za-z0-9_]+", quant)):
+        return None
+    return f"hf.co/{repo}:{quant}"
+
+
 def ollama_commands(model, variant):
     """Commands that fetch and run one artifact, built from real identifiers.
 
@@ -1086,14 +1097,12 @@ def ollama_commands(model, variant):
     a command that would not run is worse than none, because a user cannot
     tell which of the two they are looking at.
     """
-    if not (model.artifact_repo and variant.quantization):
+    tag = ollama_model(model, variant)
+    if not tag:
         return []
-    tag = f"hf.co/{model.artifact_repo}:{variant.quantization}"
     return [
         {"purpose": f"Download and run the {variant.quantization} build",
          "command": f"ollama run {tag}"},
-        {"purpose": "Give it a longer memory, at more cost",
-         "command": f"OLLAMA_CONTEXT_LENGTH=8192 ollama run {tag}"},
         {"purpose": "Download it without starting it",
          "command": f"ollama pull {tag}"},
     ]
