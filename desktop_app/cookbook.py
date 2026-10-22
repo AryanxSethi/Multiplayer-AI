@@ -889,7 +889,7 @@ def best_variant(model, hardware, context=DEFAULT_CONTEXT):
 
 
 def recommend(catalog, hardware, task=None, context=DEFAULT_CONTEXT, limit=None,
-              include_deprecated=False):
+              include_deprecated=False, include_unfitting=False):
     """Models worth this device's attention, best first.
 
     Ranked on fit and then on capability, never on parameter count alone: a
@@ -904,6 +904,10 @@ def recommend(catalog, hardware, task=None, context=DEFAULT_CONTEXT, limit=None,
     to be told it was withdrawn, but recommending a download of it would be
     sending them to something the publisher has asked people to stop using.
     ``include_deprecated`` is how a caller asks for the full list anyway.
+
+    ``include_unfitting`` is the catalogue browsing view: retain models that
+    cannot be recommended, with their actual verdicts and no build marked as
+    recommended. Entries with no published builds remain visible as unknown.
     """
     scored = []
     for model in catalog:
@@ -913,7 +917,13 @@ def recommend(catalog, hardware, task=None, context=DEFAULT_CONTEXT, limit=None,
             continue
         variant = best_variant(model, hardware, context)
         if variant is None:
-            continue
+            if not include_unfitting:
+                continue
+            # Browsing preserves the verdict. A build shown here is an option
+            # to inspect, not a recommendation that it fits current memory.
+            variant = next((item for quant in PREFERRED_VARIANTS for item in model.variants
+                            if item.quantization.upper() == quant),
+                           min(model.variants, key=lambda item: item.size or 0, default=None))
         verdict = classify(model, variant, hardware, context)
         scored.append((ORDER.index(verdict["result"]), -model.parameters, model, variant, verdict))
     scored.sort(key=lambda row: (row[0], row[1]))

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
 
 from .cookbook import (EXPLANATIONS, LIKELY, NOT_ENOUGH_PUBLISHED,
-                       POSSIBLE, PREVIOUS_NAME, VERIFIED,
+                       POSSIBLE, PREVIOUS_NAME, UNKNOWN, VERIFIED,
                        CatalogError, TASKS, describe_changes, detect_hardware,
                        empty_reason, human_bytes, kv_cache_bytes, load_cache,
                        load_catalog, ollama_commands, ollama_model, parse_model, recommend,
@@ -105,12 +105,15 @@ class _StillPainting:
         self.was = False
 
     def __enter__(self):
-        self.was = self.widget.updatesEnabled()
+        # updatesEnabled() includes an ancestor's temporary suppression, such
+        # as QStackedWidget switching pages. Remember only this widget's own
+        # flag, otherwise disabling it here makes that inherited state permanent.
+        self.was = self.widget.testAttribute(Qt.WidgetAttribute.WA_ForceUpdatesDisabled)
         self.widget.setUpdatesEnabled(False)
         return self.widget
 
     def __exit__(self, *exc):
-        if self.was:
+        if not self.was:
             self.widget.setUpdatesEnabled(True)
         return False
 
@@ -285,6 +288,15 @@ class CookbookPanel(QWidget):
             self.task_picker.addItem(title, task)
         self.task_picker.currentIndexChanged.connect(self.task_changed)
         filters.addWidget(self.task_picker, 1)
+        self.fit_picker = Select()
+        self.fit_picker.addItem("Recommended", False)
+        self.fit_picker.addItem("All models", True)
+        self.fit_picker.setAccessibleName("Model fit filter")
+        self.fit_picker.setToolTip(
+            "Recommended uses currently available memory. All models also "
+            "shows builds that do not fit, with their memory requirements.")
+        self.fit_picker.currentIndexChanged.connect(self.task_changed)
+        filters.addWidget(self.fit_picker)
         layout.addLayout(filters)
 
         search_row = QHBoxLayout()
@@ -463,7 +475,8 @@ class CookbookPanel(QWidget):
         task = self.task_picker.currentData()
         if not self.catalog:
             return []
-        offered = recommend(self.catalog, hardware, task=task, context=self.context)
+        offered = recommend(self.catalog, hardware, task=task, context=self.context,
+                            include_unfitting=self.fit_picker.currentData())
         withdrawn = [model for model in self.catalog
                      if model.deprecated and (not task or task in model.tasks)]
         query = self.search.text().strip().casefold()
@@ -886,6 +899,8 @@ class CookbookPanel(QWidget):
             column.addWidget(label("No matching models", "heading", True))
             column.addWidget(label("Try a different search or clear the filters.", "muted", True))
             column.addWidget(action("Clear filters", self.clear_filters, name="ghost"))
+            if not self.fit_picker.currentData():
+                column.addWidget(action("Browse all models", self.show_all_models, name="ghost"))
             self.results.addWidget(card)
             return
         reason = empty_reason(self.catalog, self.hardware,
@@ -895,6 +910,12 @@ class CookbookPanel(QWidget):
         detail = label(reason.detail, "muted", True)
         detail.setWordWrap(True)
         column.addWidget(detail)
+
+        if not self.fit_picker.currentData() and any(
+                not model.deprecated and (not self.task_picker.currentData()
+                    or self.task_picker.currentData() in model.tasks)
+                for model in self.catalog):
+            column.addWidget(action("Browse all models", self.show_all_models, name="ghost"))
 
         if reason.can_widen:
             column.addSpacing(4)
@@ -967,6 +988,9 @@ class CookbookPanel(QWidget):
         self.search.clear()
         self.show_everything()
 
+    def show_all_models(self):
+        self.fit_picker.setCurrentIndex(self.fit_picker.findData(True))
+
     def _chosen_entry(self, row):
         """The build this card is showing: the reader's choice, or the best one.
 
@@ -980,7 +1004,8 @@ class CookbookPanel(QWidget):
         for entry in builds:
             if wanted and entry["variant"].quantization == wanted:
                 return entry
-        return next((entry for entry in builds if entry["selected"]), None)
+        return next((entry for entry in builds if entry["selected"]),
+                    next((entry for entry in builds if entry["variant"] is row["variant"]), None))
 
     def choose_build(self, repo, quantization):
         """Show a different build of this model, and re-draw the card for it.
@@ -1175,7 +1200,7 @@ class CookbookPanel(QWidget):
             summary.append(f"{on_card} run on the graphics card")
         if spilling:
             summary.append(f"{spilling} spill to the CPU")
-        detail_text = " · ".join(summary[1:]) or "all of them fit system memory"
+        detail_text = " · ".join(summary[1:]) or "compare sizes and memory requirements"
         toggle = action(summary[0], None, name="ghost")
         toggle.setToolTip(f"{summary[0]} — {detail_text}")
         toggle.setAccessibleName(
@@ -1330,6 +1355,16 @@ class CookbookPanel(QWidget):
         verdict = (entry or {}).get("verdict", row["verdict"])
         card, column = self._card(CARD[verdict["result"]])
         parts = {"verdict": verdict["result"]}
+
+        if variant is None:
+            column.addWidget(label(model.display, "heading", True))
+            column.addWidget(label(UNKNOWN, TONE[UNKNOWN]))
+            column.addWidget(label(
+                "No downloadable builds are listed for this model. "
+                "Refresh the catalogue to check for published builds.", "muted", True))
+            column.addWidget(label(f"From {model.repo} on {model.source}", "footer", True))
+            self._parts[model.repo] = parts
+            return card
 
         # Group one: what this is.
         column.addWidget(label(model.display, "heading", True))

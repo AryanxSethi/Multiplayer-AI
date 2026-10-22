@@ -38,6 +38,9 @@ CPU, and free storage and recommends builds that fit. Search by model,
 publisher, repository, or quantization, choose a task, and adjust **Context**
 to see how conversation length changes memory requirements. Select another
 quantization under a model's builds to update its verdict and actions.
+Choose **All models** to browse the catalogue when low free memory leaves no
+recommendations. Each model keeps its fit verdict; the empty recommendation
+message also provides a **Browse all models** button.
 
 The workflow follows the hardware recommendation, download, and serve approach
 of [Odysseus Cookbook](https://github.com/odysseus-dev/odysseus), using this

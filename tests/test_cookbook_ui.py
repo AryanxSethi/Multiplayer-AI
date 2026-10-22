@@ -4001,3 +4001,80 @@ def test_local_models_fit_in_a_narrow_page(window):
     window.show()
     settle()
     assert panel.scroller.horizontalScrollBar().maximum() == 0
+
+
+def test_paint_guard_does_not_make_an_ancestors_suppression_permanent(qt_app):
+    from desktop_app.cookbook_panel import _StillPainting
+    parent = QWidget()
+    child = QWidget(parent)
+    parent.setUpdatesEnabled(False)
+    assert not child.updatesEnabled()
+    assert not child.testAttribute(Qt.WidgetAttribute.WA_ForceUpdatesDisabled)
+    with _StillPainting(child):
+        assert child.testAttribute(Qt.WidgetAttribute.WA_ForceUpdatesDisabled)
+    assert not child.testAttribute(Qt.WidgetAttribute.WA_ForceUpdatesDisabled)
+    parent.setUpdatesEnabled(True)
+    assert child.updatesEnabled()
+    child.setUpdatesEnabled(False)
+    with _StillPainting(child):
+        assert not child.updatesEnabled()
+    assert child.testAttribute(Qt.WidgetAttribute.WA_ForceUpdatesDisabled)
+    assert not child.updatesEnabled()
+    parent.deleteLater()
+
+
+def test_opening_cookbook_after_the_window_is_shown_keeps_cards_painting(window, monkeypatch):
+    from tests.test_cookbook import device
+    readings = []
+
+    def hardware(*args):
+        # A changed reading forces showEvent to rebuild during the stack's
+        # own temporary paint suppression, as happens with live RAM readings.
+        readings.append(True)
+        return device(available_gb=28 if len(readings) == 1 else 24,
+                      vram=4 * 1024 ** 3)
+
+    monkeypatch.setattr("desktop_app.cookbook_panel.detect_hardware", hardware)
+    window.show()
+    settle()
+    panel = panel_of(window)
+    settle()
+    assert len(readings) >= 2
+    assert panel.hardware.memory_available == 24 * 1024 ** 3
+    assert panel.body.updatesEnabled()
+    assert cards_on_page(panel)
+    assert all(card.updatesEnabled() and card.isVisible() for card in cards_on_page(panel))
+
+
+def test_low_free_ram_explains_the_filter_and_can_show_all_coding_models(window):
+    from tests.test_cookbook import device
+    window.show()
+    settle()
+    panel = panel_of(window)
+    panel.hardware = device(total_gb=16, available_gb=2.5, vram=8 * 1024 ** 3)
+    panel.task_picker.setCurrentIndex(panel.task_picker.findData("coding"))
+    settle()
+    assert panel.body.updatesEnabled()
+    assert "None of the coding models fit this device" in text_of(panel)
+    assert cards_on_page(panel)[0].isVisible()
+    browse = next(b for b in panel.body.findChildren(QPushButton)
+                  if b.text() == "Browse all models")
+    browse.click()
+    settle()
+    rows = [row for kind, row in panel.page_entries() if kind == "model"]
+    assert len(rows) == 2
+    assert all(row["verdict"]["result"] == "not recommended" for row in rows)
+    assert all(not build["selected"] for row in rows for build in row["builds"])
+    assert all(panel._chosen_entry(row)["variant"] is row["variant"] for row in rows)
+    assert all(row["model"].display in text_of(panel) for row in rows)
+    assert panel.body.updatesEnabled()
+
+
+def test_browse_all_models_can_render_an_entry_without_downloadable_builds(window):
+    from dataclasses import replace
+    panel = panel_of(window)
+    panel.catalog = [replace(panel.catalog[0], variants=())]
+    panel.show_all_models()
+    settle()
+    assert "No downloadable builds are listed" in text_of(panel)
+    assert len(cards_on_page(panel)) == 1
