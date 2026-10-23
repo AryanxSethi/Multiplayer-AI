@@ -10,11 +10,8 @@ Everything it shows is decided by ``desktop_app.cookbook``, which holds no Qt.
 This module draws conclusions and does no arithmetic, so there is one place to
 be wrong about a recommendation and it is not here.
 
-Nothing leaves the machine until Refresh is pressed. The Resources page says
-this device's readings are sent nowhere, and a Cookbook that quietly called
-Hugging Face on open would make that untrue. The only request this page makes
-is the one a person asked for by pressing the button, and the button says what
-it sends before it is pressed.
+The page opens offline. Metadata refreshes and Ollama downloads happen only
+when requested; hardware readings stay on this device.
 """
 
 from __future__ import annotations
@@ -24,12 +21,13 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLineEdit, QVBoxLayout,
                              QWidget)
 
 from .cookbook import (EXPLANATIONS, LIKELY, NOT_ENOUGH_PUBLISHED,
-                       POSSIBLE, PREVIOUS_NAME, VERIFIED,
+                       POSSIBLE, PREVIOUS_NAME, UNKNOWN, VERIFIED,
                        CatalogError, TASKS, describe_changes, detect_hardware,
                        empty_reason, human_bytes, kv_cache_bytes, load_cache,
-                       load_catalog, ollama_commands, parse_model, recommend,
+                       load_catalog, ollama_commands, ollama_model, parse_model, recommend,
                        rollback_catalog, save_catalog)
 from .cookbook_hub import check_base
+from .cookbook_controls import LocalModels
 from .widgets import Select, action, label
 
 # The name of the badge beside each model, and the label style it wears.
@@ -107,12 +105,15 @@ class _StillPainting:
         self.was = False
 
     def __enter__(self):
-        self.was = self.widget.updatesEnabled()
+        # updatesEnabled() includes an ancestor's temporary suppression, such
+        # as QStackedWidget switching pages. Remember only this widget's own
+        # flag, otherwise disabling it here makes that inherited state permanent.
+        self.was = self.widget.testAttribute(Qt.WidgetAttribute.WA_ForceUpdatesDisabled)
         self.widget.setUpdatesEnabled(False)
         return self.widget
 
     def __exit__(self, *exc):
-        if self.was:
+        if not self.was:
             self.widget.setUpdatesEnabled(True)
         return False
 
@@ -265,6 +266,9 @@ class CookbookPanel(QWidget):
         self.unknown_label.setVisible(bool(unknown))
         layout.addWidget(card)
 
+        self.local_models = LocalModels(window, context=lambda: self.context)
+        layout.addWidget(self.local_models)
+
         self.catalog_note = label("", "muted", True)
         self.catalog_note.setWordWrap(True)
         layout.addWidget(self.catalog_note)
@@ -284,7 +288,32 @@ class CookbookPanel(QWidget):
             self.task_picker.addItem(title, task)
         self.task_picker.currentIndexChanged.connect(self.task_changed)
         filters.addWidget(self.task_picker, 1)
+        self.fit_picker = Select()
+        self.fit_picker.addItem("Recommended", False)
+        self.fit_picker.addItem("All models", True)
+        self.fit_picker.setAccessibleName("Model fit filter")
+        self.fit_picker.setToolTip(
+            "Recommended uses currently available memory. All models also "
+            "shows builds that do not fit, with their memory requirements.")
+        self.fit_picker.currentIndexChanged.connect(self.task_changed)
+        filters.addWidget(self.fit_picker)
         layout.addLayout(filters)
+
+        search_row = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search models, publishers, or quantizations")
+        self.search.setAccessibleName("Search the model catalogue")
+        self.search.textChanged.connect(self.task_changed)
+        search_row.addWidget(self.search, 1)
+        search_row.addWidget(label("Context", "muted"))
+        self.context_picker = Select()
+        for tokens in (1024, 2048, 4096, 8192, 16384, 32768):
+            self.context_picker.addItem(f"{tokens:,} tokens", tokens)
+        self.context_picker.setCurrentIndex(self.context_picker.findData(4096))
+        self.context_picker.setAccessibleName("Context length for model fit and Run")
+        self.context_picker.currentIndexChanged.connect(self.task_changed)
+        search_row.addWidget(self.context_picker)
+        layout.addLayout(search_row)
 
         self.results = QVBoxLayout()
         self.results.setSpacing(12)
@@ -446,11 +475,34 @@ class CookbookPanel(QWidget):
         task = self.task_picker.currentData()
         if not self.catalog:
             return []
-        offered = recommend(self.catalog, hardware, task=task)
+        offered = recommend(self.catalog, hardware, task=task, context=self.context,
+                            include_unfitting=self.fit_picker.currentData())
         withdrawn = [model for model in self.catalog
                      if model.deprecated and (not task or task in model.tasks)]
+        query = self.search.text().strip().casefold()
+        if query:
+            def matches(model):
+                fields = (model.display, model.repo, model.artifact_repo,
+                          *(v.quantization for v in model.variants))
+                return query in " ".join(fields).casefold()
+            offered = [row for row in offered if matches(row["model"])]
+            withdrawn = [model for model in withdrawn if matches(model)]
         return ([("model", row) for row in offered]
                 + [("withdrawn", model) for model in withdrawn])
+
+    @property
+    def context(self):
+        return self.context_picker.currentData()
+
+    def update_local_state(self, state):
+        self.local_models.update_state(state)
+        for parts in self._parts.values():
+            if "local_actions" in parts:
+                self.local_models.update_card_actions(parts["local_actions"], parts["local_name"]())
+
+    def _local_name(self, row):
+        entry = self._chosen_entry(row)
+        return ollama_model(row["model"], (entry or {}).get("variant", row["variant"]))
 
     def _reread_hardware(self, force=False):
         """Re-detect this device, and redraw only if the memory has moved.
@@ -842,13 +894,28 @@ class CookbookPanel(QWidget):
         itself. A filter that hid the list offers its way back, because that is
         the one case where the reader can do something about it right now.
         """
+        if self.search.text().strip():
+            card, column = self._card()
+            column.addWidget(label("No matching models", "heading", True))
+            column.addWidget(label("Try a different search or clear the filters.", "muted", True))
+            column.addWidget(action("Clear filters", self.clear_filters, name="ghost"))
+            if not self.fit_picker.currentData():
+                column.addWidget(action("Browse all models", self.show_all_models, name="ghost"))
+            self.results.addWidget(card)
+            return
         reason = empty_reason(self.catalog, self.hardware,
-                              task=self.task_picker.currentData())
+                              task=self.task_picker.currentData(), context=self.context)
         card, column = self._card()
         column.addWidget(label(reason.heading, "heading", True))
         detail = label(reason.detail, "muted", True)
         detail.setWordWrap(True)
         column.addWidget(detail)
+
+        if not self.fit_picker.currentData() and any(
+                not model.deprecated and (not self.task_picker.currentData()
+                    or self.task_picker.currentData() in model.tasks)
+                for model in self.catalog):
+            column.addWidget(action("Browse all models", self.show_all_models, name="ghost"))
 
         if reason.can_widen:
             column.addSpacing(4)
@@ -917,6 +984,13 @@ class CookbookPanel(QWidget):
             return
         self.task_picker.setCurrentIndex(index)
 
+    def clear_filters(self):
+        self.search.clear()
+        self.show_everything()
+
+    def show_all_models(self):
+        self.fit_picker.setCurrentIndex(self.fit_picker.findData(True))
+
     def _chosen_entry(self, row):
         """The build this card is showing: the reader's choice, or the best one.
 
@@ -930,7 +1004,8 @@ class CookbookPanel(QWidget):
         for entry in builds:
             if wanted and entry["variant"].quantization == wanted:
                 return entry
-        return next((entry for entry in builds if entry["selected"]), None)
+        return next((entry for entry in builds if entry["selected"]),
+                    next((entry for entry in builds if entry["variant"] is row["variant"]), None))
 
     def choose_build(self, repo, quantization):
         """Show a different build of this model, and re-draw the card for it.
@@ -1125,7 +1200,7 @@ class CookbookPanel(QWidget):
             summary.append(f"{on_card} run on the graphics card")
         if spilling:
             summary.append(f"{spilling} spill to the CPU")
-        detail_text = " · ".join(summary[1:]) or "all of them fit system memory"
+        detail_text = " · ".join(summary[1:]) or "compare sizes and memory requirements"
         toggle = action(summary[0], None, name="ghost")
         toggle.setToolTip(f"{summary[0]} — {detail_text}")
         toggle.setAccessibleName(
@@ -1281,6 +1356,16 @@ class CookbookPanel(QWidget):
         card, column = self._card(CARD[verdict["result"]])
         parts = {"verdict": verdict["result"]}
 
+        if variant is None:
+            column.addWidget(label(model.display, "heading", True))
+            column.addWidget(label(UNKNOWN, TONE[UNKNOWN]))
+            column.addWidget(label(
+                "No downloadable builds are listed for this model. "
+                "Refresh the catalogue to check for published builds.", "muted", True))
+            column.addWidget(label(f"From {model.repo} on {model.source}", "footer", True))
+            self._parts[model.repo] = parts
+            return card
+
         # Group one: what this is.
         column.addWidget(label(model.display, "heading", True))
         # The verdict sits under the name as its own line rather than floating
@@ -1319,6 +1404,11 @@ class CookbookPanel(QWidget):
         commands = ollama_commands(model, variant)
         if commands:
             column.addSpacing(16)
+            parts["local_name"] = lambda: self._local_name(row)
+            actions, parts["local_actions"] = self.local_models.card_actions(
+                parts["local_name"], model.vision,
+                lambda: min(self.context, model.context or self.context))
+            column.addWidget(actions)
             column.addWidget(label("Run it", "muted"))
             # One block holding all of them, monospaced. In the proportional
             # face these were in, a repository path is an unbroken run of
@@ -1414,6 +1504,7 @@ class CookbookPanel(QWidget):
         if commands:
             parts["commands"].setText(
                 "\n".join(item["command"] for item in commands))
+            self.local_models.update_card_actions(parts["local_actions"], self._local_name(row))
 
         if verdict["result"] != parts.get("verdict"):
             self._style_badge(parts["badge"], verdict["result"])
@@ -1438,24 +1529,24 @@ class CookbookPanel(QWidget):
     def _longer_context_warning(self, model):
         """Say what a longer conversation costs, when it would not fit.
 
-        The verdict is for a 4k conversation. The model's own limit is often
+        The verdict is for the selected context. The model's own limit is often
         far higher, and using it is not free: the cache grows with every token,
         and at the full limit this model's is 1.75GiB. Stating that here is the
         difference between a reader choosing a context length and discovering
         one for themselves.
         """
-        if not model.context or model.context <= 4096:
+        if not model.context or model.context <= self.context:
             return None
         full = kv_cache_bytes(model, model.context)
         if not full:
             return None
-        current = kv_cache_bytes(model, 4096)
+        current = kv_cache_bytes(model, self.context)
         extra = (full - (current or 0)) / 1024 ** 3
         if extra <= 0.25:
             return None
         return (f"At its full {model.context:,} token context this model needs "
                 f"about {human_bytes(full)} of conversation memory, "
-                f"{human_bytes(current or 0)} more than the figures above. "
+                f"{human_bytes(full - (current or 0))} more than the figures above. "
                 f"Raise the context length only if you need it.")
 
     def ask_to_refresh(self):

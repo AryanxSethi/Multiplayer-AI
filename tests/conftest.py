@@ -16,6 +16,11 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Qt's Windows offscreen plugin needs an explicit font directory. Without it,
+# labels render as missing-glyph boxes and layout tests measure those boxes.
+if os.name == "nt":
+    os.environ.setdefault("QT_QPA_FONTDIR",
+                          os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "Fonts"))
 
 import pytest
 from starlette.testclient import TestClient

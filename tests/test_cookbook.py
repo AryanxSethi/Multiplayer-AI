@@ -449,7 +449,7 @@ def test_commands_are_built_from_real_identifiers_and_are_all_or_nothing():
     assert commands
     assert commands[0]["command"] == (
         "ollama run hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M")
-    assert all(row["command"].startswith(("ollama run", "OLLAMA_", "ollama pull"))
+    assert all(row["command"].startswith(("ollama run", "ollama pull"))
                for row in commands), "an unverified flag was invented"
 
     # Nothing to build from, so nothing is offered rather than something guessed.

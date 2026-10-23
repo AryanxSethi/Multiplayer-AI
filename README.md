@@ -36,6 +36,11 @@ can rename them, invite or remove members, and delete them. Saved chat history
 and follow-up model context survive switching workspaces and restarting the app.
 See the [desktop guide](DESKTOP_GUIDE.md) to get started.
 
+The Cookbook recommends local model builds for your hardware. Search and filter
+models, choose a context length and quantization, download with progress and
+cancel/resume controls, run or stop installed models through Ollama, and use them
+in chat. See the [Cookbook guide](DESKTOP_GUIDE.md#cookbook-find-download-and-run-local-models).
+
 The authenticated relay and reconnecting device client in `network_a2a/`
 connect multiple laptops/desktops over LAN or the internet. They route requests
 between local agents and can forward requests to a local A2A server.
@@ -236,8 +241,6 @@ Failures are returned to the *sender* as a JSON frame:
 | `TIMEOUT` | The agent did not answer before `A2A_GATEWAY_TIMEOUT` |
 | `A2A_ERROR` | The relay rejected the server's credentials or returned an unreadable response |
 | `INTERNAL_ERROR` | An unexpected server failure; details stay in the server log |
-
-`SESSION_NOT_FOUND` is defined but not yet reachable.
 
 `messageId` is `null` when the frame could not be parsed far enough to
 recover an id. Stack traces are never sent to clients.

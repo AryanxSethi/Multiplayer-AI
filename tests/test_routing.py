@@ -171,7 +171,6 @@ def test_make_error_allows_null_message_id() -> None:
         "CLIENT_NOT_FOUND",
         "AGENT_NOT_FOUND",
         "AGENT_UNAVAILABLE",
-        "SESSION_NOT_FOUND",
         "A2A_ERROR",
         "TIMEOUT",
         "INTERNAL_ERROR",

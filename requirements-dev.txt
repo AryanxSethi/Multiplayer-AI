@@ -3,8 +3,8 @@
 # requirements-network.txt describe what the app imports, and a reader installing
 # them should not pull a test runner.
 #
-# Pinned to the versions environment.yml pins, so a machine set up either way
-# resolves the same. pytest-asyncio supplies the asyncio_mode that pytest.ini
+# Included by environment.yml too, so both installation paths use these same
+# versions. pytest-asyncio supplies the asyncio_mode that pytest.ini
 # sets; without it pytest exits 4 without collecting anything.
 pytest==9.1.1
 pytest-asyncio==1.4.0

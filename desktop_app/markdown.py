@@ -92,7 +92,7 @@ class MarkdownMessage(QTextBrowser):
         self.anchorClicked.connect(self.open_link)
         QTimer.singleShot(0, self.fit_height)
 
-    def loadResource(self, resource_type, url):
+    def loadResource(self, _resource_type, _url):
         # Replies cannot load images or other files from the device or network.
         return QByteArray()
 

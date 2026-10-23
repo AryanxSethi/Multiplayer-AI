@@ -31,6 +31,48 @@ On Linux you also need an unlocked Secret Service keyring. Windows uses Windows
 Credential Manager, and macOS uses Keychain. The app requires a working secure
 credential store; it does not fall back to writing secrets to a plaintext file.
 
+## Cookbook: find, download, and run local models
+
+Open **Cookbook** from the top bar. It detects this device's RAM, GPU memory,
+CPU, and free storage and recommends builds that fit. Search by model,
+publisher, repository, or quantization, choose a task, and adjust **Context**
+to see how conversation length changes memory requirements. Select another
+quantization under a model's builds to update its verdict and actions.
+Choose **All models** to browse the catalogue when low free memory leaves no
+recommendations. Each model keeps its fit verdict; the empty recommendation
+message also provides a **Browse all models** button.
+
+The workflow follows the hardware recommendation, download, and serve approach
+of [Odysseus Cookbook](https://github.com/odysseus-dev/odysseus), using this
+desktop app's existing Ollama integration.
+
+1. Install [Ollama](https://ollama.com/download) on this device.
+2. Click **Refresh local models** to list installed and running models. This
+   checks `127.0.0.1:11434`; it does not start a download.
+3. Click **Download** on a recommended build. The app starts local Ollama when
+   needed, and Ollama downloads that exact Hugging Face repository and
+   quantization. Progress appears under **Local models**. **Cancel download**
+   stops the request; **Retry** resumes through Ollama's existing partial files.
+4. Click **Run** to load an installed model with the selected context, capped
+   at the model's published limit. **Stop** unloads a running model from memory;
+   its downloaded files stay installed. Models loaded by Run remain warm for
+   ten minutes after their last use unless another request changes that time.
+5. Click **Use in chat** to fill the model connection form with its exact model
+   ID and local API root, then **Connect agent** to add it to the current workspace.
+
+Downloads continue when switching pages or workspaces. Closing the app cancels
+its pending requests; installed files remain in Ollama's model store. Model files
+are shared on this device, while agent connections belong to their workspace.
+Use **Refresh local models** after changing models outside the app.
+
+The page opens from the bundled or saved catalogue without contacting a model
+host. **Refresh from Hugging Face** updates catalogue metadata; **Download**
+fetches model files through Ollama. Cookbook's mirror setting applies to
+metadata refreshes; model downloads use Ollama's Hugging Face connection.
+The native download and Run controls support local Ollama GGUF builds. Other
+engines and remote model servers can be connected from the model provider form.
+Fit verdicts are estimates from published sizes, not benchmark results.
+
 ## What happens automatically
 
 Click **?** in the left rail to open the bundled documentation page in your

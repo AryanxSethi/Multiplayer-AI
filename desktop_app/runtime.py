@@ -13,6 +13,7 @@ from .storage import (LOCAL_WORKSPACE, UNAVAILABLE, WORKSPACE_ID, Storage, Works
                       write_json_durably)
 from .workspace_runtime import WorkspaceRuntime, relay_http_url
 from .ollama_service import OllamaService
+from .cookbook_runtime import CookbookRuntime
 from network_a2a.content import content_summary
 
 
@@ -54,6 +55,16 @@ class DesktopRuntime:
         self.closed = False
         self.mutation = asyncio.Lock()
         self.ollama_service = OllamaService()
+        self.cookbook = CookbookRuntime(self.ollama_service, self.emit)
+
+    async def cookbook_status(self):
+        return await self.cookbook.status()
+
+    async def cookbook_start(self, name, operation="download", context=4096):
+        return await self.cookbook.start(name, operation, context)
+
+    async def cookbook_cancel(self, name):
+        return await self.cookbook.cancel(name)
 
     @property
     def engine(self):
@@ -815,6 +826,7 @@ class DesktopRuntime:
         self.closed = True
         self.ready = False
         try:
+            await self.cookbook.close()
             await asyncio.gather(*(engine.close() for engine in self.engines.values()))
         finally:
             await self.ollama_service.close()
