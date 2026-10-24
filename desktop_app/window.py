@@ -2709,6 +2709,7 @@ class MainWindow(QMainWindow):
             self.submit_chat_command(text)
             return
         mention = leading_mention(text)
+        recipient_id = None
         if mention and not self.preparing_files:
             try:
                 identities = [agent["id"] for agent in self.agents] + [
@@ -2724,22 +2725,32 @@ class MainWindow(QMainWindow):
                 source = self.chats.get(self.selected, {})
                 attached = source.get("draft_attachments", [])
                 text = mention[1]
-                if not text and not attached:
+                if self.is_model_agent(recipient):
+                    if source.get("pending") or source.get("local_pending"):
+                        raise ValueError("Wait for this conversation's current reply before sending another message.")
+                    if not text and not attached:
+                        self.show_command_result(f"Add a message after @{identity} to ask it in this conversation.")
+                        return
+                    recipient_id = identity
+                    if not self.selected:
+                        self.select_agent(GENERAL_TARGET)
+                else:
+                    if not text and not attached:
+                        self.select_agent(identity)
+                        self.composer.clear()
+                        return
+                    destination = self.chats.get(identity, {})
+                    if destination.get("pending") or destination.get("local_pending"):
+                        raise ValueError(f"Wait for @{identity}'s current reply before sending another message.")
+                    if self.selected != identity and destination.get("draft_attachments"):
+                        raise ValueError(f"@{identity}'s conversation has draft attachments. Finish that draft first.")
+                    if len(json.dumps(text).encode()) > 180000:
+                        raise ValueError("This message is too large. Send a shorter request.")
+                    if self.selected != identity:
+                        self.chats.setdefault(identity, {"messages": [], "history": [], "pending": False})["draft_attachments"] = attached
+                        source["draft_attachments"] = []
                     self.select_agent(identity)
-                    self.composer.clear()
-                    return
-                destination = self.chats.get(identity, {})
-                if destination.get("pending") or destination.get("local_pending"):
-                    raise ValueError(f"Wait for @{identity}'s current reply before sending another message.")
-                if self.selected != identity and destination.get("draft_attachments"):
-                    raise ValueError(f"@{identity}'s conversation has draft attachments. Finish that draft first.")
-                if len(json.dumps(text).encode()) > 180000:
-                    raise ValueError("This message is too large. Send a shorter request.")
-                if self.selected != identity:
-                    self.chats.setdefault(identity, {"messages": [], "history": [], "pending": False})["draft_attachments"] = attached
-                    source["draft_attachments"] = []
-                self.select_agent(identity)
-                self.composer.setPlainText(text)
+                    self.composer.setPlainText(text)
             except ValueError as exc:
                 self.show_command_result(str(exc))
                 return
@@ -2757,9 +2768,10 @@ class MainWindow(QMainWindow):
                                    "This message is too large. Send a shorter request.")
             return
         target = self.selected
+        request_target = recipient_id or target
         chat = self.chats[target]
         chat.pop("send_error", None)
-        target_profile = dict(next((agent for agent in self.agents if agent["id"] == target), {}))
+        target_profile = dict(next((agent for agent in self.agents if agent["id"] == request_target), {}))
         content = [{"type": "text", "text": text}, *(part for item in attached for part in item["content"])] if attached else text
         try:
             content = validate_content(content)
@@ -2796,10 +2808,12 @@ class MainWindow(QMainWindow):
                 self.persist_reply(workspace_id, store, target, chat)
                 self.notice(message, error=True)
                 self.show_chat_error(workspace_id, target)
-            self.command("send_conversation", target, content, success=finished, failure=failed)
+            arguments = (target, content, recipient_id) if recipient_id else (target, content)
+            self.command("send_conversation", *arguments, success=finished, failure=failed)
             return
         payload = {"messages": model_context([*chat["history"], {"role": "user", "content": content}])} if chat["history"] or attached else {"text": text}
         chat["pending"] = True
+        chat.pop("routing", None)
         chat["messages"].append(("user", display_text))
         chat["draft_attachments"] = []
         self.composer.clear()
@@ -2814,13 +2828,13 @@ class MainWindow(QMainWindow):
                 response = json.dumps(result, indent=2)
             chat["messages"].append(("assistant", response))
             metadata = result if isinstance(result, dict) else {}
-            responder = metadata.get("responder") or {"agent_id": target,
-                "model": metadata.get("model") or target_profile.get("model") or target,
+            responder = metadata.get("responder") or {"agent_id": request_target,
+                "model": metadata.get("model") or target_profile.get("model") or request_target,
                 "provider": metadata.get("provider") or target_profile.get("provider") or "model"}
             chat.setdefault("responders", {})[str(len(chat["messages"]) - 1)] = responder
             if isinstance(result, dict) and result.get("routing"):
                 chat["routing"] = result["routing"]
-            if isinstance(result, dict) and result.get("provider"):
+            if recipient_id or isinstance(result, dict) and result.get("provider"):
                 chat["history"] = [*chat["history"], {"role": "user", "content": content}, {"role": "assistant", "content": response}]
             chat["pending"] = False
             if workspace_id == self.workspace_id:
@@ -2832,7 +2846,7 @@ class MainWindow(QMainWindow):
             chat["messages"].append(("error", message + "\nThe app did not replay this request."))
             self.persist_reply(workspace_id, store, target, chat)
             self.show_chat_error(workspace_id, target)
-        self.command("send", target, payload, success=success, failure=failure)
+        self.command("send", request_target, payload, success=success, failure=failure)
 
     def show_chat_error(self, workspace_id, target):
         """Open the conversation that failed, including after a workspace switch."""

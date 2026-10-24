@@ -436,9 +436,9 @@ class DesktopRuntime:
             raise ValueError("Workspace changed before the command ran. Send it again in the intended workspace.")
         return await self.connected_engine().chat_command(text)
 
-    async def send_conversation(self, conversation_id, text):
-        """Send text through the currently connected workspace engine."""
-        return await self.connected_engine().send_conversation(conversation_id, text)
+    async def send_conversation(self, conversation_id, text, target=None):
+        """Send in the current shared conversation, optionally choosing its responder."""
+        return await self.connected_engine().send_conversation(conversation_id, text, target)
 
     async def save_agent(self, profile, key=None, search_key=None):
         """Delegate profile and separate credential updates to the connected engine."""

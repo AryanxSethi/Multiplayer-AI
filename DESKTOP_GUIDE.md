@@ -43,10 +43,13 @@ no purpose, role, or delegation settings. If the saved default is offline,
 another available imported model answers. Follow-up messages include recent
 conversation history.
 
-Use the conversation picker to switch saved chats. Open a model's direct chat
-from **Agents**, or start a message with `@agent-name`. A leading mention opens
-that conversation and sends the rest of the message there; a bare mention only
-opens it. Inline mentions stay as message text.
+Use the conversation picker to switch saved chats. Start a message with
+`@model-name` to choose which model answers **in the current conversation**.
+It receives the recent history and attachments, and its reply stays in the same
+thread. This also works in shared chats without changing their default model.
+A bare model mention waits for you to add a message. Mentioning a user opens
+their direct conversation; inline mentions stay as message text. You can still
+open a separate model chat explicitly from **Agents**.
 
 ### Useful commands
 
