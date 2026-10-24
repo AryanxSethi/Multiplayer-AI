@@ -1,13 +1,23 @@
 # Connect agents across laptops, desktops, and other devices
 
+For the desktop invitation workflow, see [Invite another device](DESKTOP_GUIDE.md#invite-another-device).
+This guide is for running a separate relay or command-line agents.
+
+- [Install](#1-install-on-the-relay-and-every-device)
+- [Create identities](#2-create-identities-on-the-relay)
+- [Run on a LAN](#3-run-locally-or-on-a-trusted-lan)
+- [Deploy with TLS](#4-deploy-for-internet-access)
+- [Connect agents](#5-connect-agents-on-different-devices)
+- [Reliability and capacity](#reliability-and-capacity)
+
 This relay accepts many simultaneous device connections. Each device opens an
 outbound WebSocket to one reachable server. Devices can be on different networks
 behind NAT; only the relay needs to accept inbound traffic. Multiple agents on
 one device work too: give each agent a separate identity and process.
 
-The existing `a2a-server/` example is preserved. `network_a2a/` adds a custom
-authenticated transport that can forward JSON-RPC payloads to that example or
-other local A2A servers. The relay itself is **not a standard A2A endpoint** and
+`network_a2a/` provides a custom authenticated transport that can forward
+JSON-RPC payloads to an existing local A2A server.
+The relay itself is **not a standard A2A endpoint** and
 does not advertise an Agent Card. Use its device client to reach local A2A servers.
 Standard A2A discovery and streaming are not implemented by this relay.
 
@@ -44,8 +54,8 @@ each device its own token. Add further agents with unique tokens of at least
 ```
 
 Agents can see and invoke only identities with the same group. Possession of a
-token authorizes that identity; there is no separate login or invite UI. Group
-members can invoke each other's agents, so connect only handlers you intend
+token authorizes that identity; the headless relay has no separate login or
+invite UI. Group members can invoke each other's agents, so connect only handlers you intend
 to share. Local credentials/accounts remain on their own device. Rotate or
 revoke tokens by updating the file and restarting the relay; restart disconnects
 all devices. Protect the file with OS permissions and never put tokens in URLs.
@@ -192,11 +202,17 @@ payloads. There is no end-to-end encryption between agents.
 
 ## Verify
 
+Install `requirements-dev.txt` in the same environment, then run the relay and
+adapter tests:
+
 ```powershell
-.venv\Scripts\python -m unittest discover -s tests -v
+.venv\Scripts\python -m pip install -r requirements-dev.txt
+.venv\Scripts\python -m pytest tests/test_network.py tests/test_adapters.py
 ```
 
 Tests start a real local relay and exercise three concurrent devices, HTTP
 invocation, authorization, group isolation, forged responses, duplicate IDs,
 invalid frames, timeouts, disconnects, automatic reconnection, the local JSON-RPC
 bridge, and payload limits.
+
+See the [development guide](DOCUMENTATION.md#run-tests) to run the full suite.

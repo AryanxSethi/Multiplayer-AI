@@ -3,5 +3,13 @@
 .tmp
 **/__pycache__
 .pytest_cache
+.ruff_cache
+.mypy_cache
+.vscode
+build
+dist
+.desktop-venv
+venv
+*.log
 credentials*.json
 .env

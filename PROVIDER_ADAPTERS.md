@@ -1,5 +1,19 @@
 # Provider adapters
 
+For app setup, follow [Connect a model](DESKTOP_GUIDE.md#connect-a-model).
+The commands here run persistent model agents from a terminal. First complete
+[network setup](NETWORK_SETUP.md) and obtain a separate relay token per agent.
+Run these commands from the repository root using that Python environment.
+
+- [Supported providers](#supported-providers)
+- [Ollama](#ollama-on-a-laptop)
+- [Bionic GPT](#bionic-gpt)
+- [Cloud providers](#cloud-providers)
+- [Custom servers](#custom-compatible-servers)
+- [Send requests](#send-requests-from-another-device)
+- [Settings and failures](#local-settings-and-failures)
+- [Use from Python](#use-from-python)
+
 Run a provider-backed agent on any device connected to the relay. The relay
 routes messages; the device calls its configured model. API keys stay on that
 device and are sent only to the configured provider. No provider SDK is needed:
@@ -39,7 +53,7 @@ the activated `Multiplayer-AI` Conda environment, for the commands below.
 
 You can configure providers directly in the native desktop app. Choose
 **Providers**, select a model, and click **Connect agent**. The app starts the
-agent in its own process; no terminal command is needed. See [DESKTOP_GUIDE.md](DESKTOP_GUIDE.md).
+adapter automatically; no terminal command is needed. See [DESKTOP_GUIDE.md](DESKTOP_GUIDE.md).
 
 Start Ollama and pull the model you want (for example `ollama pull llama3.2`).
 Set this device's relay token, then start its agent:
@@ -146,10 +160,11 @@ Set `vision=True` in `ProviderConfig` for a vision-capable model. There is no sh
 memory in the adapter: include history in each
 request, which prevents different peers' conversations from being mixed.
 
-Desktop model settings expose image support and SearXNG internet access. Python
-configuration accepts `web_search="auto"` or `"always"` with `searxng_url`; the
-default is `"off"`. Automatic mode permits the model to request a search, then
-generates an answer from bounded result snippets with source URLs. This is a
+Desktop model settings expose image support, Ollama web search, and SearXNG.
+Python `ProviderConfig` accepts `web_search="auto"` or `"always"`; the default is
+`"off"`. Set `search_provider="ollama"` with `search_api_key`, or use the default
+`search_provider="searxng"` with `searxng_url`. Automatic mode permits the model
+to request a search, then generates an answer from bounded result snippets with source URLs. This is a
 model decision, not a comparison with its training dataset. See the setup and
 attachment limits in [DESKTOP_GUIDE.md](DESKTOP_GUIDE.md).
 
@@ -172,8 +187,8 @@ Errors travel through the relay as safe categories: `authentication`,
 from error messages. The adapters do not retry generation requests automatically,
 because a failed or timed-out call might already have generated billable output.
 
-These adapters produce non-streaming text and optionally search SearXNG. They do
-not invoke shell commands or implement provider-specific agent workflows. Use a custom
+These adapters produce non-streaming text and optionally use a configured search
+service. They do not invoke shell commands or implement provider-specific agent workflows. Use a custom
 handler or the existing local A2A bridge for those workflows. `--provider` and
 `--local-a2a-url` are mutually exclusive.
 
@@ -203,7 +218,9 @@ formatting.
 
 ## Validation and API references
 
-Run `python -m unittest discover -s tests -v`. Adapter tests mock provider HTTP
+Install `requirements-dev.txt`, then run
+`python -m pytest tests/test_adapters.py tests/test_agent_integration.py`.
+Adapter tests mock provider HTTP
 responses; integration tests run a real relay and a subprocess provider agent
 against a local mock Ollama endpoint. No paid cloud requests are made by tests.
 

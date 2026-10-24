@@ -11,12 +11,11 @@ from PySide6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parents[1]
 GUIDES = (
-    ("desktop", "Desktop app", "DESKTOP_GUIDE.md", "Install the app, connect models, use web search, attach files, and manage shared conversations."),
+    ("project", "Start here", "README.md", "Set up the app and choose the guide for your next step."),
+    ("desktop", "Desktop app", "DESKTOP_GUIDE.md", "Connect a model, chat, download local models, and invite your team."),
     ("providers", "Model providers", "PROVIDER_ADAPTERS.md", "Configure a model provider, API keys, model IDs, and command-line agents."),
     ("network", "Hosting and networks", "NETWORK_SETUP.md", "Run a relay, connect devices on a LAN or the internet, and troubleshoot connectivity."),
-    ("project", "Project and development", "README.md", "Understand the architecture, scope, development setup, and tests."),
-    ("reference", "Full project reference", "DOCUMENTATION.md", "One page covering architecture, installation, configuration, testing, and packaging."),
-    ("roadmap", "Roadmap", "ROADMAP.md", "See the project's planned milestones and current direction."),
+    ("reference", "Development", "DOCUMENTATION.md", "Understand the architecture, run tests, build the app, and use the Connection Server."),
 )
 
 
@@ -50,7 +49,7 @@ def render_guide(key, filename):
 
 
 def main():
-    """Build the offline documentation hub from all six project Markdown guides."""
+    """Build the offline documentation hub from the project Markdown guides."""
     QApplication.instance() or QApplication([])
     cards = "".join(f'<a class="card" href="#{key}"><h2>{title}</h2><p>{description}</p></a>' for key, title, _, description in GUIDES)
     guides = "".join(f'<section class="guide" id="{key}"><a class="back" href="#start">Back to documentation</a>{render_guide(key, filename)}</section>'
@@ -72,10 +71,10 @@ td,th{border:1px solid #d5dce3;padding:10px;text-align:left}img{max-width:100%}.
 @media(prefers-color-scheme:dark){body{background:#14171b;color:#edf0f4}.intro,.card p{color:#b6c0cc}.card{background:#1e232a;border-color:#3a434e}.guide,td,th{border-color:#3a434e}a{color:#91b7ff}pre{background:#242b34}}
 @media(prefers-reduced-motion:reduce){:root{scroll-behavior:auto}}
 </style></head><body><main id="start"><p>Multiplayer AI / Help</p><h1>Documentation for your next step</h1>
-<p class="intro">Choose the guide that matches what you want to do. All six guides are included on this page and work offline. Links to external services need an internet connection.</p>
+<p class="intro">New here? Start with the setup guide, then choose what you want to do next. All guides are included on this page and work offline. Links to external services need an internet connection.</p>
 <div class="cards">''' + cards + "</div>" + guides + "</main></body></html>"
     ROOT.joinpath("docs.html").write_text(page, encoding="utf-8")
-    print("Built docs.html from six project guides.")
+    print(f"Built docs.html from {len(GUIDES)} project guides.")
 
 
 if __name__ == "__main__":
