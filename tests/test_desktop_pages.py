@@ -1992,6 +1992,20 @@ def test_a_shared_conversation_invitation_joins_that_conversation(window) -> Non
     assert sent[0][1][4] == "conversation-abc123"
 
 
+@pytest.mark.parametrize("online_peer", [False, True])
+def test_a_successful_workspace_join_opens_chat_even_without_a_conversation_invitation(window, online_peer) -> None:
+    window.ready = True
+    window.agents = [{"id": "some-device", "kind": "device", "online": online_peer}]
+    window.workspace_relay.setText("wss://relay.example.com/connect")
+    window.workspace_token.setText("t" * 40)
+    callbacks = {}
+    window.command = lambda name, *args, **kwargs: callbacks.update(kwargs)
+    window.join_workspace()
+    callbacks["success"]({})
+    assert window.selected == win.GENERAL_TARGET
+    assert window.stack.currentIndex() == win.CONVERSATIONS_PAGE
+
+
 @pytest.mark.parametrize("paste, expected", [
     ("not json at all", "Paste the complete invitation JSON"),
     ('{"url": "wss://x", "token": "y"}', "Unsupported invitation version"),
