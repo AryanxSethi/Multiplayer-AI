@@ -182,7 +182,10 @@ class Conversations:
                 return JSONResponse({"error": "Message is too large"}, 413)
         try:
             payload = json.loads(raw)
-            if not isinstance(payload, dict) or set(payload) not in ({"text"}, {"content"}):
+            if not isinstance(payload, dict) or set(payload) not in ({"text"}, {"content"}, {"text", "target"}, {"content", "target"}):
+                raise ValueError()
+            target = payload.get("target", room["target"])
+            if not isinstance(target, str) or not target:
                 raise ValueError()
             text = payload.get("content", payload.get("text"))
             if isinstance(text, str) and len(json.dumps(text).encode()) > 180000:
@@ -190,49 +193,52 @@ class Conversations:
             text = validate_content(text)
         except (ValueError, TypeError):
             return JSONResponse({"error": "Enter a message to send"}, 400)
+        if "target" in payload and (not self.relay.allowed(source, target)
+                or self.relay.agent_description(target)["kind"] != "model"):
+            return JSONResponse({"error": "Choose a model in this workspace"}, 403)
         if room["pending"]:
             return JSONResponse({"error": "Wait for the current AI reply before sending another message"}, 409)
-        general = room["target"] == GENERAL_TARGET
+        general = target == GENERAL_TARGET
         room["pending"] = True
         try:
-            await self.relay.prepare_models(source, room["target"])
+            await self.relay.prepare_models(source, target)
             if self.get(room["id"], source) is not room:
                 return JSONResponse({"error": "Conversation is unavailable for this device"}, 404)
             if general:
                 needs_vision = any(images(message["content"]) for message in model_context(room["messages"])) or bool(images(text))
                 self.relay.orchestrator.coordinator(source, greeting=is_greeting(text), needs_vision=needs_vision)
-            elif room["target"] not in self.relay.peers:
+            elif target not in self.relay.peers:
                 return JSONResponse({"error": "The conversation's agent is offline"}, 503)
         except (ConnectionError, PermissionError) as exc:
             return JSONResponse({"error": str(exc)}, 503)
         finally:
             room["pending"] = False
         room["pending"] = True
+        room.pop("routing", None)
         self._append(room, "user", text, source)
         history = model_context(room["messages"])
         try:
             if general:
-                room.pop("routing", None)
                 def on_plan(routing):
                     room["routing"] = routing
                     room["revision"] += 1
                     self.save(room)
                 result = await self.relay.orchestrator.run(source, {"messages": history}, room["id"], on_plan)
             else:
-                result = await self.relay.invoke(source, room["target"], {"messages": history}, conversation_id=room["id"])
+                result = await self.relay.invoke(source, target, {"messages": history}, conversation_id=room["id"])
             reply = result.get("text") if isinstance(result, dict) else result
             if not isinstance(reply, str):
                 reply = json.dumps(result)
             responder = result.get("responder") if isinstance(result, dict) else None
             if not responder:
-                profile = self.relay.agent_description(room["target"])
+                profile = self.relay.agent_description(target)
                 metadata = result if isinstance(result, dict) else {}
-                responder = {"agent_id": room["target"], "model": metadata.get("model") or profile.get("model") or room["target"],
+                responder = {"agent_id": target, "model": metadata.get("model") or profile.get("model") or target,
                              "provider": metadata.get("provider") or profile.get("provider") or "model"}
             self._append(room, "assistant", reply, responder["agent_id"], responder)
         except (PermissionError, ConnectionError, OverflowError, TimeoutError, ValueError) as exc:
             error = str(exc) or "The request timed out; it was not replayed"
-            self._append(room, "error", error, room["target"])
+            self._append(room, "error", error, target)
             return JSONResponse({"error": error}, 503)
         finally:
             room["pending"] = False

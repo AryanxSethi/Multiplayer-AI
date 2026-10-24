@@ -841,16 +841,19 @@ class WorkspaceRuntime:
         except httpx.HTTPError:
             raise RuntimeError("Could not reach the relay. Your request was not replayed.") from None
 
-    async def send_conversation(self, conversation_id, text):
+    async def send_conversation(self, conversation_id, text, target=None):
         generation = self.generation
         if self.remote:
-            await self.prepare_models(self.active_id, GENERAL_TARGET)
+            await self.prepare_models(self.active_id, target or GENERAL_TARGET)
         if generation != self.generation:
             raise RuntimeError("Workspace changed while the request was running; it was not replayed")
         base = relay_http_url(self.active_url, allow_insecure=True)
+        payload = {"content": text} if isinstance(text, list) else {"text": text}
+        if target is not None:
+            payload["target"] = target
         try:
             response = await self.relay_http().post(base + f"/conversations/{conversation_id}/messages",
-                json={"content": text} if isinstance(text, list) else {"text": text},
+                json=payload,
                 headers={"Authorization": "Bearer " + self.active_token}, timeout=ORCHESTRATION_TIMEOUT + 5)
             if generation != self.generation:
                 raise RuntimeError("Workspace changed while the request was running; it was not replayed")

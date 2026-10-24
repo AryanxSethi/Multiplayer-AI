@@ -36,8 +36,9 @@ imported on the owner's device. Roles replace the model's purpose and permitted
 tasks; they describe your choice of specialist, not a capability test.
 
 Type `@` to find users and agents, or `/` to find commands. Start a message with
-`@name` to open that recipient's conversation and send it there. The current
-conversation's history stays in its conversation. Inline mentions remain text.
+`@model-name` to ask that model in the current conversation, including its recent
+history and attachments. The reply stays here, also in shared chats. Mentioning
+a user opens that user's direct conversation. Inline mentions remain text.
 Use `//` at the start to send a literal leading slash.
 """
 

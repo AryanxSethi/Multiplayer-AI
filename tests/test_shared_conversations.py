@@ -214,6 +214,59 @@ class SharedConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[-1][0]["content"], content)
         self.assertEqual(calls[-1][-1]["content"], "Remember that picture?")
 
+    async def test_model_override_keeps_shared_history_membership_and_the_default_model(self):
+        calls = []
+        async def first(payload, source):
+            calls.append(("model", payload["messages"]))
+            return {"text": "First model reply", "provider": "test"}
+        async def second(payload, source):
+            calls.append(("reviewer", payload["messages"]))
+            return {"text": "Reviewer reply", "provider": "test"}
+        await self.model(first)
+        invite = await self.host.invite("reviewer", self.host.active_url)
+        await self.host._attach("reviewer", invite["token"], second)
+        self.host.app.state.relay.set_agent_profile("reviewer", {"provider": "test", "model": "review-model"})
+        history = [{"role": "user", "content": "We are building a parser"},
+                   {"role": "assistant", "content": "Which language?"}]
+        invitation = await self.invitation(history)
+        await self.join(invitation)
+        room_id = invitation["conversation_id"]
+        room = self.host.app.state.relay.conversations.rooms[room_id]
+        members = list(room["members"])
+        content = [{"type": "text", "text": "Review the parser"},
+                   {"type": "document", "name": "parser.txt", "text": "def parse(): pass"}]
+        reply = await self.guest.send_conversation(room_id, content, target="reviewer")
+        self.assertEqual(calls, [("reviewer", history + [{"role": "user", "content": content}])])
+        self.assertEqual(reply["messages"][-1]["responder"],
+                         {"agent_id": "reviewer", "model": "review-model", "provider": "test"})
+        self.assertEqual(reply["members"], members)
+        self.assertEqual(reply["target"], "model")
+        self.assertEqual(list(self.host.app.state.relay.conversations.rooms), [room_id])
+        followup = await self.host.send_conversation(room_id, "Continue with the review")
+        self.assertEqual(calls[-1], ("model", history + [
+            {"role": "user", "content": content}, {"role": "assistant", "content": "Reviewer reply"},
+            {"role": "user", "content": "Continue with the review"}]))
+        await self.guest.refresh()
+        self.assertEqual([data for kind, data in self.events if kind == "conversations"][-1][0], followup)
+        self.assertEqual(self.host.history_store.load("rooms")[room_id]["messages"], followup["messages"])
+
+    async def test_shared_model_override_rejects_unknown_foreign_and_nonmodel_targets_without_changing_history(self):
+        async def model(payload, source):
+            self.fail("A rejected target must not call a model")
+        await self.model(model)
+        invitation = await self.invitation()
+        await self.join(invitation)
+        relay = self.host.app.state.relay
+        relay.credentials["foreign-model"] = {"token": "x" * 48, "group": "another-group"}
+        relay.set_agent_profile("foreign-model", {"provider": "test", "model": "foreign-model"})
+        for target in ("missing", "foreign-model", self.host.active_id):
+            with self.subTest(target=target):
+                with self.assertRaisesRegex(RuntimeError, "Choose a model in this workspace"):
+                    await self.guest.send_conversation(invitation["conversation_id"], "Do not send", target=target)
+                room = relay.conversations.rooms[invitation["conversation_id"]]
+                self.assertEqual(room["messages"], [])
+                self.assertFalse(room["pending"])
+
     async def test_remote_model_metadata_is_authenticated_and_excludes_private_settings(self):
         invitation = await self.host.invite("guest", self.host.active_url)
         await self.guest.join(invitation["url"], invitation["token"])

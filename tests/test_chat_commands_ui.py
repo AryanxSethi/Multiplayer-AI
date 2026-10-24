@@ -1,4 +1,4 @@
-"""Exercise command dispatch, recipient isolation, and real composer keystrokes."""
+"""Exercise workspace commands, in-place model mentions, and composer keystrokes."""
 import os
 
 import pytest
@@ -14,6 +14,7 @@ from desktop_app.storage import Storage
 from desktop_app.widgets import Composer
 from desktop_app.window import MainWindow
 from network_a2a.orchestration import GENERAL_TARGET
+from network_a2a.persistence import HistoryStore
 from tests.test_desktop_runtime import MemoryVault
 
 
@@ -30,6 +31,7 @@ def window(app, tmp_path, monkeypatch):
     instance = MainWindow(Storage(tmp_path, MemoryVault()))
     instance.workspace_id = "original"
     instance.workspace_list = [{"id": "original"}]
+    instance.history_store = HistoryStore(tmp_path)
     instance.ready = True
     instance.agents = [{"id": "coder", "kind": "model", "model": "test-model", "online": True},
                        {"id": "alice", "kind": "peer", "online": True}]
@@ -123,8 +125,8 @@ def test_old_command_result_does_not_clear_or_display_in_another_workspace(windo
     assert window.composer.toPlainText() == "Draft in another workspace"
 
 
-@pytest.mark.parametrize("identity", ["coder", "alice"])
-def test_leading_mentions_target_agents_and_users_without_other_chat_context(window, identity):
+def test_user_mentions_open_a_direct_chat_without_other_chat_context(window):
+    identity = "alice"
     window.chats[GENERAL_TARGET]["history"] = [{"role": "user", "content": "Private general context"}]
     calls = []
     window.command = lambda *args, **kwargs: calls.append((args, kwargs))
@@ -138,6 +140,117 @@ def test_leading_mentions_target_agents_and_users_without_other_chat_context(win
     calls[0][1]["success"]({"text": "/set @coder as Writer", "provider": "test"})
     assert len(calls) == 1
     assert window.chats[identity]["messages"][-1] == ("assistant", "/set @coder as Writer")
+
+
+@pytest.mark.parametrize("current", [GENERAL_TARGET, "reviewer"])
+def test_model_mentions_keep_history_replies_and_followups_in_the_current_chat(window, current):
+    window.agents.append({"id": "reviewer", "kind": "model", "model": "review-model", "online": True})
+    window.select_agent(current)
+    chat = window.chats[current]
+    history = [{"role": "user", "content": "We are building a parser"},
+               {"role": "assistant", "content": "Which language?"}]
+    chat["history"] = list(history)
+    chat["messages"] = [(message["role"], message["content"]) for message in history]
+    chat["routing"] = {"mode": "direct", "reason": "Old routing"}
+    calls = []
+    window.command = lambda *args, **kwargs: calls.append((args, kwargs))
+    for identity, question, answer in (("coder", "Use Python", "Parser written"),
+                                       ("reviewer", "Review that parser", "Review complete")):
+        window.composer.setPlainText(f"@{identity} {question}")
+        window.send_message()
+        assert window.selected == current
+        assert calls[-1][0] == ("send", identity, {"messages": history + [{"role": "user", "content": question}]})
+        assert "routing" not in chat
+        calls[-1][1]["success"]({"text": answer})
+        history += [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]
+        assert chat["history"] == history
+        assert chat["messages"][-2:] == [("user", question), ("assistant", answer)]
+        assert chat["responders"][str(len(chat["messages"]) - 1)]["agent_id"] == identity
+    assert "coder" not in window.chats
+    assert set(window.chats) == {GENERAL_TARGET, current}
+    window.composer.setPlainText("What should we test next?")
+    window.send_message()
+    assert calls[-1][0] == ("send", current, {"messages": history + [
+        {"role": "user", "content": "What should we test next?"}]})
+    calls[-1][1]["success"]({"text": "Test invalid inputs", "provider": "test"})
+    saved = window.history_store.load("ui")["state"]
+    assert saved["selected"] == current
+    assert saved["chats"][current]["history"] == chat["history"]
+    assert "coder" not in saved["chats"]
+
+
+def test_bare_model_mention_keeps_the_current_conversation_and_draft(window):
+    calls = []
+    window.command = lambda *args, **kwargs: calls.append(args)
+    window.composer.setPlainText("@coder")
+    window.send_message()
+    assert window.selected == GENERAL_TARGET
+    assert window.composer.toPlainText() == "@coder"
+    assert "Add a message" in window.command_output.toPlainText()
+    assert "coder" not in window.chats
+    assert calls == []
+
+
+@pytest.mark.parametrize("pending", ["pending", "local_pending"])
+def test_model_mention_waits_for_the_current_conversation_reply(window, pending):
+    chat = window.chats[GENERAL_TARGET]
+    chat[pending] = True
+    calls = []
+    window.command = lambda *args, **kwargs: calls.append(args)
+    window.composer.setPlainText("@coder Another request")
+    window.send_message()
+    assert "Wait for this conversation" in window.command_output.toPlainText()
+    assert window.selected == GENERAL_TARGET
+    assert window.composer.toPlainText() == "@coder Another request"
+    assert calls == []
+
+
+def test_model_mention_uses_current_attachments_and_leaves_the_models_separate_draft_alone(window):
+    attachment = {"name": "notes.pdf", "content": [{"type": "document", "name": "notes.pdf", "text": "Parser notes"}]}
+    separate = {"messages": [], "history": [], "pending": True, "draft_attachments": [{"name": "separate.pdf"}]}
+    window.chats["coder"] = separate
+    window.chats[GENERAL_TARGET]["draft_attachments"] = [attachment]
+    calls = []
+    window.command = lambda *args, **kwargs: calls.append((args, kwargs))
+    window.composer.setPlainText("@coder Explain these notes")
+    window.send_message()
+    content = [{"type": "text", "text": "Explain these notes"}, *attachment["content"]]
+    assert calls[0][0] == ("send", "coder", {"messages": [{"role": "user", "content": content}]})
+    assert window.selected == GENERAL_TARGET
+    assert separate == {"messages": [], "history": [], "pending": True, "draft_attachments": [{"name": "separate.pdf"}]}
+    calls[0][1]["success"]({"text": "Notes explained", "provider": "test"})
+    assert window.chats[GENERAL_TARGET]["history"][0]["content"] == content
+
+
+def test_model_mention_stays_in_a_shared_conversation(window):
+    room_id = "conversation-" + "a" * 32
+    room = {"id": room_id, "target": GENERAL_TARGET, "title": "Team chat", "owner": window.identity, "members": ["alice"],
+            "messages": [], "revision": 0, "pending": False}
+    window.conversations[room_id] = room
+    window.select_agent(room_id)
+    calls = []
+    window.command = lambda *args, **kwargs: calls.append((args, kwargs))
+    window.composer.setPlainText("@coder Help the team")
+    window.send_message()
+    assert calls[0][0] == ("send_conversation", room_id, "Help the team", "coder")
+    assert window.selected == room_id
+    assert room["target"] == GENERAL_TARGET
+    assert "coder" not in window.chats
+    calls[0][1]["success"]({})
+    assert not window.chats[room_id]["local_pending"]
+
+
+def test_model_mention_reply_stays_in_its_original_chat_when_the_user_navigates(window):
+    calls = []
+    window.command = lambda *args, **kwargs: calls.append((args, kwargs))
+    window.composer.setPlainText("@coder Help me")
+    window.send_message()
+    window.select_agent("alice")
+    calls[0][1]["success"]({"text": "Here is the answer", "provider": "test"})
+    assert window.selected == "alice"
+    assert window.chats[GENERAL_TARGET]["messages"][-1] == ("assistant", "Here is the answer")
+    assert window.chats["alice"]["messages"] == []
+    assert "coder" not in window.chats
 
 
 @pytest.mark.parametrize("text,expected", [("Ask @alice to help", "Ask @alice to help"),
@@ -159,11 +272,11 @@ def test_unknown_mentions_and_recipient_drafts_are_preserved(window):
     assert window.composer.toPlainText() == "@missing hello"
     assert window.selected == GENERAL_TARGET
     attachment = {"name": "draft.pdf", "content": []}
-    window.chats["coder"] = {"messages": [], "history": [], "draft_attachments": [attachment]}
-    window.composer.setPlainText("@coder hello")
+    window.chats["alice"] = {"messages": [], "history": [], "draft_attachments": [attachment]}
+    window.composer.setPlainText("@alice hello")
     window.send_message()
     assert "draft attachments" in window.command_output.toPlainText()
-    assert window.chats["coder"]["draft_attachments"] == [attachment]
+    assert window.chats["alice"]["draft_attachments"] == [attachment]
     assert window.selected == GENERAL_TARGET
     assert calls == []
 
@@ -208,7 +321,7 @@ def test_agent_mentions_keep_agent_availability_over_membership(window, online, 
     window.send_message()
     if online or can_start:
         assert calls == [("send", "coder", {"text": "hello"})]
-        assert window.selected == "coder"
+        assert window.selected == GENERAL_TARGET
     else:
         assert "@coder is offline" in window.command_output.toPlainText()
         assert window.composer.toPlainText() == "@coder hello"
