@@ -1,10 +1,11 @@
 """Atomic local history storage, shared by the relay and desktop UI."""
 import json
 import sqlite3
+from collections import defaultdict, deque
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from .content import MAX_MESSAGE_BYTES, MAX_TEXT_BYTES, text_content
+from .content import MAX_MESSAGE_BYTES, MAX_TEXT_BYTES, content_summary, text_content
 
 
 class HistoryStore:
@@ -52,6 +53,24 @@ class HistoryStore:
         with closing(sqlite3.connect(self.path)) as database:
             database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             database.execute("VACUUM")
+
+
+def conversation_archive(chat):
+    """Recover the complete visible chat with original attachments and responder names."""
+    content = defaultdict(deque)
+    for message in chat.get("history", []):
+        content[(message["role"], content_summary(message["content"]))].append(message["content"])
+    archive = []
+    for index, (role, text) in enumerate(chat.get("messages", [])):
+        if role not in ("user", "assistant"):
+            continue
+        prepared = content[(role, text)]
+        message = {"role": role, "content": prepared.popleft() if prepared else text}
+        responder = chat.get("responders", {}).get(str(index))
+        if role == "assistant" and responder:
+            message["responder"] = responder
+        archive.append(message)
+    return archive
 
 
 def model_context(messages, limit=100, byte_limit=190000):
