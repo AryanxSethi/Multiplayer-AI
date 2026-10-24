@@ -153,7 +153,13 @@ On the invited device:
 
 1. Click **+ → Join a workspace**.
 2. Paste the invitation, or enter the relay address and device token.
-3. Join and wait for the connection. The workspace is remembered for next time.
+3. Join and wait for the connection. The app opens the workspace chat with its
+   existing messages, attachments, and replies. The workspace is remembered for
+   next time.
+
+Normal workspace invitations share the same persistent chat. The host's **Chat**
+entry opens that thread too, so everyone sees subsequent messages and AI replies.
+Additional devices join the same history instead of creating separate chats.
 
 Use a different invitation for each device. An identity already connected on one
 device cannot be reused on another. One joined workspace is supported at a time;
@@ -167,7 +173,8 @@ cloud hosting, router forwarding, or firewall rules.
 
 ## Share an AI conversation
 
-An ordinary device invitation grants workspace access. To share an existing chat:
+**Invite a device** shares the workspace's main chat and its existing history
+automatically. To invite someone to a separate model conversation:
 
 1. Open the model's chat and click **Invite to conversation**.
 2. Create a new invitation for the other device.

@@ -44,8 +44,9 @@ For Conda or development setup, see the [development guide](DOCUMENTATION.md#dev
    [Ollama](https://ollama.com/download) first, then use **Cookbook** to download
    and run a model.
 3. Click **Connect agent**. Chat opens automatically; send a message.
-4. To collaborate, use **Invite a device** for workspace access or
-   **Invite to conversation** to share the current chat and its history.
+4. Use **Invite a device** to bring someone into the workspace chat with its
+   existing history. They open directly into that chat after joining.
+   **Invite to conversation** shares a separate model conversation.
 
 The first imported model becomes the default. You can add more models and assign
 specialist roles later. See the [desktop guide](DESKTOP_GUIDE.md) for those steps.
