@@ -261,7 +261,10 @@ class Relay:
             return JSONResponse({"error": "Unauthorized"}, 401)
         owner = self.workspace.get("owner")
         coordinator = general_chat_state(self.orchestrator.models(source), self.workspace.get("coordinator"))["coordinator"]
+        conversation_id = next((room["id"] for room in self.conversations.rooms.values()
+                                if room.get("workspace_chat") and self.conversations.get(room["id"], source)), None)
         return JSONResponse({"id": self.workspace.get("id"), "name": self.workspace.get("name", "Shared workspace"),
+            "conversation_id": conversation_id,
             "coordinator": coordinator["id"] if coordinator else None,
             "owner": owner, "self": source, "members": [{"id": member, "online": self.agent_description(member)["online"],
                 "role": "Owner" if member == owner else "Model" if self.agent_description(member)["kind"] == "model" else "Member"}

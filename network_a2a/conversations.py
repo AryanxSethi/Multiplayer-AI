@@ -61,6 +61,16 @@ class Conversations:
             room["revision"] += 1
             self.save(room)
 
+    def workspace_chat(self, owner, messages=()):
+        """Reuse one persistent chat for ordinary workspace invitations."""
+        room = next((room for room in self.rooms.values()
+                     if room.get("workspace_chat") and room["owner"] == owner), None)
+        if room is None:
+            room = self.create(owner, GENERAL_TARGET, messages)
+            room["workspace_chat"] = True
+            self.save(room)
+        return room
+
     def remove_member(self, member):
         for room in self.rooms.values():
             if member in room["members"]:
