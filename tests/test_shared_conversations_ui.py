@@ -1,4 +1,5 @@
 """Exercise native invitation, join, and send controls on two desktop windows."""
+import json
 import tempfile
 import time
 import unittest
@@ -17,7 +18,7 @@ from desktop_app.dialogs import InviteDialog
 from tests.model_card import connect_model, join_workspace
 from desktop_app.markdown import MarkdownMessage
 from desktop_app.storage import Storage
-from desktop_app.window import MainWindow
+from desktop_app.window import CONVERSATIONS_PAGE, GENERAL_TARGET, WORKSPACES_PAGE, MainWindow
 from tests.test_desktop_runtime import MemoryVault
 
 
@@ -98,6 +99,48 @@ class SharedConversationUITests(unittest.TestCase):
         self.assertIn(("member:guest-laptop", "Guest message"), self.host.chats[room_id]["messages"])
         self.assertIn(("user", "Guest message"), self.guest.chats[room_id]["messages"])
         invite.close()
+
+    def check_workspace_invitation(self, paste):
+        async def model(request):
+            body = await request.json()
+            return JSONResponse({"choices": [{"message": {"content": "AI: " + body["messages"][-1]["content"]}}]})
+        connect_model(self, self.host, "shared-model", handler=model)
+        self.host.select_agent(GENERAL_TARGET)
+        self.send(self.host, "Our shared project is Aurora")
+        self.host.invite_device()
+        self.host.workspace_invite_name.setText("guest-laptop")
+        self.host.workspace_invite_url.setText(f"ws://127.0.0.1:{self.host.port}/connect")
+        self.host.workspace_invite_create_button.click()
+        self.wait(lambda: bool(self.host.workspace_invite_result.toPlainText()))
+        invitation = json.loads(self.host.workspace_invite_result.toPlainText())
+        room_id = invitation["conversation_id"]
+        self.guest.navigate(WORKSPACES_PAGE)
+        if paste:
+            self.guest.workspace_invitation.setPlainText(json.dumps(invitation))
+        else:
+            self.guest.workspace_relay.setText(invitation["url"])
+            self.guest.workspace_token.setText(invitation["token"])
+            self.guest.workspace_lan.setChecked(True)
+        self.guest.workspace_join_button.click()
+        self.wait(lambda: not self.guest.workspace_busy["join"])
+        self.assertEqual(self.guest.selected, room_id)
+        self.assertEqual(self.guest.stack.currentIndex(), CONVERSATIONS_PAGE)
+        self.assertIn(("assistant", "AI: Our shared project is Aurora"), self.guest.chats[room_id]["messages"])
+        self.host.select_agent(GENERAL_TARGET)
+        self.assertEqual(self.host.selected, room_id)
+        self.assertEqual(self.host.conversation_picker.findData(GENERAL_TARGET), -1)
+        self.send(self.guest, "Continue our project")
+        self.wait(lambda: ("assistant", "AI: Continue our project") in self.host.chats[room_id]["messages"])
+        self.send(self.host, "Host follow-up")
+        self.wait(lambda: ("assistant", "AI: Host follow-up") in self.guest.chats[room_id]["messages"])
+        self.assertEqual([text for _, text in self.host.chats[room_id]["messages"]],
+                         [text for _, text in self.guest.chats[room_id]["messages"]])
+
+    def test_workspace_invitation_opens_shared_chat_with_existing_history(self):
+        self.check_workspace_invitation(paste=True)
+
+    def test_joining_with_just_address_and_token_opens_the_same_shared_chat(self):
+        self.check_workspace_invitation(paste=False)
 
     def test_model_replies_render_markdown_without_changing_conversation_history(self):
         text = "## Model heading\n\nHere is **bold text** and `inline code`."

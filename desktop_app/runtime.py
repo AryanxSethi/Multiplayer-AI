@@ -420,8 +420,11 @@ class DesktopRuntime:
                 self.storage.vault.set("remote-token", token)
             self.save_catalog()
             await self.snapshot()
+            if not conversation_id:
+                conversation_id = self.cache.get(entry["id"], {}).get("workspace_info", {}).get("conversation_id")
             if conversation_id:
                 self.emit("conversation_joined", conversation_id)
+            return {"conversation_id": conversation_id}
 
     def connected_engine(self):
         if self.entry()["kind"] == "remote" and not self.engine.remote:

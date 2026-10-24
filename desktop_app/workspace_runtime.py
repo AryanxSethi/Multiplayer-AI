@@ -16,7 +16,7 @@ import uvicorn
 from network_a2a.adapters import PROVIDERS, ProviderConfig, ProviderError, create_adapter
 from network_a2a.client import AgentClient, direct_relay_connection
 from network_a2a.server import Relay, create_app
-from network_a2a.persistence import HistoryStore
+from network_a2a.persistence import HistoryStore, conversation_archive
 from network_a2a.content import MAX_FRAME_BYTES, content_summary
 from network_a2a.web_search import create_search
 from network_a2a.orchestration import GENERAL_TARGET, ORCHESTRATION_TIMEOUT, routing_profile
@@ -1089,6 +1089,23 @@ class WorkspaceRuntime:
             self.storage.save_credentials(updated)
             self.credentials = updated
             self.app.state.relay.credentials = updated
+            workspace_chat = next((room for room in conversations.rooms.values() if room.get("workspace_chat")), None)
+            if target == GENERAL_TARGET and not conversation_id:
+                if messages is None:
+                    state = self.history_store.load("ui").get("state", {})
+                    chats = state.get("chats", {})
+                    chat = chats.get(GENERAL_TARGET, {})
+                    selected = state.get("selected")
+                    if not chat.get("messages") and selected and self.app.state.relay.agent_description(selected)["kind"] == "model":
+                        chat = chats.get(selected, {})
+                    messages = conversation_archive(chat)
+                workspace_chat = conversations.workspace_chat(self.active_id, messages)
+                conversation_id = workspace_chat["id"]
+                for member in self.credentials:
+                    if self.app.state.relay.allowed(self.active_id, member) and self.app.state.relay.agent_description(member)["kind"] != "model":
+                        conversations.invite(conversation_id, self.active_id, member)
+            elif not target and not conversation_id and workspace_chat:
+                conversation_id = workspace_chat["id"]
             if target and not conversation_id:
                 conversation_id = conversations.create(self.active_id, target, messages or ())["id"]
             if conversation_id:
@@ -1162,6 +1179,11 @@ class WorkspaceRuntime:
         invitation["workspace_name"] = recorded["workspace_name"]
         if recorded.get("conversation_id"):
             invitation["conversation_id"] = recorded["conversation_id"]
+        else:
+            room = next((room for room in self.app.state.relay.conversations.rooms.values()
+                         if room.get("workspace_chat") and agent_id in room["members"]), None)
+            if room:
+                invitation["conversation_id"] = room["id"]
         return invitation
 
     async def remove_member(self, member):

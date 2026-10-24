@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog,
     QVBoxLayout,
     QWidget)
 
-from network_a2a.persistence import HistoryStore, model_context
+from network_a2a.persistence import HistoryStore, conversation_archive, model_context
 from network_a2a.content import MAX_MESSAGE_BYTES, content_summary, validate_content
 from network_a2a.adapters import PROVIDERS
 from network_a2a.web_search import validate_search_settings
@@ -1742,12 +1742,17 @@ class MainWindow(QMainWindow):
         self.render_imported_models()
 
     def refresh_conversation_picker(self):
-        choices = [("Chat", GENERAL_TARGET)]
+        workspace_chat = self.workspace_chat_id()
+        choices = [("Chat", workspace_chat or GENERAL_TARGET)]
         for room in self.conversations.values():
+            if room["id"] == workspace_chat:
+                continue
             unread = self.chats.get(room["id"], {}).get("unread", 0)
             choices.append((room["title"] + (f" ({unread} new)" if unread else ""), room["id"]))
         included = {target for _, target in choices}
         for target, chat in self.chats.items():
+            if workspace_chat and target == GENERAL_TARGET:
+                continue
             if target not in included and (chat.get("messages") or target == self.selected):
                 unread = chat.get("unread", 0)
                 choices.append((target + (f" ({unread} new)" if unread else ""), target))
@@ -2075,7 +2080,13 @@ class MainWindow(QMainWindow):
             + ("action on offer" if len(entries) == 1 else "actions on offer")
             if entries else "There is nothing to do to this conversation yet")
 
+    def workspace_chat_id(self):
+        """The shared thread used by the workspace's main Chat entry."""
+        return next((room["id"] for room in self.conversations.values() if room.get("workspace_chat")), None)
+
     def select_agent(self, agent_id):
+        if agent_id == GENERAL_TARGET:
+            agent_id = self.workspace_chat_id() or agent_id
         self.sidebar_expanded = False
         self.apply_sidebar_density()
         self.selected = agent_id
@@ -3116,6 +3127,9 @@ class MainWindow(QMainWindow):
             changed = set(self.conversations) != {room["id"] for room in data}
             self.conversations = {room["id"]: room for room in data}
             selected_changed = False
+            if self.selected in (None, GENERAL_TARGET) and self.workspace_chat_id():
+                self.selected = self.workspace_chat_id()
+                selected_changed = True
             # A room that is no longer listed is gone: deleted on another
             # device, or the reader was removed from it. This used to leave the
             # matching chat behind, and leave ``selected`` pointing at it, so
@@ -3778,8 +3792,9 @@ class MainWindow(QMainWindow):
         column.setContentsMargins(22, 20, 22, 20)
         column.addWidget(label("Invite a device", "heading"))
         column.addWidget(label(
-            "Creates an invitation to share with another laptop or desktop. "
-            "Each device gets its own identity, and the invitation is private: "
+            "Invite another laptop or desktop into this workspace's shared chat, "
+            "including its existing messages and attachments. Each device gets "
+            "its own identity, and the invitation is private: "
             "send it only to the machine you mean.", "muted", True))
         column.addSpacing(12)
         self.workspace_invite_name = QLineEdit()
@@ -4134,17 +4149,8 @@ class MainWindow(QMainWindow):
                 self.workspace_invitation.clear()
                 self.clear_card_message(self.workspace_join_line)
                 self.render_workspace_page()
-                if conversation_id:
-                    self.select_agent(conversation_id)
-                    return
-                peer = next((agent for agent in self.agents
-                             if agent["online"] and agent["id"] != self.identity), None)
-                if peer:
-                    self.select_agent(peer["id"])
-                else:
-                    self.navigate(AGENTS_PAGE)
-                    self.notice("Workspace joined. No other devices are online yet. "
-                                "Keep the host app open and connect an agent to begin.")
+                shared_chat = conversation_id or (result or {}).get("conversation_id") or self.workspace_chat_id()
+                self.select_agent(shared_chat or GENERAL_TARGET)
 
             self.command("join", self.workspace_relay.text().strip(),
                          self.workspace_token.text().strip(),
@@ -4236,10 +4242,11 @@ class MainWindow(QMainWindow):
             self.workspace_invite_copy_button.show()
             self.render_workspace_page()
 
+        self.persist_history()
         self.command("invite", self.workspace_invite_name.text().strip(),
                      self.workspace_invite_url.text().strip(),
                      self.workspace_invite_lan.isChecked(),
-                     None, None, None, success=success, failure=failure)
+                     None, GENERAL_TARGET, None, success=success, failure=failure)
 
     def copy_invitation(self):
         QApplication.clipboard().setText(self.workspace_invite_result.toPlainText())
@@ -4350,10 +4357,7 @@ class MainWindow(QMainWindow):
             InviteDialog(self, conversation_id=self.selected).exec()
         else:
             chat = self.chats.get(self.selected, {})
-            history = [{"role": role, "content": text,
-                        **({"responder": chat["responders"][str(index)]}
-                           if role == "assistant" and str(index) in chat.get("responders", {}) else {})}
-                       for index, (role, text) in enumerate(chat.get("messages", [])) if role in ("user", "assistant")]
+            history = conversation_archive(chat)
             InviteDialog(self, target=self.selected, messages=history).exec()
 
     def closeEvent(self, event):

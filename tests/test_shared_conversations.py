@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 
 from desktop_app.runtime import DesktopRuntime
 from desktop_app.storage import Storage
+from network_a2a.content import content_summary
+from network_a2a.orchestration import GENERAL_TARGET
 from tests.test_desktop_runtime import MemoryVault
 
 
@@ -192,6 +194,44 @@ class SharedConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rooms[0], host_reply)
         self.assertEqual(rooms[0]["messages"][-2]["from"], self.host.active_id)
         self.assertNotIn(invitation["token"], json.dumps(rooms))
+
+    async def test_workspace_invites_share_one_chat_with_history_and_join_without_a_conversation_id(self):
+        calls = []
+        async def model(payload, source):
+            calls.append(payload["messages"])
+            return {"text": "Shared answer", "provider": "test"}
+        await self.model(model)
+        relay = self.host.app.state.relay
+        relay.set_agent_profile("model", {"provider": "test", "model": "test-model"})
+        relay.workspace.update(models=["model"], coordinator="model")
+        content = [{"type": "text", "text": "Our project notes"},
+                   {"type": "document", "name": "notes.pdf", "text": "Project Aurora"}]
+        history = [{"role": "user", "content": content}, {"role": "assistant", "content": "Notes understood"}]
+        responder = {"agent_id": "model", "model": "test-model", "provider": "test"}
+        self.host.history_store.save("ui", "state", {"selected": GENERAL_TARGET, "chats": {GENERAL_TARGET: {
+            "messages": [["user", content_summary(content)], ["assistant", "Notes understood"]],
+            "history": history, "responders": {"1": responder}}}})
+        old = await self.host.invite("older-member", self.host.active_url)
+        invitation = await self.host.invite("guest", self.host.active_url, target=GENERAL_TARGET)
+        room_id = invitation["conversation_id"]
+        other = await self.host.invite("another-member", self.host.active_url, target=GENERAL_TARGET)
+        self.assertEqual(other["conversation_id"], room_id)
+        self.assertEqual((await self.host.invitation_for("older-member"))["conversation_id"], room_id)
+        result = await self.guest.join(invitation["url"], invitation["token"])
+        self.assertEqual(result["conversation_id"], room_id)
+        self.assertEqual([data for kind, data in self.events if kind == "conversation_joined"][-1], room_id)
+        rooms = [data for kind, data in self.events if kind == "conversations"][-1]
+        self.assertEqual(len(rooms), 1)
+        self.assertTrue(rooms[0]["workspace_chat"])
+        self.assertEqual([message["content"] for message in rooms[0]["messages"]], [content, "Notes understood"])
+        self.assertEqual(rooms[0]["messages"][-1]["responder"], responder)
+        self.assertIn(old["agent_id"], rooms[0]["members"])
+        await self.guest.send_conversation(room_id, "What is our project?")
+        self.assertEqual(calls[-1], history + [{"role": "user", "content": "What is our project?"}])
+        saved = self.host.history_store.load("rooms")[room_id]
+        self.assertTrue(saved["workspace_chat"])
+        self.assertEqual(saved["messages"][-1]["content"], "Shared answer")
+        self.assertEqual(len(relay.conversations.rooms), 1)
 
     async def test_large_image_crosses_http_and_websocket_and_is_saved_for_followups(self):
         calls = []
