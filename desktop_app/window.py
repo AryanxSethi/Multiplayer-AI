@@ -2044,17 +2044,18 @@ class MainWindow(QMainWindow):
         agent = self.chat_target_agent()
         chat = self.chats.get(self.selected, {})
         pending = chat.get("pending") or chat.get("local_pending")
+        sending = chat.get("local_pending") if room else pending
         can_start = bool(agent and agent.get("can_start"))
         text = self.composer.toPlainText()
         typed_action = is_command(text) or bool(leading_mention(text))
         command_pending = self.command_request is not None and self.command_request[0] == self.workspace_id
-        self.send_button.setEnabled(bool((typed_action or agent and (agent["online"] or can_start) and not pending)
+        self.send_button.setEnabled(bool((typed_action or agent and (agent["online"] or can_start) and not sending)
                                         and not command_pending and not self.preparing_files))
-        self.attach_button.setEnabled(bool(self.ready and agent and self.is_model_agent(agent) and not pending and not self.preparing_files))
+        self.attach_button.setEnabled(bool(self.ready and agent and self.is_model_agent(agent) and not sending and not self.preparing_files))
         count = len(self.model_agents(chat_only=True))
         self.chat_agent_count.setText(f"{count} " + ("agent" if count == 1 else "agents"))
         self.chat_agent_count.setEnabled(bool(self.selected))
-        self.send_button.setText("Working…" if pending else "Send request  ↑")
+        self.send_button.setText("Working…" if sending else "Send request  ↑")
         self.chat_title.setText(room["title"] if room else "Chat" if target == GENERAL_TARGET else self.selected or "Choose an agent")
         subtitle = "Your agent is working…" if pending else "Online · Ready to collaborate" if agent and agent["online"] else "Start this agent on its device to continue" if agent else "Choose a connected agent to begin"
         if agent and not agent["online"] and can_start:
@@ -2067,6 +2068,8 @@ class MainWindow(QMainWindow):
             else:
                 subtitle = "Send a message to start Ollama automatically" if can_start else "Connect or start a model to chat"
         self.chat_subtitle.setText((f"Shared with {len(room['members'])} devices · " if room else "") + subtitle)
+        if room and pending and not sending:
+            self.chat_subtitle.setText("AI replying · send another message to queue the next turn")
         self.share_conversation_button.setEnabled(bool(self.ready and not self.remote and agent and agent["online"] and not pending))
         # The header's one conversation button is always the same widget. It
         # used to be two, rebuilt from scratch on every agents poll, and the
@@ -2737,7 +2740,7 @@ class MainWindow(QMainWindow):
                 attached = source.get("draft_attachments", [])
                 text = mention[1]
                 if self.is_model_agent(recipient):
-                    if source.get("pending") or source.get("local_pending"):
+                    if source.get("local_pending") or source.get("pending") and self.selected not in self.conversations:
                         raise ValueError("Wait for this conversation's current reply before sending another message.")
                     if not text and not attached:
                         self.show_command_result(f"Add a message after @{identity} to ask it in this conversation.")
@@ -2820,7 +2823,7 @@ class MainWindow(QMainWindow):
                 self.notice(message, error=True)
                 self.show_chat_error(workspace_id, target)
             arguments = (target, content, recipient_id) if recipient_id else (target, content)
-            self.command("send_conversation", *arguments, success=finished, failure=failed)
+            self.command("send_conversation", *arguments, workspace_id=workspace_id, success=finished, failure=failed)
             return
         payload = {"messages": model_context([*chat["history"], {"role": "user", "content": content}])} if chat["history"] or attached else {"text": text}
         chat["pending"] = True
@@ -2857,7 +2860,7 @@ class MainWindow(QMainWindow):
             chat["messages"].append(("error", message + "\nThe app did not replay this request."))
             self.persist_reply(workspace_id, store, target, chat)
             self.show_chat_error(workspace_id, target)
-        self.command("send", request_target, payload, success=success, failure=failure)
+        self.command("send", request_target, payload, workspace_id=workspace_id, success=success, failure=failure)
 
     def show_chat_error(self, workspace_id, target):
         """Open the conversation that failed, including after a workspace switch."""
@@ -2967,7 +2970,7 @@ class MainWindow(QMainWindow):
         if held is not None:
             self.notice(held, alert=True)
 
-    def command(self, method, *args, success=None, failure=None):
+    def command(self, method, *args, success=None, failure=None, **kwargs):
         if not self.ready and method != "close":
             self.notice("Your network is still starting. Please wait a moment.")
             if failure:
@@ -2982,7 +2985,7 @@ class MainWindow(QMainWindow):
         # flag is worse than a failed request, because the failed request says
         # what went wrong. What the reader gets instead is the honest status
         # line and a Retry beside it.
-        request_id = self.network.submit(method, *args)
+        request_id = self.network.submit(method, *args, **kwargs)
         self.callbacks[request_id] = (success, failure)
         self.busy_changed(len(self.callbacks) + 1)
 

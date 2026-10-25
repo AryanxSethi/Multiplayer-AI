@@ -355,14 +355,14 @@ class SharedConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.guest.active_id, identity)
         self.assertFalse(self.guest.remote)
 
-    async def test_simultaneous_message_is_rejected_without_duplicate_model_call(self):
+    async def test_simultaneous_messages_keep_their_senders_and_share_ordered_context(self):
         entered, release = asyncio.Event(), asyncio.Event()
         calls = []
         async def model(payload, source):
-            calls.append(payload)
+            calls.append((source, payload["messages"]))
             entered.set()
             await release.wait()
-            return {"text": "one reply"}
+            return {"text": "AI: " + payload["messages"][-1]["content"]}
         await self.model(model)
         invitation = await self.invitation()
         await self.join(invitation)
@@ -372,13 +372,69 @@ class SharedConversationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(entered.wait(), 3)
             await self.guest.refresh()
             self.assertTrue([data for kind, data in self.events if kind == "conversations"][-1][0]["pending"])
-            with self.assertRaisesRegex(RuntimeError, "Wait for"):
-                await self.host.send_conversation(room_id, "Concurrent")
+            concurrent = asyncio.create_task(self.host.send_conversation(room_id, "Concurrent"))
+            await asyncio.sleep(.1)
+            self.assertFalse(concurrent.done())
+            self.assertEqual(len(calls), 1)
         finally:
             release.set()
             await request
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(len(self.host.app.state.relay.conversations.rooms[room_id]["messages"]), 2)
+        result = await asyncio.wait_for(concurrent, 3)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([source for source, _ in calls], [self.guest.active_id, self.host.active_id])
+        self.assertEqual(calls[1][1], [{"role": "user", "content": "First"},
+                                     {"role": "assistant", "content": "AI: First"},
+                                     {"role": "user", "content": "Concurrent"}])
+        await self.guest.refresh()
+        self.assertEqual([data for kind, data in self.events if kind == "conversations"][-1][0], result)
+        self.assertEqual([message["content"] for message in result["messages"]],
+                         ["First", "AI: First", "Concurrent", "AI: Concurrent"])
+        self.assertFalse(result["pending"])
+
+    async def test_queued_sender_removed_from_conversation_is_not_invoked(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        async def model(payload, source):
+            calls.append(source)
+            entered.set()
+            await release.wait()
+            return {"text": "Done"}
+        await self.model(model)
+        invitation = await self.invitation()
+        await self.join(invitation)
+        room_id = invitation["conversation_id"]
+        first = asyncio.create_task(self.host.send_conversation(room_id, "Host"))
+        queued = None
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            queued = asyncio.create_task(self.guest.send_conversation(room_id, "Guest"))
+            await asyncio.sleep(.1)
+            self.host.app.state.relay.conversations.remove_member(self.guest.active_id)
+        finally:
+            release.set()
+            await first
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            await asyncio.wait_for(queued, 3)
+        self.assertEqual(calls, [self.host.active_id])
+
+    async def test_sends_use_the_originating_workspace_after_switching_profiles(self):
+        calls = []
+        async def model(payload, source):
+            calls.append(source)
+            return {"text": "Original workspace reply"}
+        await self.model(model)
+        invitation = await self.invitation()
+        await self.join(invitation)
+        room_id = invitation["conversation_id"]
+        guest_workspace, guest_identity = self.guest.active_workspace_id, self.guest.active_id
+        host_workspace = self.host.active_workspace_id
+        await self.guest.create_workspace("Another guest profile")
+        await self.host.create_workspace("Another host profile")
+        result = await self.guest.send_conversation(room_id, "Shared", workspace_id=guest_workspace)
+        self.assertEqual(result["messages"][0]["from"], guest_identity)
+        reply = await self.host.send("model", {"text": "Direct"}, workspace_id=host_workspace)
+        self.assertEqual(reply["text"], "Original workspace reply")
+        self.assertEqual(calls[0], guest_identity)
 
     async def test_saved_guest_recovers_conversation_after_restarting(self):
         async def model(payload, source):

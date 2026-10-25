@@ -1,4 +1,5 @@
 """Shared conversation state owned by the workspace relay."""
+import asyncio
 import json
 from uuid import uuid4
 
@@ -6,7 +7,7 @@ from starlette.responses import JSONResponse
 
 from .persistence import model_context
 from .content import MAX_MESSAGE_BYTES, images, validate_content
-from .orchestration import GENERAL_TARGET, is_greeting
+from .orchestration import GENERAL_TARGET, ORCHESTRATION_TIMEOUT, is_greeting
 
 
 class Conversations:
@@ -14,6 +15,8 @@ class Conversations:
         self.relay = relay
         self.store = store
         self.rooms = store.load("rooms") if store else {}
+        self.send_locks = {}
+        self.queued_sends = {}
         for room in self.rooms.values():
             if room["target"] == GENERAL_TARGET and room["title"] in ("General chat · Jev", "General chat"):
                 room["title"] = "Chat"
@@ -92,6 +95,7 @@ class Conversations:
         if room["owner"] != source:
             return "Only the conversation's host can delete it. Leave it instead."
         self.rooms.pop(conversation_id, None)
+        self.send_locks.pop(conversation_id, None)
         # The record goes with it. Left behind, the room would come back the
         # next time the relay started.
         if self.store:
@@ -206,8 +210,34 @@ class Conversations:
         if "target" in payload and (not self.relay.allowed(source, target)
                 or self.relay.agent_description(target)["kind"] != "model"):
             return JSONResponse({"error": "Choose a model in this workspace"}, 403)
-        if room["pending"]:
-            return JSONResponse({"error": "Wait for the current AI reply before sending another message"}, 409)
+        room_id = room["id"]
+        if self.queued_sends.get(room_id, 0) >= 32:
+            return JSONResponse({"error": "This conversation's message queue is full. Try again shortly."}, 429)
+        lock = self.send_locks.setdefault(room_id, asyncio.Lock())
+        self.queued_sends[room_id] = self.queued_sends.get(room_id, 0) + 1
+        acquired = False
+        try:
+            try:
+                await asyncio.wait_for(lock.acquire(), ORCHESTRATION_TIMEOUT)
+                acquired = True
+            except TimeoutError:
+                return JSONResponse({"error": "The conversation is still busy. Your message was not sent."}, 503)
+            # Membership or the room may have changed while another reply ran.
+            if self.get(room_id, source) is not room:
+                return JSONResponse({"error": "Conversation is unavailable for this device"}, 404)
+            if "target" in payload and (not self.relay.allowed(source, target)
+                    or self.relay.agent_description(target)["kind"] != "model"):
+                return JSONResponse({"error": "Choose a model in this workspace"}, 403)
+            return await self._reply(room, source, text, target)
+        finally:
+            self.queued_sends[room_id] -= 1
+            if not self.queued_sends[room_id]:
+                self.queued_sends.pop(room_id)
+            if acquired:
+                lock.release()
+
+    async def _reply(self, room, source, text, target):
+        """Serialize model calls so each turn sees the preceding completed reply."""
         general = target == GENERAL_TARGET
         room["pending"] = True
         try:
@@ -253,5 +283,6 @@ class Conversations:
         finally:
             room["pending"] = False
             room["revision"] += 1
-            self.save(room)
+            if self.rooms.get(room["id"]) is room:
+                self.save(room)
         return JSONResponse(room)

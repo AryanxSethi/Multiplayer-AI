@@ -1,5 +1,6 @@
 """Exercise native invitation, join, and send controls on two desktop windows."""
 import json
+import threading
 import tempfile
 import time
 import unittest
@@ -141,6 +142,55 @@ class SharedConversationUITests(unittest.TestCase):
 
     def test_joining_with_just_address_and_token_opens_the_same_shared_chat(self):
         self.check_workspace_invitation(paste=False)
+
+    def test_default_device_invite_and_overlapping_chat_sends_stay_in_one_thread(self):
+        import asyncio
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        async def model(request):
+            body = await request.json()
+            calls.append(body["messages"])
+            if len(calls) == 1:
+                entered.set()
+                while not release.is_set():
+                    await asyncio.sleep(.01)
+            return JSONResponse({"choices": [{"message": {
+                "content": "AI: " + body["messages"][-1]["content"]}}]})
+
+        connect_model(self, self.host, "shared-model", handler=model)
+        invite = InviteDialog(self.host)
+        invite.show()
+        invite.name.setText("guest-laptop")
+        invite.url.setText(f"ws://127.0.0.1:{self.host.port}/connect")
+        invite.create_button.click()
+        self.wait(lambda: bool(invite.result.toPlainText()))
+        room_id = invite.conversation_id
+        self.assertIsNotNone(room_id)
+        join_workspace(self, self.guest, invite.result.toPlainText())
+        self.wait(lambda: self.guest.selected == room_id)
+        try:
+            self.guest.composer.setPlainText("From the guest")
+            self.guest.send_button.click()
+            self.wait(entered.is_set)
+            self.host.command("refresh")
+            self.wait(lambda: self.host.chats[room_id].get("pending"))
+            self.assertTrue(self.host.send_button.isEnabled())
+            self.host.composer.setPlainText("From the host")
+            self.host.send_button.click()
+            self.wait(lambda: self.host.chats[room_id].get("local_pending"))
+        finally:
+            release.set()
+            invite.close()
+        expected = ["From the guest", "AI: From the guest", "From the host", "AI: From the host"]
+        for window in (self.host, self.guest):
+            self.wait(lambda: [text for _, text in window.chats[room_id]["messages"]] == expected)
+            self.assertEqual(window.selected, room_id)
+            self.assertNotIn("guest-laptop", window.chats)
+        self.assertIn(("user", "From the guest"), self.guest.chats[room_id]["messages"])
+        self.assertIn(("member:guest-laptop", "From the guest"), self.host.chats[room_id]["messages"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([message["content"] for message in calls[1]], expected[:3])
 
     def test_model_replies_render_markdown_without_changing_conversation_history(self):
         text = "## Model heading\n\nHere is **bold text** and `inline code`."

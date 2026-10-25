@@ -3,6 +3,7 @@ import json
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QLineEdit, QPlainTextEdit, QVBoxLayout
 
+from network_a2a.orchestration import GENERAL_TARGET
 from .lan import lan_addresses
 from .widgets import Select, TickCheckBox, action, label
 
@@ -143,7 +144,8 @@ class InviteDialog(QDialog):
                 self.error.setText(message)
                 self.create_button.setEnabled(True)
         self.window.command("invite", self.name.text().strip(), self.url.text().strip(), self.lan.isChecked(),
-                            self.conversation_id, self.target, self.messages, success=success, failure=failure)
+                            self.conversation_id, self.target or (GENERAL_TARGET if not self.conversation_id else None),
+                            self.messages, success=success, failure=failure)
 
     def copy(self):
         from PySide6.QtWidgets import QApplication
