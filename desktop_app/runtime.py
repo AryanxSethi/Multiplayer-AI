@@ -426,22 +426,24 @@ class DesktopRuntime:
                 self.emit("conversation_joined", conversation_id)
             return {"conversation_id": conversation_id}
 
-    def connected_engine(self):
-        if self.entry()["kind"] == "remote" and not self.engine.remote:
+    def connected_engine(self, workspace_id=None):
+        entry = self.entry(workspace_id)
+        engine = self.engines[entry["id"]]
+        if entry["kind"] == "remote" and not engine.remote:
             raise ConnectionError("This workspace is offline. Keep its host app open to reconnect.")
-        return self.engine
+        return engine
 
-    async def send(self, target, payload):
-        return await self.connected_engine().send(target, payload)
+    async def send(self, target, payload, workspace_id=None):
+        return await self.connected_engine(workspace_id).send(target, payload)
 
     async def chat_command(self, text, workspace_id=None):
         if workspace_id is not None and workspace_id != self.active_workspace_id:
             raise ValueError("Workspace changed before the command ran. Send it again in the intended workspace.")
         return await self.connected_engine().chat_command(text)
 
-    async def send_conversation(self, conversation_id, text, target=None):
+    async def send_conversation(self, conversation_id, text, target=None, workspace_id=None):
         """Send in the current shared conversation, optionally choosing its responder."""
-        return await self.connected_engine().send_conversation(conversation_id, text, target)
+        return await self.connected_engine(workspace_id).send_conversation(conversation_id, text, target)
 
     async def save_agent(self, profile, key=None, search_key=None):
         """Delegate profile and separate credential updates to the connected engine."""

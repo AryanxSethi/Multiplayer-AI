@@ -854,7 +854,7 @@ class WorkspaceRuntime:
         try:
             response = await self.relay_http().post(base + f"/conversations/{conversation_id}/messages",
                 json=payload,
-                headers={"Authorization": "Bearer " + self.active_token}, timeout=ORCHESTRATION_TIMEOUT + 5)
+                headers={"Authorization": "Bearer " + self.active_token}, timeout=2 * ORCHESTRATION_TIMEOUT + 5)
             if generation != self.generation:
                 raise RuntimeError("Workspace changed while the request was running; it was not replayed")
             await self.refresh()
