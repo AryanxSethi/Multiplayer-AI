@@ -252,8 +252,9 @@ python scripts/build_docs.py
 ```
 
 The builder uses Qt from the desktop dependencies. It combines the five guides
-into `docs.html`, rewrites guide links to internal anchors, and runs without a
-visible window. Keep the generated page in sync: the desktop **?** button and
+into `docs.html`, rewrites guide links to internal anchors, embeds local images
+so screenshots work offline and in desktop bundles, and runs without a visible
+window. Keep the generated page in sync: the desktop **?** button and
 packaged app use it. To add a guide, update `GUIDES` in `scripts/build_docs.py`.
 
 ## Current limits

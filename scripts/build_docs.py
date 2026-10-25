@@ -1,5 +1,7 @@
 """Build the offline documentation page from the project's Markdown guides."""
+import base64
 import html
+import mimetypes
 import os
 from pathlib import Path
 import re
@@ -45,7 +47,18 @@ def render_guide(key, filename):
                 return f'href="#{guide_key}{suffix}"'
         return match.group(0)
 
-    return re.sub(r'href="([^"]+)"', link, body)
+    body = re.sub(r'href="([^"]+)"', link, body)
+
+    def embed_image(match):
+        """Keep local guide images available in the standalone desktop help file."""
+        path = ROOT / html.unescape(match.group(1))
+        media_type, _ = mimetypes.guess_type(path.name)
+        if not media_type or not media_type.startswith("image/") or not path.is_file():
+            return match.group(0)
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f'src="data:{media_type};base64,{encoded}"'
+
+    return re.sub(r'src="([^"]+)"', embed_image, body)
 
 
 def main():
