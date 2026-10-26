@@ -202,6 +202,16 @@ These are planned directions, not features available in the current release.
   data handling, input/output policy checks, and approval controls for future
   tool actions, backed by safety evaluations.
 
+## AI usage during development
+
+AI tools assisted with the following parts of the project:
+
+| Tool or model | Contribution |
+| --- | --- |
+| CodeRabbit | Documentation |
+| ChatGPT 6 Astra | UI development |
+| Open-source models, including Qwen Coder 37B Instruct | Agent-to-agent (A2A) logic and server configuration |
+
 ## Choose a guide
 
 | I want to... | Read |
